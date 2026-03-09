@@ -1,0 +1,65 @@
+{
+  "ticker": "SPY",
+  "test_date": "2026-03-08",
+  "trading_days": 180,
+  "fixed_ic": {
+    "strategy": "iron_condor",
+    "total_pnl": 3129.99,
+    "profit_factor": 1.55,
+    "win_rate": 67.77777777777779
+  },
+  "adaptive": {
+    "trades": 177,
+    "win_rate": 89.83050847457628,
+    "total_pnl": 13460.57,
+    "profit_factor": 3.03,
+    "max_drawdown_pct": 1.72,
+    "sharpe_ratio": 7.13,
+    "total_return_pct": 26.92,
+    "annualized_return_pct": 37.7,
+    "monthly_pnl": {
+      "2025-06": 169.83,
+      "2025-07": 615.1,
+      "2025-08": 2789.6,
+      "2025-09": 1234.99,
+      "2025-10": 2407.01,
+      "2025-11": 886.73,
+      "2025-12": 1297.95,
+      "2026-01": 2449.57,
+      "2026-02": 1626.46,
+      "2026-03": -16.67
+    }
+  },
+  "regime_picks": {
+    "GREEN": {
+      "strategy": "iron_condor",
+      "params": {
+        "strategy": "iron_condor",
+        "delta": 0.12,
+        "stop": 3.0,
+        "tp": 0.75,
+        "width": 2.0,
+        "entry": "30-60m"
+      },
+      "stats": null
+    },
+    "YELLOW": {
+      "strategy": "call_credit",
+      "params": {
+        "strategy": "call_credit",
+        "delta": 0.18,
+        "stop": 3.0,
+        "tp": 0.75,
+        "width": 2.0,
+        "entry": "30-60m"
+      },
+      "stats": null
+    },
+    "RED": {
+      "strategy": "none",
+      "params": null,
+      "stats": null
+    }
+  },
+  "score": 9
+}

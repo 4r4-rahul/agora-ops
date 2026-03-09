@@ -1,0 +1,1873 @@
+//@version=5
+indicator("Rahul Momentum Options Engine PRO (v6.0 + Order Flow + MTF + Reversals)", overlay = true, max_labels_count = 500)
+
+//════════════════════════════════════════════════════════════════════
+// 🆕 NEW IN V6.0:
+// ✓ Order Flow Proxies (Volume Delta, CVD, Wick Analysis)
+// ✓ Multi-Timeframe Structure Analysis
+// ✓ Advanced Confidence Scoring (8-factor model)
+// ✓ REVERSAL TRANSITION Regime
+// ✓ Swing Rejection Pattern Detection
+// ✓ Failed Breakdown/Breakout Detection
+// ✓ Dual Exit Logic (different for reversals vs trends)
+// ✓ Position Scaling System (probe → scale in)
+//════════════════════════════════════════════════════════════════════
+
+//────────────────────────────────────
+// CORE INDICATORS
+//────────────────────────────────────
+vwapVal = ta.vwap(close)
+emaFast = ta.ema(close, 9)
+emaSlow = ta.ema(close, 21)
+
+// 🎯 PROFESSIONAL EDGE: VWAP Standard Deviation Bands
+// These act as support/resistance zones (institutional reference)
+vwapStdDev = ta.stdev(close - vwapVal, 20)
+vwapBand1Upper = vwapVal + 0.5 * vwapStdDev  // Light resistance
+vwapBand1Lower = vwapVal - 0.5 * vwapStdDev  // Light support
+vwapBand2Upper = vwapVal + 1.0 * vwapStdDev  // Strong resistance
+vwapBand2Lower = vwapVal - 1.0 * vwapStdDev  // Strong support
+vwapBand3Upper = vwapVal + 2.0 * vwapStdDev  // Extreme resistance (reversal zone)
+vwapBand3Lower = vwapVal - 2.0 * vwapStdDev  // Extreme support (reversal zone)
+
+// Price position relative to bands
+atBand2Upper = high >= vwapBand2Upper * 0.998  // Within 0.2% of upper band
+atBand2Lower = low <= vwapBand2Lower * 1.002   // Within 0.2% of lower band
+atBand3Upper = high >= vwapBand3Upper * 0.998  // Extreme stretch (fade zone)
+atBand3Lower = low <= vwapBand3Lower * 1.002   // Extreme stretch (fade zone)
+
+volMA  = ta.sma(volume, 20)
+body   = math.abs(close - open)
+bodyMA = ta.sma(body, 20)
+
+atr14  = ta.atr(14)
+rsi14  = ta.rsi(close, 14)
+
+// Distance from VWAP in ATR units
+distFromVWAPATR       = math.abs(close - vwapVal) / atr14
+nearVWAPEntry         = distFromVWAPATR <= 0.6
+farFromVWAPEntry      = distFromVWAPATR >= 1.0
+extendedFromVWAPEntry = distFromVWAPATR > 1.2
+
+//────────────────────────────────────
+// 🆕 ADX (TREND STRENGTH FILTER)
+//────────────────────────────────────
+adxLen = 14
+adxSmoothing = 14
+
+// True Range and Directional Movement
+trueRange = math.max(math.max(high - low, math.abs(high - close[1])), math.abs(low - close[1]))
+dmPlus = high - high[1] > low[1] - low ? math.max(high - high[1], 0) : 0
+dmMinus = low[1] - low > high - high[1] ? math.max(low[1] - low, 0) : 0
+
+// Smoothed values
+var float trSmooth = 0.0
+var float dmPlusSmooth = 0.0
+var float dmMinusSmooth = 0.0
+
+if bar_index == 0
+    trSmooth := 0
+    dmPlusSmooth := 0
+    dmMinusSmooth := 0
+else
+    trSmooth := trSmooth - (trSmooth / adxLen) + trueRange
+    dmPlusSmooth := dmPlusSmooth - (dmPlusSmooth / adxLen) + dmPlus
+    dmMinusSmooth := dmMinusSmooth - (dmMinusSmooth / adxLen) + dmMinus
+
+// Directional Indicators
+diPlus = trSmooth != 0 ? (dmPlusSmooth / trSmooth) * 100 : 0
+diMinus = trSmooth != 0 ? (dmMinusSmooth / trSmooth) * 100 : 0
+
+// DX and ADX
+dx = diPlus + diMinus != 0 ? math.abs(diPlus - diMinus) / (diPlus + diMinus) * 100 : 0
+adx = ta.sma(dx, adxSmoothing)
+
+// ADX-based market classification
+adxChop = adx < 18        // Choppy, low quality
+adxWeakTrend = adx >= 18 and adx < 30  // Weak trend, cautious
+adxStrongTrend = adx >= 30 and adx < 40  // Strong trend, ideal
+adxVeryStrong = adx >= 40  // Very strong trend, explosive
+
+// Directional bias from DI
+adxBullish = diPlus > diMinus
+adxBearish = diMinus > diPlus
+
+//────────────────────────────────────
+// 🆕 PHASE 2A: COMPRESSION & ACCELERATION
+//────────────────────────────────────
+// BB Width: Detects volatility compression (squeeze) → expansion (ignition)
+bbLength = 20
+bbMult = 2.0
+bbBasis = ta.sma(close, bbLength)
+bbDev = bbMult * ta.stdev(close, bbLength)
+bbUpper = bbBasis + bbDev
+bbLower = bbBasis - bbDev
+bbWidth = (bbUpper - bbLower) / bbBasis * 100.0  // Width as % of price
+
+// BB Width percentile (where are we in 100-bar range?)
+bbWidthLowest = ta.lowest(bbWidth, 100)
+bbWidthHighest = ta.highest(bbWidth, 100)
+bbWidthPercentile = bbWidthHighest > bbWidthLowest ? (bbWidth - bbWidthLowest) / (bbWidthHighest - bbWidthLowest) * 100.0 : 50.0
+
+// Volatility states
+isSqueezed = bbWidthPercentile < 20  // Bottom 20% = compression
+isExpanding = bbWidth > bbWidth[1] and bbWidth[1] > bbWidth[2]  // 2-bar expansion
+isExpandingFast = bbWidth > bbWidth[1] * 1.1  // 10%+ width increase = ignition
+isContracted = bbWidthPercentile < 30 and not isSqueezed
+
+// ATR Rate of Change: Measures trend acceleration (catching ignition phase)
+atrROC = atr14 > atr14[5] ? (atr14 - atr14[5]) / atr14[5] * 100.0 : 0.0
+atrAccelerating = atrROC > 15.0  // ATR increasing >15% over 5 bars
+atrDecelerating = atr14 < atr14[5] and atr14[5] < atr14[10]  // ATR declining (exhaustion)
+
+//────────────────────────────────────
+// 🆕 ORDER FLOW PROXIES
+//────────────────────────────────────
+enableOrderFlow = input.bool(true, "Enable Order Flow Analysis", group="Order Flow")
+showCVD         = input.bool(true, "Show CVD Plot", group="Order Flow")
+
+// Approximate Buy/Sell Volume (based on candle direction)
+buyVol  = close > open ? volume : (close == open ? volume / 2 : 0)
+sellVol = close < open ? volume : (close == open ? volume / 2 : 0)
+volumeDelta = buyVol - sellVol
+
+// Cumulative Volume Delta
+var float cvd = 0.0
+if barstate.isfirst
+    cvd := 0
+cvd := cvd + volumeDelta
+
+// CVD divergence detection
+cvd_ma = ta.sma(cvd, 10)
+cvd_rising = cvd > cvd_ma and cvd > cvd[5]
+cvd_falling = cvd < cvd_ma and cvd < cvd[5]
+
+// Wick Analysis (rejection strength)
+upperWick = high - math.max(open, close)
+lowerWick = math.min(open, close) - low
+upperWickStrength = upperWick / atr14
+lowerWickStrength = lowerWick / atr14
+
+strongLowerWick = lowerWickStrength > 0.5  // Strong buying pressure
+strongUpperWick = upperWickStrength > 0.5  // Strong selling pressure
+
+// Volume Spike (institutional activity)
+volumeSpike = volume > volMA * 2.0
+extremeVolumeSpike = volume > volMA * 3.0
+
+// 🎯 PROFESSIONAL EDGE: Volume Sequence Detection (Smart Money Footprints)
+// 3+ consecutive high volume bars = institutional accumulation/distribution
+bool vol3BarHigh = volume > volMA * 1.3 and volume[1] > volMA * 1.3 and volume[2] > volMA * 1.3
+bool vol3BarBullish = vol3BarHigh and close > close[1] and close[1] > close[2]  // Accumulation
+bool vol3BarBearish = vol3BarHigh and close < close[1] and close[1] < close[2]  // Distribution
+
+// Price Speed/Momentum (how fast price is moving)
+priceSpeed = math.abs(close - close[5]) / (atr14 * 5)
+fastMove = priceSpeed > 0.3  // Moving >30% of ATR per bar on average
+
+// Optional CVD plot
+plot(showCVD ? cvd : na, "CVD", color=color.new(cvd_rising ? color.green : color.red, 50), linewidth=2)
+
+//────────────────────────────────────
+// 🆕 MULTI-TIMEFRAME STRUCTURE ANALYSIS
+//────────────────────────────────────
+htfTF = input.timeframe("3", "HTF timeframe for structure", group="MTF Analysis")
+
+// HTF indicators
+htfClose  = request.security(syminfo.tickerid, htfTF, close)
+htfOpen   = request.security(syminfo.tickerid, htfTF, open)
+htfHigh   = request.security(syminfo.tickerid, htfTF, high)
+htfLow    = request.security(syminfo.tickerid, htfTF, low)
+htfEMA20  = request.security(syminfo.tickerid, htfTF, ta.ema(close, 20))
+htfRSI    = request.security(syminfo.tickerid, htfTF, ta.rsi(close, 14))
+htfVolume = request.security(syminfo.tickerid, htfTF, volume)
+htfVolMA  = request.security(syminfo.tickerid, htfTF, ta.sma(volume, 20))
+
+// HTF trend direction
+htfUp     = htfClose > htfEMA20
+htfDown   = htfClose < htfEMA20
+
+// HTF swing structure (for reversals)
+htfHighest20 = request.security(syminfo.tickerid, htfTF, ta.highest(high, 20))
+htfLowest20  = request.security(syminfo.tickerid, htfTF, ta.lowest(low, 20))
+
+htfNearHigh = high >= htfHighest20 * 0.998  // Within 0.2% of 20-bar high
+htfNearLow  = low <= htfLowest20 * 1.002    // Within 0.2% of 20-bar low
+
+// HTF reversal signs
+htfBullishReversal = htfDown and htfRSI < 35 and htfVolume > htfVolMA * 1.5
+htfBearishReversal = htfUp and htfRSI > 65 and htfVolume > htfVolMA * 1.5
+
+// HTF momentum weakening (reversal setup)
+htfBullMomentumWeak = htfUp and htfRSI < 55 and htfClose < htfEMA20[1]
+htfBearMomentumWeak = htfDown and htfRSI > 45 and htfClose > htfEMA20[1]
+
+// � PROFESSIONAL EDGE: Failed Breakout Counter (Exhaustion Detection)
+// Multiple failed attempts at same level = high probability reversal
+var float resistanceLevel = na
+var int resistanceTests = 0
+var float supportLevel = na
+var int supportTests = 0
+
+// Track resistance tests (bull trap setup)
+if high > high[1] and high > ta.highest(high[2], 10)
+    if not na(resistanceLevel) and math.abs(high - resistanceLevel) < atr14 * 0.3
+        resistanceTests += 1  // Same level tested again
+    else
+        resistanceLevel := high
+        resistanceTests := 1
+
+// Track support tests (bear trap setup)
+if low < low[1] and low < ta.lowest(low[2], 10)
+    if not na(supportLevel) and math.abs(low - supportLevel) < atr14 * 0.3
+        supportTests += 1  // Same level tested again
+    else
+        supportLevel := low
+        supportTests := 1
+
+// Reset counters if price breaks through
+if close > resistanceLevel + atr14 * 0.5
+    resistanceTests := 0
+    resistanceLevel := na
+if close < supportLevel - atr14 * 0.5
+    supportTests := 0
+    supportLevel := na
+
+// Exhaustion flags (2-3 failed attempts = reversal setup)
+bool resistanceExhaustion = resistanceTests >= 2 and resistanceTests <= 4
+bool supportExhaustion = supportTests >= 2 and supportTests <= 4
+
+// �🆕 PHASE 2A: HTF TRANSITIONING STATES
+// Catches HTF turning points (best entry timing)
+htfTurningBullish = htfDown[1] and htfClose > htfEMA20 and htfRSI > 40  // HTF flipping up
+htfTurningBearish = htfUp[1] and htfClose < htfEMA20 and htfRSI < 60  // HTF flipping down
+htfTransitioning = htfTurningBullish or htfTurningBearish  // HTF in transition
+
+//────────────────────────────────────
+// VISUAL / BEHAVIOR INPUTS
+//────────────────────────────────────
+entryLabelMult  = input.float(1.2, "Entry label distance (ATR)", minval = 0.5, step = 0.1, group="Display")
+exitLabelMult   = input.float(1.8, "Exit label distance (ATR)",  minval = 0.5, step = 0.1, group="Display")
+bannerAtrMult   = input.float(2.5, "Banner distance (ATR)",      minval = 1.0, step = 0.1, group="Display")
+
+showTinyMarks   = input.bool(true,  "Show tiny markers on candles", group="Display")
+showRegimeBg    = input.bool(false, "Show regime background", group="Display")
+showSkipLabels  = input.bool(false, "Show skip labels", group="Display")
+
+useLunchFilter  = input.bool(true,  "Use no-trade zone (lunch)", group="Sessions")
+LunchSession = input.session("1130-1300", "No-trade session (exchange time)", group="Sessions")
+AfternoonTrendSession = input.session("1300-1600", "Trend re-arm session (exchange time)", group="Sessions")
+RTHSession   = input.session("0930-1600", "RTH session (exchange time)", group="Sessions")
+
+// Macro symbols
+dxySymbol    = input.symbol("DXY",   "Dollar index symbol (DXY)", group="Macro")
+us10ySymbol  = input.symbol("US10Y", "10Y yield symbol", group="Macro")
+
+// Stop / target config for lines
+riskATRMult   = input.float(1.0, "Base stop distance (ATR multiples)", minval = 0.1, step = 0.1, group="Risk Management")
+rrMultTrend   = input.float(2.0, "Target R multiple – TREND", minval = 0.5, step = 0.5, group="Risk Management")
+rrMultScalp   = input.float(1.0, "Target R multiple – SCALP", minval = 0.2, step = 0.1, group="Risk Management")
+rrMultReversal = input.float(3.0, "Target R multiple – REVERSAL", minval = 1.0, step = 0.5, group="Risk Management")
+
+// Time stops
+maxBarsInTradeTrend    = input.int(15, "Max bars in trade – TREND", minval = 1, maxval = 100, group="Time Stops")
+maxBarsInTradeScalp    = input.int(8,  "Max bars in trade – SCALP", minval = 1, maxval = 100, group="Time Stops")
+maxBarsInTradeReversal = input.int(25, "Max bars in trade – REVERSAL", minval = 5, maxval = 100, group="Time Stops")
+minHoldBars            = input.int(2,  "Min hold bars before exit", minval = 0, maxval = 10, group="Time Stops")
+adverseExitR            = input.float(0.6, "Adverse override (R)", minval = 0.2, maxval = 2.0, step = 0.1, group="Time Stops")
+
+// Dynamic $-R + contract helper
+acctEquity      = input.float(2000, "Account equity ($)", minval = 100, group="Position Sizing")
+riskPctPerTrade = input.float(1.0,  "Risk per trade (% of equity)", minval = 0.1, maxval = 5.0, group="Position Sizing")
+showSizeHelper  = input.bool(true,  "Show 1R $ & contract size guide", group="Position Sizing")
+
+// 🆕 Scaling settings
+enableScaling      = input.bool(true, "Enable Position Scaling (probe → scale in)", group="Position Sizing")
+initialPositionPct = input.float(33.0, "Initial position size (%)", minval=10, maxval=100, step=5, group="Position Sizing")
+
+// Filters
+useChopFilter = input.bool(true,  "Use micro-chop filter", group="Filters")
+useVolAdjust  = input.bool(true,  "Auto-adjust risk by volatility", group="Filters")
+minConfidence = input.int(1, "Minimum confidence for entry (1-8)", minval=1, maxval=8, group="Filters")
+useHardStops  = input.bool(false, "Use hard stops (strict blocks)", group="Filters")
+useGLDStrict  = input.bool(true, "GLD strict neutral/chop filter", group="Filters")
+
+// 🆕 PHASE 2B: ENTRY MODE SELECTION
+enableBreakoutMode = input.bool(true, "Enable Breakout Mode (early entries)", group="Filters")
+breakoutModeAggression = input.string("Medium", "Breakout aggression", options=["Conservative", "Medium", "Aggressive"], group="Filters")
+
+// 🆕 Reversal pattern toggles
+enableSwingRejection  = input.bool(true, "Enable Swing Rejection Pattern", group="Reversal Patterns")
+enableFailedBreakdown = input.bool(true, "Enable Failed Breakdown/Breakout", group="Reversal Patterns")
+
+// Stats dashboard
+statsLookback  = input.int(20, "Stats lookback (RTH trades)", minval = 5, maxval = 100, group="Stats")
+showStatsTable = input.bool(true, "Show stats dashboard (RTH)", group="Stats")
+
+//────────────────────────────────────
+// MOMENTUM EXTENSION LOGIC (CALL / PUT)
+//────────────────────────────────────
+
+// VWAP slope
+vwapUp   = vwapVal > vwapVal[1]
+vwapDown = vwapVal < vwapVal[1]
+
+// Trend slope + follow-through (quality boost for continuation)
+emaFastSlope = emaFast - emaFast[1]
+vwapSlope    = vwapVal - vwapVal[1]
+trendSlopeLong  = emaFastSlope > 0 and vwapSlope > 0
+trendSlopeShort = emaFastSlope < 0 and vwapSlope < 0
+followThroughLong  = close > high[1]
+followThroughShort = close < low[1]
+
+// Micro-chop: price hugging VWAP & EMAs tight
+emaSpread   = math.abs(emaFast - emaSlow)
+microChop   = distFromVWAPATR < 0.2 and emaSpread < atr14 * 0.05
+allowTrade  = not useChopFilter or not microChop
+
+// Bull momentum (CALL) - original logic
+bullMomentum =
+     close   > vwapVal and
+     emaFast > emaSlow and
+     vwapUp  and
+     body    > bodyMA and
+     volume  > volMA and
+     allowTrade
+
+// Bear momentum (PUT) - original logic
+bearMomentum =
+     close   < vwapVal and
+     emaFast < emaSlow and
+     vwapDown and
+     body    > bodyMA and
+     volume  > volMA and
+     allowTrade
+
+// 🆕 WEAK TREND DETECTION (Professional Setup)
+// Detects grinding trends near VWAP with structural bias + order flow confirmation
+// Common in metals distribution/accumulation phases
+
+// Structural bias (making lower lows or higher highs)
+var float recentHigh = high
+var float recentLow = low
+if high > recentHigh or bar_index == 0
+    recentHigh := high
+if low < recentLow or bar_index == 0
+    recentLow := low
+
+lowerLowStructure = low < ta.lowest(low[1], 10)  // Making lower lows
+higherHighStructure = high > ta.highest(high[1], 10)  // Making higher highs
+
+// Weak Bull Trend (grind up near VWAP)
+weakBullTrend = close > vwapVal and emaFast > emaSlow and nearVWAPEntry and higherHighStructure and (enableOrderFlow ? cvd_rising : true) and volume > volMA * 0.8 and allowTrade
+
+// Weak Bear Trend (grind down near VWAP) - THIS IS YOUR SLV PATTERN
+weakBearTrend = close < vwapVal and emaFast < emaSlow and nearVWAPEntry and lowerLowStructure and (enableOrderFlow ? cvd_falling : true) and volume > volMA * 0.8 and allowTrade
+
+// 🆕 PHASE 2C: MULTI-BAR CONFIRMATION PATTERNS
+// 2-3 bar patterns for higher probability (institutional accumulation/distribution)
+
+// 3-bar bullish confirmation: consecutive closes above VWAP + EMA alignment
+bull3BarPattern = close > vwapVal and close[1] > vwapVal and close[2] > vwapVal and emaFast > emaSlow and emaFast[1] > emaSlow[1] and volume > volMA
+
+// 3-bar bearish confirmation: consecutive closes below VWAP + EMA alignment  
+bear3BarPattern = close < vwapVal and close[1] < vwapVal and close[2] < vwapVal and emaFast < emaSlow and emaFast[1] < emaSlow[1] and volume > volMA
+
+// 2-bar momentum surge: strong body + volume on both bars
+bull2BarSurge = close > close[1] and close[1] > close[2] and body > bodyMA and body[1] > bodyMA and volume > volMA * 1.2 and volume[1] > volMA * 1.2
+
+bear2BarSurge = close < close[1] and close[1] < close[2] and body > bodyMA and body[1] > bodyMA and volume > volMA * 1.2 and volume[1] > volMA * 1.2
+
+//────────────────────────────────────
+// 🆕 MARKET PHASE (30-BAR PERSISTENCE)
+//────────────────────────────────────
+// Prevents phase flip-flopping from single bars
+// Requires structural confirmation over 30 bars
+
+// 30-bar structure analysis
+ema20 = ta.ema(close, 20)
+highest30 = ta.highest(high, 30)
+lowest30 = ta.lowest(low, 30)
+
+// Higher Highs / Higher Lows (bull structure)
+hhCount = 0
+hlCount = 0
+for i = 1 to 5
+    if high[i] > high[i+5]
+        hhCount += 1
+    if low[i] > low[i+5]
+        hlCount += 1
+
+// Lower Highs / Lower Lows (bear structure)
+lhCount = 0
+llCount = 0
+for i = 1 to 5
+    if high[i] < high[i+5]
+        lhCount += 1
+    if low[i] < low[i+5]
+        llCount += 1
+
+// Structure quality
+bullStructure = hhCount >= 3 and hlCount >= 2
+bearStructure = lhCount >= 3 and llCount >= 2
+neutralStructure = not bullStructure and not bearStructure
+
+// Phase conditions (requires multiple confirmations)
+bullPhaseCondition = close > ema20 and bullStructure and rsi14 > 45 and emaFast > emaSlow
+bearPhaseCondition = close < ema20 and bearStructure and rsi14 < 55 and emaFast < emaSlow
+neutralPhaseCondition = neutralStructure or (rsi14 > 45 and rsi14 < 55)
+
+// Phase state with persistence (requires 3 bars confirmation to flip)
+var string marketPhase = "NEUTRAL"
+var int phaseConfirmCount = 0
+var string pendingPhase = "NEUTRAL"
+
+// Determine what phase wants to be
+string wantedPhase = bullPhaseCondition ? "BULL" : bearPhaseCondition ? "BEAR" : "NEUTRAL"
+
+// Count confirmation bars
+if wantedPhase != marketPhase
+    if wantedPhase == pendingPhase
+        phaseConfirmCount += 1
+    else
+        pendingPhase := wantedPhase
+        phaseConfirmCount := 1
+    
+    // Switch phase after 3 confirmation bars
+    if phaseConfirmCount >= 3
+        marketPhase := wantedPhase
+        phaseConfirmCount := 0
+else
+    phaseConfirmCount := 0
+    pendingPhase := marketPhase
+
+// Phase booleans
+isBullPhase = marketPhase == "BULL"
+isBearPhase = marketPhase == "BEAR"
+isNeutralPhase = marketPhase == "NEUTRAL"
+
+// 🆕 PHASE 2A: PHASE TRANSITIONING
+// When phase is shifting (1-2 bars into new confirmation), entries allowed
+// 🔥 FIX: Require ADX support (not in chop)
+isPhaseTransitioning = phaseConfirmCount > 0 and phaseConfirmCount <= 2 and not adxChop and (adxWeakTrend or adxStrongTrend or adxVeryStrong)
+
+//────────────────────────────────────
+// 🆕 REVERSAL PATTERN DETECTION
+//────────────────────────────────────
+
+// SWING REJECTION LONG (reversal from downtrend)
+swingRejectionLong = false
+if enableSwingRejection
+    // Price made lower low
+    lowerLow = low < ta.lowest(low[1], 10)
+    
+    // RSI made higher low (bullish divergence)
+    rsiHigherLow = rsi14 > ta.lowest(rsi14[1], 10) and rsi14 < 35
+    
+    // Strong rejection (lower wick + close above EMA9)
+    strongRejection = lowerWickStrength > 0.5 and close > emaFast
+    
+    // Volume confirmation
+    volConfirm = volumeSpike
+    
+    // Extended from VWAP (oversold)
+    extended = distFromVWAPATR > 0.8 and distFromVWAPATR < 2.0 and close < vwapVal
+    
+    // HTF supports reversal
+    htfSupport = htfBullishReversal or htfNearLow
+    
+    swingRejectionLong := lowerLow and rsiHigherLow and strongRejection and volConfirm and extended and htfSupport
+
+// SWING REJECTION SHORT (reversal from uptrend)
+swingRejectionShort = false
+if enableSwingRejection
+    // Price made higher high
+    higherHigh = high > ta.highest(high[1], 10)
+    
+    // RSI made lower high (bearish divergence)
+    rsiLowerHigh = rsi14 < ta.highest(rsi14[1], 10) and rsi14 > 65
+    
+    // Strong rejection (upper wick + close below EMA9)
+    strongRejection = upperWickStrength > 0.5 and close < emaFast
+    
+    // Volume confirmation
+    volConfirm = volumeSpike
+    
+    // Extended from VWAP (overbought)
+    extended = distFromVWAPATR > 0.8 and distFromVWAPATR < 2.0 and close > vwapVal
+    
+    // HTF supports reversal
+    htfSupport = htfBearishReversal or htfNearHigh
+    
+    swingRejectionShort := higherHigh and rsiLowerHigh and strongRejection and volConfirm and extended and htfSupport
+
+// FAILED BREAKDOWN LONG (bear trap)
+failedBreakdownLong = false
+if enableFailedBreakdown
+    // Price broke below recent low
+    recentLow := ta.lowest(low[1], 20)
+    brokeBelow = low[1] < recentLow and low[2] >= recentLow
+    
+    // But quickly reclaimed (within 3 bars)
+    var int brokeBelowBar = na
+    if brokeBelow
+        brokeBelowBar := bar_index
+    reclaimed = close > recentLow and not na(brokeBelowBar) and bar_index - brokeBelowBar <= 3
+    
+    // Volume increased on breakdown (selling climax)
+    volOnBreakdown = volume[1] > volMA * 1.5
+    
+    // Now closing back above EMA9
+    backAboveEma = close > emaFast
+    
+    // CVD showing buying pressure
+    cvdBullish = enableOrderFlow ? cvd_rising : true
+    
+    failedBreakdownLong := brokeBelow and reclaimed and volOnBreakdown and backAboveEma and cvdBullish
+
+// FAILED BREAKOUT SHORT (bull trap)
+failedBreakoutShort = false
+if enableFailedBreakdown
+    // Price broke above recent high
+    recentHigh := ta.highest(high[1], 20)
+    brokeAbove = high[1] > recentHigh and high[2] <= recentHigh
+    
+    // But quickly failed (within 3 bars)
+    var int brokeAboveBar = na
+    if brokeAbove
+        brokeAboveBar := bar_index
+    failed = close < recentHigh and not na(brokeAboveBar) and bar_index - brokeAboveBar <= 3
+    
+    // Volume increased on breakout (buying climax)
+    volOnBreakout = volume[1] > volMA * 1.5
+    
+    // Now closing back below EMA9
+    backBelowEma = close < emaFast
+    
+    // CVD showing selling pressure
+    cvdBearish = enableOrderFlow ? cvd_falling : true
+    
+    failedBreakoutShort := brokeAbove and failed and volOnBreakout and backBelowEma and cvdBearish
+
+//────────────────────────────────────
+// 🆕 ADVANCED CONFIDENCE SCORING (1-8)
+//────────────────────────────────────
+float confidence = 0.0
+
+// Factor 1: Body strength
+confidence += body > bodyMA ? 1.0 : 0.0
+
+// Factor 2: Volume
+confidence += volume > volMA ? 1.0 : 0.0
+confidence += volumeSpike ? 0.5 : 0.0  // Bonus for spike
+
+// Factor 3: EMA spread (momentum strength)
+confidence += emaSpread > atr14 * 0.2 ? 1.0 : 0.0
+
+// Factor 4: VWAP alignment (meaningful slope, not just direction)
+vwapSlopeStrongUp = vwapSlope > atr14 * 0.02
+vwapSlopeStrongDown = vwapSlope < -atr14 * 0.02
+confidence += (vwapSlopeStrongUp or vwapSlopeStrongDown) ? 1.0 : 0.0
+
+// Factor 5: RSI position
+confidence += (rsi14 > 55 or rsi14 < 45) ? 1.0 : 0.0
+confidence += (rsi14 > 60 or rsi14 < 40) ? 0.5 : 0.0  // Bonus for extreme
+
+// Factor 6: HTF alignment
+confidence += (htfUp and close > vwapVal) or (htfDown and close < vwapVal) ? 1.0 : 0.0
+
+// Factor 7: Order flow confirmation (directional)
+confidence += enableOrderFlow and cvd_rising and close > open and close > vwapVal ? 1.0 : 0.0
+confidence += enableOrderFlow and cvd_falling and close < open and close < vwapVal ? 1.0 : 0.0
+
+// 🎯 EDGE BONUS: Volume sequence (institutional footprint)
+confidence += vol3BarBullish and close > vwapVal ? 1.0 : 0.0
+confidence += vol3BarBearish and close < vwapVal ? 1.0 : 0.0
+
+// Factor 8: Wick rejection (strength)
+confidence += strongLowerWick and close > open ? 0.5 : 0.0
+confidence += strongUpperWick and close < open ? 0.5 : 0.0
+
+confidence := math.min(confidence, 8.0)
+
+//────────────────────────────────────
+// 🆕 REGIME DETECTION: STRUCTURE-FIRST APPROACH
+//────────────────────────────────────
+
+// RSI structure
+rsiDirectional = rsi14 >= 60 or rsi14 <= 40
+rsiCenterish   = rsi14 > 45 and rsi14 < 55
+rsiExtreme     = rsi14 > 70 or rsi14 < 30
+
+// 🆕 HTF MANDATORY GATEKEEPER
+// Longs ONLY if HTF bullish, Shorts ONLY if HTF bearish
+htfAllowsLongs = htfUp and htfClose > htfEMA20
+htfAllowsShorts = htfDown and htfClose < htfEMA20
+htfNeutral = not htfAllowsLongs and not htfAllowsShorts
+
+//═══════════════════════════════════════════════════════════════════════════
+// 🏗️ LAYER 2: REGIME CLASSIFICATION (categorize, never block)
+//═══════════════════════════════════════════════════════════════════════════
+// Every passing setup gets categorized into 1 of 4 regimes
+// Determines playbook (RR targets, time stops, base sizing)
+
+// Regime type variables (clear labels)
+string regimeType = "NEUTRAL"
+bool isStrongTrend = false
+bool isWeakTrend = false
+bool isMeanReversion = false
+bool isNeutralChop = false
+bool isNeutral = false
+
+// 🔥 PRECEDENCE RULE: Mean Reversion OVERRIDES Trend when extension + RSI extreme + reversal pattern
+// Simplified check (full swing scores calculated later)
+bool meanReversionOverride = (distFromVWAPATR > 1.5 and ((rsi14 < 30 and close < vwapVal) or (rsi14 > 70 and close > vwapVal)) and (supportExhaustion or resistanceExhaustion or (strongUpperWick or strongLowerWick)))
+
+if meanReversionOverride
+    // MEAN REVERSION wins (catching extremes)
+    regimeType := "MEAN_REVERSION"
+    isMeanReversion := true
+else if adx >= 35 and distFromVWAPATR >= 1.0
+    // STRONG TREND: ADX>35 + far from VWAP
+    regimeType := "STRONG_TREND"
+    isStrongTrend := true
+else if adx >= 25 and adx < 35 and distFromVWAPATR < 1.0
+    // WEAK TREND: ADX 25-35 + near VWAP (grinding)
+    regimeType := "WEAK_TREND"
+    isWeakTrend := true
+else if adx >= 15 and adx < 25
+    // NEUTRAL/CHOP: ADX 15-25 (passed hard stop, but low conviction)
+    regimeType := "NEUTRAL_CHOP"
+    isNeutralChop := true
+else
+    // Fallback (shouldn't hit if hardStops work)
+    regimeType := "NEUTRAL"
+    isNeutral := true
+
+// Regime-specific playbook settings
+float regimeRRMult = isStrongTrend ? 2.5 : isWeakTrend ? 1.5 : isMeanReversion ? 3.0 : 1.0  // Mean reversion gets biggest targets
+int regimeMaxBars = isStrongTrend ? 30 : isWeakTrend ? 20 : isMeanReversion ? 40 : 15  // Mean reversion needs time
+float regimeBaseSizing = isStrongTrend ? 1.0 : isWeakTrend ? 0.7 : isMeanReversion ? 0.5 : 0.4  // Mean reversion starts small
+
+// 🔴 DEPRECATED: Old V6 regime variables (kept for regimeColor plot compatibility)
+// Use new Layer 2 regime classification above (regimeType, isStrongTrend, isWeakTrend, isMeanReversion, isNeutralChop)
+isTrendRegime = isStrongTrend  // Map to new system
+isWeakTrendRegime = isWeakTrend
+isGrindRegime = isNeutralChop
+isReversalRegime = isMeanReversion
+isNeutralRegime = isNeutral
+
+// slow grind trend / bleeder day flag
+isBleedTrend = isStrongTrend and distFromVWAPATR < 0.8 and emaSpread < atr14 * 0.15
+
+// 🆕 Regime color (updated to use new system)
+regimeColor = isMeanReversion ? color.new(color.purple, 80) : isStrongTrend ? color.new(color.green, 85) : isWeakTrend ? color.new(color.teal, 85) : isNeutralChop ? color.new(color.orange, 88) : isNeutral ? color.new(color.gray, 88) : na
+
+bgcolor(showRegimeBg ? regimeColor : na)
+
+//────────────────────────────────────
+// MACRO WIND (DXY + 10Y)
+//────────────────────────────────────
+dxyClose = request.security(dxySymbol, "60", close)
+dxyMA20  = request.security(dxySymbol, "60", ta.sma(close, 20))
+usdUp    = dxyClose > dxyMA20
+
+us10yClose = request.security(us10ySymbol, "60", close)
+us10yMA20  = request.security(us10ySymbol, "60", ta.sma(close, 20))
+yieldsUp   = us10yClose > us10yMA20
+
+macroBullMetals = (not usdUp) and (not yieldsUp)
+macroBearMetals = usdUp and yieldsUp
+macroNeutral    = not macroBullMetals and not macroBearMetals
+
+//────────────────────────────────────
+// VOLATILITY REGIME & RISK ADJUST
+//────────────────────────────────────
+dayATR   = request.security(syminfo.tickerid, "D", ta.atr(14))
+dayClose = request.security(syminfo.tickerid, "D", close)
+volPct   = dayClose > 0 ? (dayATR / dayClose) * 100.0 : 0.0
+
+volHigh = volPct > 3.0
+volLow  = volPct < 1.5
+
+volAdjMult =
+     not useVolAdjust ? 1.0 :
+     volHigh          ? 0.8 :
+     volLow           ? 1.2 :
+                           1.0
+
+effRiskATRMult = riskATRMult * volAdjMult
+
+// 🆕 Reversal gets wider stop
+effRiskATRMultReversal = effRiskATRMult * 1.5
+
+//────────────────────────────────────
+// POSITION & CAMPAIGN STATE
+//────────────────────────────────────
+var bool inCall = false
+var bool inPut  = false
+
+var float dayPnL_R    = 0.0
+var int   tradesToday = 0
+
+var int ideaState        = 0
+int     ideaStateProbe     = 0
+int     ideaStateCore      = 1
+int     ideaStateExpansion = 2
+int     ideaStateOff       = -1
+
+var float lastEntryPrice = na
+var float lastRiskATR    = na
+var int   lastDirection  = 0
+
+var bool tp1Triggered      = false
+var bool tp2Triggered      = false
+var bool timeStopTriggered = false
+var int  barsSinceEntry    = na
+
+var line  stopLine        = na
+var line  targetLine      = na
+var float currStopPrice   = na
+var float currTargetPrice = na
+
+// 🆕 Track setup type for current trade
+var string lastSetupType = ""  // "TREND", "SCALP", "SWING_REJECTION", "FAILED_BREAKDOWN"
+var int  maxBarsThisTrade  = na
+
+// 🔥 SIGNAL COOLING PERIOD (prevent over-trading)
+var int lastSignalBar = -999
+int coolingPeriod = 3  // Minimum 3 bars between entries
+bool coolingPeriodActive = bar_index - lastSignalBar < coolingPeriod
+
+// 🆕 Scaling state
+var bool   canScaleIn       = false
+var bool   hasScaledOnce    = false
+var float  currentPositionPct = 0.0
+
+var float[] tradeRsRTH = array.new_float()
+perTradeRiskDollar = acctEquity * riskPctPerTrade / 100.0
+
+var float todayR_RTH      = 0.0
+var int   tradesTodayRTH  = 0
+
+// Reset state at new daily session
+if ta.change(time("D")) != 0
+    inCall         := false
+    inPut          := false
+    dayPnL_R       := 0.0
+    tradesToday    := 0
+    ideaState      := ideaStateProbe
+    lastEntryPrice := na
+    lastRiskATR    := na
+    lastDirection  := 0
+    tp1Triggered   := false
+    tp2Triggered   := false
+    timeStopTriggered := false
+    barsSinceEntry := na
+    lastSetupType  := ""
+    canScaleIn     := false
+    hasScaledOnce  := false
+    currentPositionPct := 0.0
+    
+    stopLine        := na
+    targetLine      := na
+    currStopPrice   := na
+    currTargetPrice := na
+    
+    todayR_RTH     := 0.0
+    tradesTodayRTH := 0
+
+// Sessions
+inLunchSession           = time(timeframe.period, LunchSession) != 0
+noTradeZone              = useLunchFilter and inLunchSession
+inAfternoonTrendSession  = time(timeframe.period, AfternoonTrendSession) != 0
+inRTH                    = time(timeframe.period, RTHSession) != 0
+
+// � PROFESSIONAL EDGE: Opening Range Reference (First 30-min High/Low)
+// Day traders' most important reference levels
+var float orHigh = na
+var float orLow = na
+var bool orComplete = false
+
+// Capture opening range (9:30-10:00 ET)
+if hour(time) == 9 and minute(time) >= 30 or hour(time) == 10 and minute(time) == 0
+    if na(orHigh) or high > orHigh
+        orHigh := high
+    if na(orLow) or low < orLow
+        orLow := low
+    orComplete := false
+
+// Mark OR complete at 10:00
+if hour(time) == 10 and minute(time) == 1 and not orComplete
+    orComplete := true
+
+// Reset at new day
+if ta.change(time("D")) != 0
+    orHigh := na
+    orLow := na
+    orComplete := false
+
+// OR breakout/breakdown detection (high probability moves)
+bool orBreakoutBullish = orComplete and not na(orHigh) and close > orHigh and close[1] <= orHigh
+bool orBreakdownBearish = orComplete and not na(orLow) and close < orLow and close[1] >= orLow
+bool orRejectionAtHigh = orComplete and not na(orHigh) and high >= orHigh * 0.998 and close < orHigh  // Failed OR breakout (fade)
+bool orRejectionAtLow = orComplete and not na(orLow) and low <= orLow * 1.002 and close > orLow     // Failed OR breakdown (fade)
+
+// �🆕 PHASE 2B: TIME-OF-DAY REGIME MODULATION
+hour_of_day = hour(time)
+minute_of_day = minute(time)
+
+// Market opening (9:30-10:30 ET): High volatility, wider stops
+isOpeningRange = hour_of_day == 9 and minute_of_day >= 30 or hour_of_day == 10 and minute_of_day < 30
+
+// Midday (11:00-14:00 ET): Chop zone, tighter filters
+isMidDay = hour_of_day >= 11 and hour_of_day < 14
+
+// Power hour (15:00-16:00 ET): Institutional flow, good for trends
+isPowerHour = hour_of_day >= 15
+
+// 🎯 OPTIONS-SPECIFIC: Late-day entry blocking (can't exit if wrong)
+// After 15:45, theta decay accelerates + liquidity dries up
+bool tooLateForEntry = hour_of_day == 15 and minute_of_day >= 45 or hour_of_day >= 16
+
+// 🎯 OPTIONS-SPECIFIC: 0DTE Time Decay Curve Awareness
+// Theta decay is exponential after 14:00 for same-day expiration
+// 0DTE after 14:00 = need FASTER moves or avoid
+bool highThetaRisk = hour_of_day >= 14  // Exponential decay zone for 0DTE
+
+// 🎯 OPTIONS-SPECIFIC: Friday Theta Protection (weekend decay)
+// Friday after 15:00 = 3-day theta decay risk if holding overnight
+bool isFriday = dayofweek(time) == 6  // Friday = day 6
+bool fridayTheta = isFriday and hour_of_day >= 15  // Avoid new longs Friday PM
+
+// 🎯 PROFESSIONAL EDGE: Liquidity Crisis Detection (Fake Move Filter)
+// ATR spike without volume = thin book manipulation (filter out)
+bool liquidityCrisis = atrROC > 20.0 and volume < volMA * 0.8  // Volatility without conviction = fake
+
+// 🎯 OPTIONS-SPECIFIC: IV Percentile Proxy (don't buy expensive premium)
+// When ATR is in top 20% of 100-bar range = IV likely elevated = bad time to buy options
+float atr100Low = ta.lowest(atr14, 100)
+float atr100High = ta.highest(atr14, 100)
+float atrPercentile = atr100High > atr100Low ? (atr14 - atr100Low) / (atr100High - atr100Low) * 100.0 : 50.0
+bool ivElevated = atrPercentile > 80.0  // Top 20% = expensive premium, wait for IV crush
+
+// 🎯 OPTIONS-SPECIFIC: Liquidity Premium Filter (bid-ask spread proxy)
+// Wick size relative to body = liquidity gauge (wide wicks = wide spreads)
+float totalWick = upperWick + lowerWick
+float wickToBodyRatio = body > 0 ? totalWick / body : 10.0
+bool wideSpreads = wickToBodyRatio > 3.0  // Excessive wicks = illiquid = can't execute at theoretical price
+
+// 🎯 PROFESSIONAL EDGE: Time-of-Day Win Rate Modulation
+// Based on empirical intraday patterns
+// 10:00-10:30: Highest trend continuation (post-OR breakout)
+// 14:30-15:30: Reversal bias (institutional rebalancing)
+bool trendFavorableTime = (hour_of_day == 10 and minute_of_day < 30) or (hour_of_day >= 13 and hour_of_day < 15)
+bool reversalFavorableTime = hour_of_day == 14 or (hour_of_day == 15 and minute_of_day < 30)
+
+// Dynamic threshold adjustments
+todADXThreshold = isOpeningRange ? 25.0 : isMidDay ? 35.0 : isPowerHour ? 28.0 : 30.0  // Stricter midday
+todVolThreshold = isOpeningRange ? 1.2 : isMidDay ? 1.5 : isPowerHour ? 1.1 : 1.0  // Need more volume midday
+todRiskMult = isOpeningRange ? 1.3 : isMidDay ? 0.8 : isPowerHour ? 1.0 : 1.0  // Wider stops at open
+
+//═══════════════════════════════════════════════════════════════════════════
+// 🏗️ LAYER 1: HARD STOPS (5 absolute blocks for garbage setups)
+//═══════════════════════════════════════════════════════════════════════════
+// These are BINARY gates - if ANY fail, skip all evaluation
+// Only 20-30% of bars should be blocked here (filtering extreme garbage)
+
+// 1. ADX Floor (must be exiting chop, not in chop)
+bool adxHardStop = adx < 15  // Below 15 = pure chop, no edge
+
+// 2. Volume Floor (softened: 3-bar average to avoid single bar spikes)
+float vol3BarAvg = (volume + volume[1] + volume[2]) / 3.0
+bool volumeHardStop = vol3BarAvg < volMA * 0.5  // 3-bar avg below 50% = illiquid
+
+// 3. Liquidity Crisis (ATR spike without volume = manipulation)
+bool liquidityCrisisHardStop = liquidityCrisis  // Already defined above
+
+// 4. Wide Spreads (can't execute at theoretical price)
+bool wideSpreadsHardStop = wideSpreads  // Already defined above
+
+// 5. Too Late (can't manage if wrong)
+bool tooLateHardStop = tooLateForEntry  // Already defined above
+
+// Master hard stop gate
+bool hardStopViolation = useHardStops and (adxHardStop or volumeHardStop or liquidityCrisisHardStop or wideSpreadsHardStop or tooLateHardStop)
+
+// Track reason for debugging
+string hardStopReason = adxHardStop ? "ADX<15 (CHOP)" : volumeHardStop ? "Volume<50% (3-bar)" : liquidityCrisisHardStop ? "Liquidity Crisis" : wideSpreadsHardStop ? "Wide Spreads" : tooLateHardStop ? "Too Late" : ""
+
+//────────────────────────────────────
+// PATTERN CALCULATIONS (needed by Layer 3 & entry logic)
+//────────────────────────────────────
+
+// 🆕 PHASE 2B: TIERED REVERSAL SCORING (A/B/C grades)
+// Grade A: All 6 conditions (original, most reliable)
+// Grade B: 4-5 conditions (good probability)
+// Grade C: 3 conditions minimum (speculative, smaller size)
+
+int swingRejectionLongScore = 0
+if enableSwingRejection
+    lowerLow = low < ta.lowest(low[1], 10)
+    rsiHigherLow = rsi14 > ta.lowest(rsi14[1], 10) and rsi14 < 35
+    strongRejection = lowerWickStrength > 0.5 and close > emaFast
+    volConfirm = volumeSpike
+    extended = distFromVWAPATR > 0.8 and distFromVWAPATR < 2.0 and close < vwapVal
+    htfSupport = htfBullishReversal or htfNearLow
+    
+    swingRejectionLongScore += lowerLow ? 1 : 0
+    swingRejectionLongScore += rsiHigherLow ? 1 : 0
+    swingRejectionLongScore += strongRejection ? 1 : 0
+    swingRejectionLongScore += volConfirm ? 1 : 0
+    swingRejectionLongScore += extended ? 1 : 0
+    swingRejectionLongScore += htfSupport ? 1 : 0
+
+string swingRejectionLongGrade = swingRejectionLongScore >= 6 ? "A" : swingRejectionLongScore >= 4 ? "B" : swingRejectionLongScore >= 3 ? "C" : "F"
+bool swingRejectionLongQualified = swingRejectionLongScore >= 3  // Allow C grade or better
+
+int swingRejectionShortScore = 0
+if enableSwingRejection
+    higherHigh = high > ta.highest(high[1], 10)
+    rsiLowerHigh = rsi14 < ta.highest(rsi14[1], 10) and rsi14 > 65
+    strongRejection = upperWickStrength > 0.5 and close < emaFast
+    volConfirm = volumeSpike
+    extended = distFromVWAPATR > 0.8 and distFromVWAPATR < 2.0 and close > vwapVal
+    htfSupport = htfBearishReversal or htfNearHigh
+    
+    swingRejectionShortScore += higherHigh ? 1 : 0
+    swingRejectionShortScore += rsiLowerHigh ? 1 : 0
+    swingRejectionShortScore += strongRejection ? 1 : 0
+    swingRejectionShortScore += volConfirm ? 1 : 0
+    swingRejectionShortScore += extended ? 1 : 0
+    swingRejectionShortScore += htfSupport ? 1 : 0
+
+string swingRejectionShortGrade = swingRejectionShortScore >= 6 ? "A" : swingRejectionShortScore >= 4 ? "B" : swingRejectionShortScore >= 3 ? "C" : "F"
+bool swingRejectionShortQualified = swingRejectionShortScore >= 3
+
+// 🆕 PHASE 2B: BREAKOUT ENTRY MODE
+// Fires BEFORE ADX confirms (catches ignition phase)
+// Requires: Squeeze → Expansion + ATR acceleration + Volume + HTF support
+// 🔥 FIX: REQUIRE ADX >= 18 (must be EXITING chop, not IN chop)
+
+float breakoutThreshold = breakoutModeAggression == "Aggressive" ? 10.0 : breakoutModeAggression == "Medium" ? 15.0 : 20.0
+
+bool breakoutConditionLong = enableBreakoutMode and (isSqueezed or isContracted) and isExpandingFast and atrAccelerating and volume > volMA * todVolThreshold and close > vwapVal and emaFast > emaSlow and (htfAllowsLongs or htfTurningBullish) and not isMidDay and not adxChop and adx >= 18
+
+bool breakoutConditionShort = enableBreakoutMode and (isSqueezed or isContracted) and isExpandingFast and atrAccelerating and volume > volMA * todVolThreshold and close < vwapVal and emaFast < emaSlow and (htfAllowsShorts or htfTurningBearish) and not isMidDay and not adxChop and adx >= 18
+
+//═══════════════════════════════════════════════════════════════════════════
+// 🏗️ LAYER 3: QUALITY SCORING (0-100 additive, transparent, explainable)
+//═══════════════════════════════════════════════════════════════════════════
+// All factors contribute points (nothing blocks here)
+// 8 categories with CAPS to prevent inflation
+
+float qualityScore = 0.0
+
+// Category 1: Trend Alignment (0-20 points, CAP 20)
+float trendPoints = 0.0
+trendPoints += adx >= 40 ? 8.0 : adx >= 35 ? 6.0 : adx >= 30 ? 4.0 : adx >= 25 ? 2.0 : 0.0  // ADX strength
+trendPoints += (htfUp and close > vwapVal) or (htfDown and close < vwapVal) ? 5.0 : 0.0  // HTF alignment
+trendPoints += (isBullPhase and close > vwapVal) or (isBearPhase and close < vwapVal) ? 3.0 : isPhaseTransitioning ? 2.0 : 0.0  // Phase alignment
+trendPoints += (emaFast > emaSlow and close > emaFast) or (emaFast < emaSlow and close < emaFast) ? 4.0 : 0.0  // EMA alignment
+trendPoints := math.min(trendPoints, 20.0)  // CAP at 20
+
+// Category 2: Volume Conviction (0-15 points, CAP 15)
+float volumePoints = 0.0
+volumePoints += volume > volMA * 2.5 ? 6.0 : volume > volMA * 2.0 ? 5.0 : volume > volMA * 1.5 ? 3.0 : volume > volMA ? 1.0 : 0.0  // Volume surge
+volumePoints += vol3BarBullish or vol3BarBearish ? 5.0 : 0.0  // Institutional sequence
+volumePoints += cvd_rising or cvd_falling ? 2.0 : 0.0  // CVD alignment
+volumePoints += body > bodyMA * 1.3 ? 2.0 : 0.0  // Strong bodies
+volumePoints := math.min(volumePoints, 15.0)  // CAP at 15
+
+// Category 3: Structure Quality (0-15 points, CAP 15)
+float structurePoints = 0.0
+structurePoints += nearVWAPEntry ? 5.0 : farFromVWAPEntry ? -2.0 : 0.0  // Distance from VWAP
+structurePoints += atBand3Upper or atBand3Lower ? 6.0 : atBand2Upper or atBand2Lower ? 3.0 : 0.0  // VWAP band extremes
+structurePoints += orBreakoutBullish or orBreakdownBearish ? 6.0 : orRejectionAtHigh or orRejectionAtLow ? 4.0 : 0.0  // OR plays
+structurePoints += resistanceExhaustion or supportExhaustion ? 3.0 : 0.0  // Failed breakout exhaustion
+structurePoints := math.min(structurePoints, 15.0)  // CAP at 15
+
+// Category 4: Momentum Strength (0-12 points, CAP 12)
+float momentumPoints = 0.0
+momentumPoints += rsi14 > 70 or rsi14 < 30 ? 4.0 : rsi14 > 60 or rsi14 < 40 ? 2.0 : 0.0  // RSI extremes
+momentumPoints += fastMove ? 3.0 : 0.0  // Price speed
+momentumPoints += confidence >= 6 ? 5.0 : confidence >= 4 ? 3.0 : confidence >= 2 ? 1.0 : 0.0  // System confidence
+momentumPoints := math.min(momentumPoints, 12.0)  // CAP at 12
+
+// Category 5: Volatility State (0-10 points, CAP 10)
+float volatilityPoints = 0.0
+volatilityPoints += isExpandingFast and atrAccelerating ? 6.0 : isExpanding ? 3.0 : 0.0  // Expansion + acceleration
+volatilityPoints += isSqueezed ? 4.0 : isContracted ? 2.0 : 0.0  // Compression (potential energy)
+volatilityPoints -= ivElevated ? 3.0 : 0.0  // Penalty for expensive options
+volatilityPoints := math.min(volatilityPoints, 10.0)  // CAP at 10
+
+// Category 6: Time-of-Day (0-10 points, CAP 10)
+float timePoints = 0.0
+timePoints += (trendFavorableTime and isStrongTrend) or (reversalFavorableTime and isMeanReversion) ? 5.0 : 0.0  // Favorable hours
+timePoints += isOpeningRange ? 3.0 : isPowerHour ? 2.0 : 0.0  // High volume windows
+timePoints -= isMidDay ? 3.0 : 0.0  // Penalty for chop zone
+timePoints -= highThetaRisk ? 2.0 : 0.0  // Penalty for 0DTE after 14:00
+timePoints -= fridayTheta ? 2.0 : 0.0  // Penalty for Friday PM
+timePoints := math.min(timePoints, 10.0)  // CAP at 10
+
+// Category 7: Reversal Patterns (0-20 points, CAP 20)
+float reversalPoints = 0.0
+if isMeanReversion  // Only score in Mean Reversion regime
+    reversalPoints += swingRejectionLongGrade == "A" or swingRejectionShortGrade == "A" ? 10.0 : swingRejectionLongGrade == "B" or swingRejectionShortGrade == "B" ? 7.0 : swingRejectionLongGrade == "C" or swingRejectionShortGrade == "C" ? 4.0 : 0.0
+    reversalPoints += failedBreakdownLong or failedBreakoutShort ? 5.0 : 0.0
+    reversalPoints += htfBullishReversal or htfBearishReversal ? 3.0 : 0.0
+    reversalPoints += strongUpperWick or strongLowerWick ? 2.0 : 0.0
+reversalPoints := math.min(reversalPoints, 20.0)  // CAP at 20
+
+// Category 8: Multi-bar Confirmation + Edges (0-8 points, CAP 8)
+float edgePoints = 0.0
+edgePoints += bull3BarPattern or bear3BarPattern ? 3.0 : bull2BarSurge or bear2BarSurge ? 2.0 : 0.0
+edgePoints += htfTransitioning ? 2.0 : 0.0  // HTF turning point
+edgePoints += breakoutConditionLong or breakoutConditionShort ? 3.0 : 0.0  // Breakout ignition
+edgePoints += (trendSlopeLong and followThroughLong) or (trendSlopeShort and followThroughShort) ? 3.0 : 0.0  // Slope + follow-through
+edgePoints := math.min(edgePoints, 8.0)  // CAP at 8
+
+// Continuation bonus (boost clean trend follow-through)
+float bonusPoints = 0.0
+bonusPoints += (trendSlopeLong and followThroughLong and close > emaFast and emaFast > emaSlow and vwapUp and volume > volMA) ? 3.0 : 0.0
+bonusPoints += (trendSlopeShort and followThroughShort and close < emaFast and emaFast < emaSlow and vwapDown and volume > volMA) ? 3.0 : 0.0
+bonusPoints += (isStrongTrend and fastMove) ? 2.0 : 0.0
+bonusPoints += ((htfUp and isBullPhase and close > vwapVal) or (htfDown and isBearPhase and close < vwapVal)) ? 2.0 : 0.0  // HTF + phase alignment
+bonusPoints += (orBreakoutBullish or orBreakdownBearish) and (trendSlopeLong or trendSlopeShort) ? 2.0 : 0.0  // OR breakout continuation
+bonusPoints += (isExpandingFast and atrAccelerating and volume > volMA * 1.5) ? 2.0 : 0.0  // Ignition + volume
+bonusPoints += (cvd_rising and close > open) or (cvd_falling and close < open) ? 1.0 : 0.0  // Order flow push
+
+// Penalty adjustments (reduce low-quality setups)
+float penaltyPoints = 0.0
+penaltyPoints += extendedFromVWAPEntry and not isMeanReversion ? 4.0 : 0.0  // Late extension without mean reversion
+penaltyPoints += isNeutralChop and not (fastMove or breakoutConditionLong or breakoutConditionShort) ? 3.0 : 0.0  // Chop penalty
+penaltyPoints += wickToBodyRatio > 2.5 ? 2.0 : 0.0  // Wicky/illiquid candles
+penaltyPoints += (trendSlopeLong and not followThroughLong) or (trendSlopeShort and not followThroughShort) ? 2.0 : 0.0  // No follow-through
+penaltyPoints += isBleedTrend and not fastMove ? 2.0 : 0.0  // Slow bleed day penalty
+penaltyPoints += highThetaRisk and isWeakTrend ? 2.0 : 0.0  // Late-day weak trend penalty
+penaltyPoints += microChop ? 1.0 : 0.0  // VWAP/EMA compression
+penaltyPoints += (rsiCenterish and isNeutralChop) ? 1.0 : 0.0  // RSI stuck in middle
+penaltyPoints += (not vwapUp and not vwapDown) ? 1.0 : 0.0  // Flat VWAP
+penaltyPoints += (atrDecelerating and not isMeanReversion) ? 0.0 : 0.0  // Cooling volatility
+
+// Sum all categories (max 110 possible, normalize to 0-100)
+qualityScore := trendPoints + volumePoints + structurePoints + momentumPoints + volatilityPoints + timePoints + reversalPoints + edgePoints + bonusPoints
+qualityScore := math.max(0.0, qualityScore - penaltyPoints)
+qualityScore := math.min(qualityScore, 100.0)  // Hard cap at 100
+
+//═══════════════════════════════════════════════════════════════════════════
+// 🏗️ LAYER 4: DYNAMIC SIZING (score-based tiers)
+//═══════════════════════════════════════════════════════════════════════════
+// Minimum threshold: 25 to enter, 20-24 = log-only observation
+
+bool shouldEnter = qualityScore >= 20.0  // Must hit 20 to take position
+bool shouldLogOnly = qualityScore >= 15.0 and qualityScore < 20.0  // Observation tier
+
+// Regime score floors (tighten in STRONG_TREND + MEAN_REVERSION)
+int strongTrendScoreFloor = 30
+int meanRevScoreFloor = 35
+bool regimeShouldEnter = isStrongTrend ? qualityScore >= strongTrendScoreFloor : isMeanReversion ? qualityScore >= meanRevScoreFloor : shouldEnter
+bool regimeShouldLogOnly = isStrongTrend ? (qualityScore >= 25 and qualityScore < strongTrendScoreFloor) : isMeanReversion ? (qualityScore >= 30 and qualityScore < meanRevScoreFloor) : shouldLogOnly
+
+// Sizing tiers based on score
+float sizingMultiplier = 0.0
+if qualityScore >= 80.0
+    sizingMultiplier := 1.0 * regimeBaseSizing  // ELITE: 100% × regime base
+else if qualityScore >= 60.0
+    sizingMultiplier := 0.7 * regimeBaseSizing  // GOOD: 70% × regime base
+else if qualityScore >= 40.0
+    sizingMultiplier := 0.4 * regimeBaseSizing  // DECENT: 40% × regime base
+else if qualityScore >= 25.0
+    sizingMultiplier := 0.2 * regimeBaseSizing  // MARGINAL: 20% × regime base
+else
+    sizingMultiplier := 0.0  // Below 25 = skip
+
+// Options-specific guidance (score + regime aware)
+string strikeGuidanceNew = qualityScore >= 70 ? "ATM (max delta)" : qualityScore >= 50 ? "1-2 OTM" : qualityScore >= 25 ? "2-3 OTM" : "Skip"
+string expirationGuidanceNew = (qualityScore >= 70 and not highThetaRisk and not fridayTheta) ? "0DTE OK" : (qualityScore >= 50 and not fridayTheta) ? "1DTE pref" : "2-3DTE safe"
+
+//═══════════════════════════════════════════════════════════════════════════
+// 🏗️ LAYER 5: CAMPAIGN STATE MACHINE (daily progression)
+//═══════════════════════════════════════════════════════════════════════════
+// State: PROBE → CORE → EXPANSION → OFF
+// Time-of-day hard limits override sizing
+
+//────────────────────────────────────
+// CAMPAIGN GUARDRAILS (declared first)
+//────────────────────────────────────
+maxTradesForStateBase = ideaState == ideaStateProbe ? 3 : ideaState == ideaStateCore ? 6 : ideaState == ideaStateExpansion ? 8 : 0
+extraTrendTrades = (isTrendRegime and inAfternoonTrendSession and dayPnL_R > -1.0) ? 2 : 0
+maxTradesDynamic = maxTradesForStateBase + extraTrendTrades
+canTradeToday = (ideaState != ideaStateOff) and (tradesToday < maxTradesDynamic)
+
+// Campaign state progression (existing logic, now as Layer 5)
+string campaignState = ideaState == ideaStateProbe ? "PROBE" : ideaState == ideaStateCore ? "CORE" : ideaState == ideaStateExpansion ? "EXPANSION" : "OFF"
+
+// Time-based hard overrides
+bool campaignAllowsEntry = (ideaState != ideaStateOff) and (tradesToday < maxTradesDynamic)
+
+// First hour = PROBE mode (smaller sizing regardless of score)
+bool isProbeWindow = hour_of_day == 9 and minute_of_day >= 30 or hour_of_day == 10 and minute_of_day < 30
+if isProbeWindow and ideaState == ideaStateProbe
+    sizingMultiplier := sizingMultiplier * 0.5  // Half size in first hour
+
+// Mid-day = CORE mode (full calculated sizing if profitable)
+bool isCoreWindow = hour_of_day >= 10 and hour_of_day < 15
+if isCoreWindow and ideaState == ideaStateCore and dayPnL_R >= 1.0
+    sizingMultiplier := sizingMultiplier * 1.0  // Full size
+
+// Power hour = EXPANSION mode (can increase if crushing)
+bool isExpansionWindow = hour_of_day >= 15 and hour_of_day < 16
+if isExpansionWindow and ideaState == ideaStateExpansion and dayPnL_R >= 3.0
+    sizingMultiplier := sizingMultiplier * 1.2  // 20% bonus
+
+// Hard stop override
+if ideaState == ideaStateOff
+    sizingMultiplier := 0.0  // Kill all entries
+
+//────────────────────────────────────
+// PATTERN-SPECIFIC QUALIFICATION (used by old entry logic)
+//────────────────────────────────────
+// 🔴 DEPRECATED: Kept for backward compatibility with old pattern detection
+// New system uses Layer 3 qualityScore (0-100) + Layer 4 thresholds
+
+confidenceOK = confidence >= minConfidence and isTrendRegime and (adxStrongTrend or adxVeryStrong) and not adxChop
+
+// Weak trend qualification (only in WEAK TREND regime with ADX 20-30)
+weakTrendQualified = (weakBullTrend or weakBearTrend) and isWeakTrendRegime and volume > volMA * 0.7 and adxWeakTrend and not adxChop
+
+// Reversal qualification using TIERED SCORING
+// 🎯 EDGE: VWAP Band 3 (2σ) reversals get automatic boost
+bool atVWAPExtreme = atBand3Upper or atBand3Lower
+reversalQualified = ((swingRejectionLongQualified or swingRejectionShortQualified or failedBreakdownLong or failedBreakoutShort or atVWAPExtreme) and isReversalRegime and confidence >= 2 and adx >= 18) or (atVWAPExtreme and rsiExtreme and volumeSpike)
+
+// Scalp qualification (only in GRIND regime, allows low ADX)
+scalpQualified = isGrindRegime and nearVWAPEntry and confidence >= 2 and not adxChop
+
+//────────────────────────────────────
+// 🔴 DEPRECATED V6 CODE REMOVED
+//────────────────────────────────────
+// Removed old setupQuality (0-10 scale) → Replaced by Layer 3 qualityScore (0-100)
+// Removed old strikeGuidance/expirationGuidance → Replaced by Layer 4 strikeGuidanceNew/expirationGuidanceNew
+// Removed old dynamicSizeMult → Replaced by Layer 4 sizingMultiplier
+// See 5-layer architecture above for new system
+
+// DEPRECATED: Old setupQuality variable (kept for backward compatibility with old guidance code)
+float setupQuality = 0.0  // Not used - see qualityScore (0-100) in Layer 3
+
+//────────────────────────────────────
+// 🆕 REGIME-GATED ENTRY LOGIC WITH HTF + PHASE
+//────────────────────────────────────
+
+// � OPTIONS-SPECIFIC: Strike Selection Guidance
+string strikeGuidance = ""
+if setupQuality >= 8.0 and not highThetaRisk
+    strikeGuidance := "ATM (max delta)"
+else if setupQuality >= 5.0 and not highThetaRisk
+    strikeGuidance := "1-2 OTM"
+else if setupQuality >= 3.0
+    strikeGuidance := "2-3 OTM"
+else
+    strikeGuidance := "Skip/Far OTM"
+
+// 🎯 OPTIONS-SPECIFIC: Expiration Guidance
+string expirationGuidance = ""
+if setupQuality >= 8.0 and not highThetaRisk and not fridayTheta
+    expirationGuidance := "0DTE OK"
+else if setupQuality >= 5.0 and not fridayTheta
+    expirationGuidance := "1DTE pref"
+else
+    expirationGuidance := "2-3DTE safe"
+
+// �🆕 DYNAMIC POSITION SIZE MULTIPLIER (based on setup quality)
+float dynamicSizeMult = 0.0  // DEPRECATED, use sizingMultiplier from Layer 4
+
+//────────────────────────────────────
+// 🆕 REGIME-GATED ENTRY LOGIC WITH HTF + PHASE
+//────────────────────────────────────
+
+// Skip tracking for labels
+var string lastSkipReason = ""
+var int lastSkipBar = -999
+
+// 🔥 NEW ENTRY LOGIC: Use 5-layer architecture
+// Layer 1: Check hard stops FIRST
+// Layer 2: Classify regime (already done above)
+// Layer 3: Calculate score (already done above)
+// Layer 4: Check sizing threshold (≥30 enters, 20-29 log-only, <20 skip)
+// Layer 5: Apply campaign state (already done above)
+
+// If hard stop violated, block everything
+if hardStopViolation
+    lastSkipReason := hardStopReason
+    lastSkipBar := bar_index
+
+// Pattern detection (kept from V6, now just identification not blocking)
+bool isGLD = syminfo.ticker == "GLD" or str.contains(syminfo.ticker, "GLD")
+bool gldStrict = useGLDStrict and isGLD
+bool trendLongCandidate = bullMomentum or weakBullTrend or bull3BarPattern or bull2BarSurge or orBreakoutBullish or breakoutConditionLong
+bool trendShortCandidate = bearMomentum or weakBearTrend or bear3BarPattern or bear2BarSurge or orBreakdownBearish or breakoutConditionShort
+bool reversalLongCandidate = (swingRejectionLongScore >= 3) or failedBreakdownLong
+bool reversalShortCandidate = (swingRejectionShortScore >= 3) or failedBreakoutShort
+
+// STRONG_TREND entry filters (clean trend only)
+bool strongTrendEntryLongOK = isStrongTrend and adx >= 35 and vwapSlopeStrongUp and emaFast > emaSlow and close > vwapVal and distFromVWAPATR >= 0.8 and not atrDecelerating
+bool strongTrendEntryShortOK = isStrongTrend and adx >= 35 and vwapSlopeStrongDown and emaFast < emaSlow and close < vwapVal and distFromVWAPATR >= 0.8 and not atrDecelerating
+
+// MEAN_REVERSION entry filters (extreme + rejection)
+bool meanRevEntryLongOK = isMeanReversion and (atBand2Lower or atBand3Lower) and (rsi14 < 40 or rsiExtreme) and (strongLowerWick or supportExhaustion or swingRejectionLongQualified or failedBreakdownLong) and close < vwapVal
+bool meanRevEntryShortOK = isMeanReversion and (atBand2Upper or atBand3Upper) and (rsi14 > 60 or rsiExtreme) and (strongUpperWick or resistanceExhaustion or swingRejectionShortQualified or failedBreakoutShort) and close > vwapVal
+
+// GLD: suppress trend entries in Neutral/Chop unless breakout; allow reversals
+bool gldNeutralBlockLong = gldStrict and (isNeutralChop or isNeutral) and not (reversalLongCandidate or breakoutConditionLong)
+bool gldNeutralBlockShort = gldStrict and (isNeutralChop or isNeutral) and not (reversalShortCandidate or breakoutConditionShort)
+
+bool bullishPatternDetected = isStrongTrend ? (trendLongCandidate and strongTrendEntryLongOK) : isMeanReversion ? (reversalLongCandidate and meanRevEntryLongOK) : (trendLongCandidate or reversalLongCandidate)
+bool bearishPatternDetected = isStrongTrend ? (trendShortCandidate and strongTrendEntryShortOK) : isMeanReversion ? (reversalShortCandidate and meanRevEntryShortOK) : (trendShortCandidate or reversalShortCandidate)
+
+// Determine setup type (for label display)
+string currentSetupType = ""
+if bullishPatternDetected
+    currentSetupType := (swingRejectionLongScore >= 3 or failedBreakdownLong) ? "REVERSAL" : (weakBullTrend) ? "WEAK_TREND" : (breakoutConditionLong) ? "BREAKOUT" : (nearVWAPEntry and confidence >= 2) ? "SCALP" : "TREND"
+
+if bearishPatternDetected
+    currentSetupType := (swingRejectionShortScore >= 3 or failedBreakoutShort) ? "REVERSAL" : (weakBearTrend) ? "WEAK_TREND" : (breakoutConditionShort) ? "BREAKOUT" : (nearVWAPEntry and confidence >= 2) ? "SCALP" : "TREND"
+
+// NEW ENTRY CONDITIONS: Pattern + No Hard Stops + Score ≥25 + Campaign OK + HTF OK + Not in trade + Not cooling
+bool canFireLong = bullishPatternDetected and not hardStopViolation and regimeShouldEnter and campaignAllowsEntry and htfAllowsLongs and not inCall and not inPut and not noTradeZone and not coolingPeriodActive and not gldNeutralBlockLong
+bool canFireShort = bearishPatternDetected and not hardStopViolation and regimeShouldEnter and campaignAllowsEntry and htfAllowsShorts and not inCall and not inPut and not noTradeZone and not coolingPeriodActive and not gldNeutralBlockShort
+
+// Log-only tier (20-29 score): Pattern appears but score too low
+bool logOnlyLong = bullishPatternDetected and not hardStopViolation and regimeShouldLogOnly and not regimeShouldEnter and bar_index != lastSkipBar
+bool logOnlyShort = bearishPatternDetected and not hardStopViolation and regimeShouldLogOnly and not regimeShouldEnter and bar_index != lastSkipBar
+
+if logOnlyLong or logOnlyShort
+    lastSkipReason := "Score " + str.tostring(qualityScore, "#") + " (20-24 = Log-Only)"
+    lastSkipBar := bar_index
+
+// Track skips when pattern detected but blocked (for debugging)
+bool setupAppearedLong = bullishPatternDetected and not inCall and not inPut and not noTradeZone and campaignAllowsEntry
+bool setupAppearedShort = bearishPatternDetected and not inCall and not inPut and not noTradeZone and campaignAllowsEntry
+
+if setupAppearedLong and not canFireLong and bar_index != lastSkipBar and not logOnlyLong
+    lastSkipReason := hardStopViolation ? hardStopReason : not regimeShouldEnter ? "Score " + str.tostring(qualityScore, "#") + " < floor" : not htfAllowsLongs ? "HTF Bearish" : coolingPeriodActive ? "Cooling (" + str.tostring(coolingPeriod - (bar_index - lastSignalBar)) + " bars)" : "Other"
+    lastSkipBar := bar_index
+
+if setupAppearedShort and not canFireShort and bar_index != lastSkipBar and not logOnlyShort
+    lastSkipReason := hardStopViolation ? hardStopReason : not regimeShouldEnter ? "Score " + str.tostring(qualityScore, "#") + " < floor" : not htfAllowsShorts ? "HTF Bullish" : coolingPeriodActive ? "Cooling (" + str.tostring(coolingPeriod - (bar_index - lastSignalBar)) + " bars)" : "Other"
+    lastSkipBar := bar_index
+
+// Final buy signals
+buyCall = canFireLong
+buyPut = canFireShort
+
+//────────────────────────────────────
+// 🆕 DUAL EXIT LOGIC (different for reversals)
+//────────────────────────────────────
+
+// MICRO STRUCTURE: pivot highs / lows for early exits
+pivotHigh = high[1] > high[2] and high[1] > high
+pivotLow  = low[1]  < low[2]  and low[1]  < low
+
+earlySellCallStruct = inCall and pivotHigh and close < emaFast and close < close[1]
+earlySellPutStruct  = inPut  and pivotLow  and close > emaFast and close > close[1]
+
+// Base exit logic
+baseExitCall = inCall and emaFast < emaSlow
+baseExitPut  = inPut  and emaFast > emaSlow
+
+// 🆕 For REVERSAL setups, don't exit on first EMA cross (let it breathe)
+bool exitCall = false
+bool exitPut  = false
+
+// Exit gating: min hold unless adverse move is strong
+float exitCurrentR = na
+if (inCall or inPut) and not na(lastEntryPrice) and lastRiskATR > 0
+    float exitMove       = close - lastEntryPrice
+    float exitSignedMove = lastDirection == +1 ? exitMove : -exitMove
+    exitCurrentR := exitSignedMove / lastRiskATR
+
+bool withinMinHold = not na(barsSinceEntry) and barsSinceEntry < minHoldBars
+bool adverseOverride = not na(exitCurrentR) and exitCurrentR <= -adverseExitR
+
+// Neutral-specific confirmation (avoid fear exits on pullbacks)
+bool twoClosesDown = close < close[1] and close[1] < close[2]
+bool twoClosesUp   = close > close[1] and close[1] > close[2]
+bool neutralExitCallConfirm = close < vwapVal and rsi14 < 45 and twoClosesDown
+bool neutralExitPutConfirm  = close > vwapVal and rsi14 > 55 and twoClosesUp
+
+// Mean-reversion-specific exits (take profit into mean / fade failures)
+bool meanRevExitCall = inCall and (close >= vwapVal or rsi14 >= 52 or atBand2Upper or (strongUpperWick and close < emaFast))
+bool meanRevExitPut  = inPut  and (close <= vwapVal or rsi14 <= 48 or atBand2Lower or (strongLowerWick and close > emaFast))
+bool meanRevFailCall = inCall and (close < vwapBand3Lower * 0.998 or (emaFast < emaSlow and close < vwapVal and rsi14 < 40))
+bool meanRevFailPut  = inPut  and (close > vwapBand3Upper * 1.002 or (emaFast > emaSlow and close > vwapVal and rsi14 > 60))
+
+// Regime-specific exit logic (trend/weak/chop)
+bool strongTrendExitCall = inCall and ((baseExitCall and close < vwapVal) or (close < emaFast and close[1] < emaFast[1] and vwapDown))
+bool strongTrendExitPut  = inPut  and ((baseExitPut  and close > vwapVal) or (close > emaFast and close[1] > emaFast[1] and vwapUp))
+
+bool weakTrendExitCall = inCall and (baseExitCall or (close < vwapVal and twoClosesDown) or rsi14 < 48)
+bool weakTrendExitPut  = inPut  and (baseExitPut  or (close > vwapVal and twoClosesUp)  or rsi14 > 52)
+
+bool neutralChopExitCall = inCall and (baseExitCall or (close < vwapVal and twoClosesDown) or rsi14 < 47)
+bool neutralChopExitPut  = inPut  and (baseExitPut  or (close > vwapVal and twoClosesUp)  or rsi14 > 53)
+
+if lastSetupType == "REVERSAL"
+    // Reversal exits: only exit on strong counter-move
+    exitCall := (inCall and close < vwapVal and emaFast < emaSlow and rsi14 < 45) or earlySellCallStruct
+    exitPut  := (inPut  and close > vwapVal and emaFast > emaSlow and rsi14 > 55) or earlySellPutStruct
+else if isMeanReversion
+    // Mean reversion exits: take profits into mean / failed push beyond
+    exitCall := meanRevExitCall or meanRevFailCall or earlySellCallStruct
+    exitPut  := meanRevExitPut  or meanRevFailPut  or earlySellPutStruct
+else if isStrongTrend
+    // Strong trend exits: require VWAP loss + EMA cross + RSI shift
+    exitCall := strongTrendExitCall or earlySellCallStruct
+    exitPut  := strongTrendExitPut  or earlySellPutStruct
+else if isWeakTrend
+    // Weak trend exits: quicker protection on VWAP loss or momentum fade
+    exitCall := weakTrendExitCall or earlySellCallStruct
+    exitPut  := weakTrendExitPut  or earlySellPutStruct
+else if isNeutralChop
+    // Neutral chop exits: fast protection, no patience in chop
+    exitCall := neutralChopExitCall or earlySellCallStruct
+    exitPut  := neutralChopExitPut  or earlySellPutStruct
+else if isNeutral
+    // Neutral exits: require stronger confirmation to avoid premature exits
+    exitCall := (baseExitCall and neutralExitCallConfirm) or (earlySellCallStruct and neutralExitCallConfirm)
+    exitPut  := (baseExitPut  and neutralExitPutConfirm)  or (earlySellPutStruct  and neutralExitPutConfirm)
+else
+    // Normal exits (trend/scalp)
+    exitCall := baseExitCall or earlySellCallStruct
+    exitPut  := baseExitPut  or earlySellPutStruct
+
+// Enforce minimum hold unless adverse override triggers
+if (inCall or inPut) and withinMinHold and not adverseOverride
+    exitCall := false
+    exitPut  := false
+
+sellCall = exitCall
+sellPut  = exitPut
+
+//────────────────────────────────────
+// STATE MANAGEMENT
+//────────────────────────────────────
+if buyCall
+    inCall := true
+    inPut  := false
+    lastSetupType := currentSetupType
+    lastSignalBar := bar_index  // 🔥 Start cooling period
+    
+    // 🆕 Scaling: start with partial position for reversals
+    if enableScaling and lastSetupType == "REVERSAL"
+        canScaleIn := true
+        hasScaledOnce := false
+        currentPositionPct := initialPositionPct
+    else
+        canScaleIn := false
+        currentPositionPct := 100.0
+
+if buyPut
+    inPut  := true
+    inCall := false
+    lastSetupType := currentSetupType
+    lastSignalBar := bar_index  // 🔥 Start cooling period
+    
+    if enableScaling and lastSetupType == "REVERSAL"
+        canScaleIn := true
+        hasScaledOnce := false
+        currentPositionPct := initialPositionPct
+    else
+        canScaleIn := false
+        currentPositionPct := 100.0
+
+if sellCall
+    inCall := false
+    canScaleIn := false
+    hasScaledOnce := false
+    currentPositionPct := 0.0
+
+if sellPut
+    inPut := false
+    canScaleIn := false
+    hasScaledOnce := false
+    currentPositionPct := 0.0
+
+// 🆕 SCALE-IN LOGIC (add to position if working)
+if canScaleIn and not hasScaledOnce and not na(lastEntryPrice)
+    float currentR = (lastDirection == +1 ? (close - lastEntryPrice) : (lastEntryPrice - close)) / lastRiskATR
+    
+    // Scale in at +0.5R to +1R
+    if currentR >= 0.5 and currentR < 1.5
+        // HTF must still support
+        bool htfStillGood = (lastDirection == +1 and htfUp) or (lastDirection == -1 and htfDown)
+        
+        if htfStillGood
+            hasScaledOnce := true
+            float addAmount = (100.0 - initialPositionPct) / 2.0  // Add 33% more
+            currentPositionPct := currentPositionPct + addAmount
+            label.new(bar_index, close, "SCALE IN\n+" + str.tostring(addAmount, "#") + "% @ +" + str.tostring(currentR, "#.##") + "R", style = label.style_label_right, color = color.new(color.blue, 0), textcolor = color.white, size = size.small)
+
+//────────────────────────────────────
+// PRE-SIGNAL LOGIC
+//────────────────────────────────────
+preBuyCall =
+     not inCall and not inPut and
+     close > vwapVal and
+     emaFast > emaSlow and
+     not noTradeZone
+
+preBuyPut =
+     not inCall and not inPut and
+     close < vwapVal and
+     emaFast < emaSlow and
+     not noTradeZone
+
+// Simple day bias
+int dayBias = 0
+dayBias := emaFast > emaSlow and close > vwapVal ? 1 :
+           emaFast < emaSlow and close < vwapVal ? -1 :
+                                                   0
+
+//────────────────────────────────────
+// TOP BANNER (updated with new regime)
+//────────────────────────────────────
+var label banner = na
+
+if barstate.isnew
+    label.delete(banner)
+
+    string dayText = inCall ? "CALL DAY" : inPut ? "PUT DAY" : "NEUTRAL DAY"
+
+    string regimeText = "Regime: " + regimeType
+
+    // 🆕 Quality Score
+    string scoreText = hardStopViolation ? "⛔ HARD STOP" : "Score: " + str.tostring(qualityScore, "#") + "/100" + (qualityScore >= 25 ? " ✓" : qualityScore >= 20 ? " ⚠" : " ✗")
+    
+    // 🆕 Market Phase
+    string phaseText2 = "Phase: " + marketPhase + (phaseConfirmCount > 0 ? " (→" + pendingPhase + " " + str.tostring(phaseConfirmCount) + ")" : "")
+    
+    // 🆕 HTF Status
+    string htfText = "HTF: " + (htfAllowsLongs ? "↑ Longs OK" : htfAllowsShorts ? "↓ Shorts OK" : "⊗ Neutral")
+    
+    // 🆕 PHASE 2A: BB Width state
+    string bbText = isSqueezed ? "BB: SQUEEZED" : isExpandingFast ? "BB: IGNITION!" : isExpanding ? "BB: Expanding" : "BB: Normal"
+    
+    // 🆕 PHASE 2A: ATR acceleration
+    string atrText = atrAccelerating ? "ATR: +" + str.tostring(atrROC, "#") + "%" : atrDecelerating ? "ATR: Cooling" : "ATR: Steady"
+    
+    // 🆕 PHASE 2B: Time-of-Day
+    string todText = isOpeningRange ? "ToD: OPENING" : isMidDay ? "ToD: MIDDAY" : isPowerHour ? "ToD: POWER" : "ToD: Normal"
+
+    string macroText = macroBullMetals ? "Macro: Bullish metals" : macroBearMetals ? "Macro: Bearish metals" : "Macro: Neutral"
+
+    string campaignText = "Camp: " + campaignState
+
+    string biasText = dayBias == 1 ? "Bias: CALL" : dayBias == -1 ? "Bias: PUT" : "Bias: NEUTRAL"
+
+    // 🆕 Show confidence + ADX + Regime + Score + Phase + BB Width + ATR + ToD in banner
+    string bannerPart1 = dayText + " | Conf: " + str.tostring(confidence, "#") + "/8"
+    string bannerPart2 = " | " + regimeText + " | " + scoreText + " | " + phaseText2 + " | " + htfText
+    string bannerPart3 = " | " + bbText + " | " + atrText + " | " + todText
+    string bannerPart4 = " | " + macroText + " | " + campaignText + " | " + biasText
+    string bannerText  = bannerPart1 + bannerPart2 + bannerPart3 + bannerPart4
+
+    color bannerColor = inCall ? color.new(color.green, 0) : inPut ? color.new(color.red, 0) : color.new(color.gray, 0)
+
+    banner := label.new(bar_index, high + atr14 * bannerAtrMult, bannerText, style = label.style_label_center, color = bannerColor, textcolor = color.white, size = size.large)
+
+//────────────────────────────────────
+// PLOTS (VWAP + EMAs + ADX)
+//────────────────────────────────────
+plot(vwapVal, "VWAP",  color = color.orange, linewidth = 2)
+plot(emaFast, "EMA 9", color = color.aqua)
+plot(emaSlow, "EMA 21",color = color.blue)
+
+// 🆕 SKIP LABELS (show when setup blocked or log-only)
+if showSkipLabels and bar_index == lastSkipBar and lastSkipReason != ""
+    // Log-only tier = yellow warning (score 20-29), hard stop = red block
+    bool isLogOnly = str.contains(lastSkipReason, "Log-Only")
+    color skipColor = isLogOnly ? color.new(color.yellow, 20) : color.new(color.gray, 20)
+    string skipPrefix = isLogOnly ? "📊 LOG-ONLY\n" : "⛔ SKIPPED\n"
+    label.new(bar_index, high + atr14 * 0.5, skipPrefix + lastSkipReason, style = label.style_label_down, color = skipColor, textcolor = color.white, size = size.tiny)
+
+//────────────────────────────────────
+// ENTRY LABELS
+//────────────────────────────────────
+
+yBuyCall   = low  - atr14 * entryLabelMult
+ySellCall  = high + atr14 * exitLabelMult
+yBuyPut    = high + atr14 * entryLabelMult
+ySellPut   = low  - atr14 * exitLabelMult
+
+firstBuyCall  = buyCall  and not buyCall[1]
+firstSellCall = sellCall and not sellCall[1]
+firstBuyPut   = buyPut   and not buyPut[1]
+firstSellPut  = sellPut  and not sellPut[1]
+
+if (inCall or inPut) and not na(barsSinceEntry)
+    barsSinceEntry += 1
+
+//────────────────────────────────────
+// BUY CALL ENTRY
+//────────────────────────────────────
+if firstBuyCall
+    // Choose risk/RR based on REGIME (not setup type)
+    float riskMult = isMeanReversion ? effRiskATRMultReversal : effRiskATRMult
+    
+    // 🆕 Apply time-of-day risk adjustment
+    riskMult := riskMult * todRiskMult
+    
+    float riskDist = riskMult * atr14
+    
+    lastEntryPrice   := close
+    lastRiskATR      := riskDist
+    lastDirection    := +1
+    barsSinceEntry   := 0
+    tp1Triggered     := false
+    tp2Triggered     := false
+    timeStopTriggered := false
+
+    // Use REGIME-based settings (not setup type)
+    maxBarsThisTrade := regimeMaxBars
+    float rrLocal = regimeRRMult
+
+    float callStop   = close - riskDist
+    float callTarget = close + rrLocal * riskDist
+    currStopPrice    := callStop
+    currTargetPrice  := callTarget
+
+    stopLine   := line.new(bar_index, callStop,   bar_index, callStop,   extend = extend.none, color = color.new(color.red,   0), width = 1)
+    targetLine := line.new(bar_index, callTarget, bar_index, callTarget, extend = extend.none, color = color.new(color.green, 0), width = 1)
+
+    float oneR_dollar   = riskDist * 100.0
+    float contractsF    = oneR_dollar > 0 ? perTradeRiskDollar / oneR_dollar : 0.0
+    
+    // 🆕 Apply 5-layer sizing (score-based × regime × campaign)
+    contractsF := contractsF * sizingMultiplier
+    
+    int   contractsSize = contractsF > 0 ? int(math.round(contractsF)) : 0
+    
+    // Adjust for initial position size if scaling
+    if enableScaling and lastSetupType == "REVERSAL"
+        contractsSize := int(math.round(contractsSize * initialPositionPct / 100.0))
+
+    string setupText = currentSetupType == "REVERSAL" ? ("Setup: REVERSAL Long (Score " + str.tostring(qualityScore, "#") + ")") : currentSetupType == "WEAK_TREND" ? "Setup: Weak Trend Long" : currentSetupType == "BREAKOUT" ? "Setup: BREAKOUT (early)" : currentSetupType == "SCALP" ? "Setup: Scalp Long" : "Setup: Trend Long"
+
+    string modeText = "Regime: " + regimeType + " | Score: " + str.tostring(qualityScore, "#") + "/100"
+
+    string sizeText = ideaState == ideaStateOff ? "Size: NONE (campaign off)" : sizingMultiplier >= 0.8 ? "Size: LARGE" : sizingMultiplier >= 0.5 ? "Size: NORMAL" : sizingMultiplier >= 0.3 ? "Size: SMALL" : "Size: PROBE"
+
+    string helperText = ""
+    if showSizeHelper and oneR_dollar > 0
+        string qualityText = "Mult: " + str.tostring(sizingMultiplier, "#.##") + "x | RR: " + str.tostring(rrLocal, "#.#") + "R"
+        string optionsText = "🎯 " + strikeGuidanceNew + " | " + expirationGuidanceNew
+        helperText := "\n" + modeText + "\n" + setupText + "\n" + qualityText + "\n" + optionsText + "\n1R ≈ $" + str.tostring(oneR_dollar, "#.##") +
+                      "\nSize guide: " + str.tostring(contractsSize) + " contracts"
+    else
+        helperText := "\n" + modeText + "\n" + setupText
+
+    color labelColor = currentSetupType == "REVERSAL" ? color.purple : currentSetupType == "BREAKOUT" ? color.blue : color.lime
+    label.new(bar_index, yBuyCall, "BUY CALL\n" + sizeText + helperText, style = label.style_label_up, color = color.new(labelColor, 0), textcolor = color.white, size = size.large)
+
+//────────────────────────────────────
+// BUY PUT ENTRY
+//────────────────────────────────────
+if firstBuyPut
+    float riskMult2 = isMeanReversion ? effRiskATRMultReversal : effRiskATRMult
+    
+    // 🆕 Apply time-of-day risk adjustment
+    riskMult2 := riskMult2 * todRiskMult
+    
+    float riskDist2 = riskMult2 * atr14
+
+    lastEntryPrice   := close
+    lastRiskATR      := riskDist2
+    lastDirection    := -1
+    barsSinceEntry   := 0
+    tp1Triggered     := false
+    tp2Triggered     := false
+    timeStopTriggered := false
+
+    maxBarsThisTrade := regimeMaxBars
+    float rrLocal2 = regimeRRMult
+
+    float putStop   = close + riskDist2
+    float putTarget = close - rrLocal2 * riskDist2
+    currStopPrice   := putStop
+    currTargetPrice := putTarget
+
+    stopLine   := line.new(bar_index, putStop,   bar_index, putStop,   extend = extend.none, color = color.new(color.red,   0), width = 1)
+    targetLine := line.new(bar_index, putTarget, bar_index, putTarget, extend = extend.none, color = color.new(color.green, 0), width = 1)
+
+    float oneR_dollar2   = riskDist2 * 100.0
+    float contractsF2    = oneR_dollar2 > 0 ? perTradeRiskDollar / oneR_dollar2 : 0.0
+    
+    // 🆕 Apply 5-layer sizing
+    contractsF2 := contractsF2 * sizingMultiplier
+    
+    int   contractsSize2 = contractsF2 > 0 ? int(math.round(contractsF2)) : 0
+    
+    if enableScaling and lastSetupType == "REVERSAL"
+        contractsSize2 := int(math.round(contractsSize2 * initialPositionPct / 100.0))
+
+    string setupText2 = currentSetupType == "REVERSAL" ? ("Setup: REVERSAL Short (Score " + str.tostring(qualityScore, "#") + ")") : currentSetupType == "WEAK_TREND" ? "Setup: Weak Trend Short" : currentSetupType == "BREAKOUT" ? "Setup: BREAKOUT (early)" : currentSetupType == "SCALP" ? "Setup: Scalp Short" : "Setup: Trend Short"
+
+    string modeText2 = "Regime: " + regimeType + " | Score: " + str.tostring(qualityScore, "#") + "/100"
+
+    string sizeText2 = ideaState == ideaStateOff ? "Size: NONE (campaign off)" : sizingMultiplier >= 0.8 ? "Size: LARGE" : sizingMultiplier >= 0.5 ? "Size: NORMAL" : sizingMultiplier >= 0.3 ? "Size: SMALL" : "Size: PROBE"
+
+    string helperText2 = ""
+    if showSizeHelper and oneR_dollar2 > 0
+        string qualityText2 = "Mult: " + str.tostring(sizingMultiplier, "#.##") + "x | RR: " + str.tostring(rrLocal2, "#.#") + "R"
+        string optionsText2 = "🎯 " + strikeGuidanceNew + " | " + expirationGuidanceNew
+        helperText2 := "\n" + modeText2 + "\n" + setupText2 + "\n" + qualityText2 + "\n" + optionsText2 + "\n1R ≈ $" + str.tostring(oneR_dollar2, "#.##") +
+                       "\nSize guide: " + str.tostring(contractsSize2) + " contracts"
+    else
+        helperText2 := "\n" + modeText2 + "\n" + setupText2
+
+    color labelColor2 = currentSetupType == "REVERSAL" ? color.purple : currentSetupType == "BREAKOUT" ? color.blue : color.red
+    label.new(bar_index, yBuyPut, "BUY PUT\n" + sizeText2 + helperText2, style = label.style_label_down, color = color.new(labelColor2, 0), textcolor = color.white, size = size.large)
+
+//────────────────────────────────────
+// CURRENT R + EXIT MANAGEMENT
+//────────────────────────────────────
+float currentR = na
+if (inCall or inPut) and not na(lastEntryPrice) and lastRiskATR > 0
+    float move       = close - lastEntryPrice
+    float signedMove = lastDirection == +1 ? move : -move
+    currentR := signedMove / lastRiskATR
+
+if (inCall or inPut or firstSellCall or firstSellPut)
+    if not na(stopLine)
+        line.set_x2(stopLine, bar_index)
+    if not na(targetLine)
+        line.set_x2(targetLine, bar_index)
+
+if (inCall or inPut) and not na(currentR)
+    if not tp1Triggered and currentR >= 1.0
+        tp1Triggered := true
+        label.new(bar_index, close, "TP1 ~ +1R\nConsider partial", style = (lastDirection == +1 ? label.style_label_down : label.style_label_up), color = color.new(color.yellow, 0), textcolor = color.black, size = size.small)
+
+    if not tp2Triggered and currentR >= 2.0
+        tp2Triggered := true
+        label.new(bar_index, close, "TP2 ~ +2R\nStart trail / protect", style = (lastDirection == +1 ? label.style_label_down : label.style_label_up), color = color.new(color.orange, 0), textcolor = color.black, size = size.small)
+
+    if tp2Triggered and lastRiskATR > 0 and not na(stopLine)
+        float newStopPrice = lastDirection == +1 ?
+             math.max(currStopPrice, lastEntryPrice + 1.0 * lastRiskATR) :
+             math.min(currStopPrice, lastEntryPrice - 1.0 * lastRiskATR)
+        if newStopPrice != currStopPrice
+            currStopPrice := newStopPrice
+            line.set_y1(stopLine, currStopPrice)
+            line.set_y2(stopLine, currStopPrice)
+
+    int maxBars = na(maxBarsThisTrade) ? maxBarsInTradeTrend : maxBarsThisTrade
+    if not timeStopTriggered and not na(barsSinceEntry) and barsSinceEntry >= maxBars and math.abs(currentR) < 0.3
+        timeStopTriggered := true
+        label.new(bar_index, close, "TIME STOP\nNo progress, consider exit", style = (lastDirection == +1 ? label.style_label_down : label.style_label_up), color = color.new(color.gray, 0), textcolor = color.white, size = size.small)
+
+//────────────────────────────────────
+// EXIT LABELS
+//────────────────────────────────────
+if firstSellCall
+    float tradeR = 0.0
+    if not na(lastEntryPrice) and lastRiskATR > 0
+        float moveExit       = close - lastEntryPrice
+        float signedMoveExit = +1 * moveExit
+        tradeR := signedMoveExit / lastRiskATR
+
+    dayPnL_R    += tradeR
+    tradesToday += 1
+
+    if inRTH
+        array.push(tradeRsRTH, tradeR)
+        if array.size(tradeRsRTH) > statsLookback
+            array.shift(tradeRsRTH)
+        todayR_RTH     += tradeR
+        tradesTodayRTH += 1
+
+    if ideaState != ideaStateOff
+        if dayPnL_R >= 1.0 and ideaState == ideaStateProbe
+            ideaState := ideaStateCore
+        if dayPnL_R >= 3.0 and ideaState == ideaStateCore
+            ideaState := ideaStateExpansion
+
+    lastEntryPrice    := na
+    lastRiskATR       := na
+    lastDirection     := 0
+    tp1Triggered      := false
+    tp2Triggered      := false
+    timeStopTriggered := false
+    barsSinceEntry    := na
+    maxBarsThisTrade  := na
+    lastSetupType     := ""
+
+    stopLine        := na
+    targetLine      := na
+    currStopPrice   := na
+    currTargetPrice := na
+
+    string rTextCall = "R: " + str.tostring(tradeR, "#.##")
+
+    label.new(bar_index, ySellCall, "SELL CALL\n" + rTextCall, style = label.style_label_down, color = color.new(color.green, 10), textcolor = color.black, size = size.large)
+
+if firstSellPut
+    float tradeR2 = 0.0
+    if not na(lastEntryPrice) and lastRiskATR > 0
+        float moveExit2       = lastEntryPrice - close
+        float signedMoveExit2 = +1 * moveExit2
+        tradeR2 := signedMoveExit2 / lastRiskATR
+
+    dayPnL_R    += tradeR2
+    tradesToday += 1
+
+    if inRTH
+        array.push(tradeRsRTH, tradeR2)
+        if array.size(tradeRsRTH) > statsLookback
+            array.shift(tradeRsRTH)
+        todayR_RTH     += tradeR2
+        tradesTodayRTH += 1
+
+    if ideaState != ideaStateOff
+        if dayPnL_R >= 1.0 and ideaState == ideaStateProbe
+            ideaState := ideaStateCore
+        if dayPnL_R >= 3.0 and ideaState == ideaStateCore
+            ideaState := ideaStateExpansion
+
+    lastEntryPrice    := na
+    lastRiskATR       := na
+    lastDirection     := 0
+    tp1Triggered      := false
+    tp2Triggered      := false
+    timeStopTriggered := false
+    barsSinceEntry    := na
+    maxBarsThisTrade  := na
+    lastSetupType     := ""
+
+    stopLine        := na
+    targetLine      := na
+    currStopPrice   := na
+    currTargetPrice := na
+
+    string rTextPut = "R: " + str.tostring(tradeR2, "#.##")
+
+    label.new(bar_index, ySellPut, "SELL PUT\n" + rTextPut, style = label.style_label_up, color = color.new(color.maroon, 10), textcolor = color.white, size = size.large)
+
+//────────────────────────────────────
+// STATS DASHBOARD
+//────────────────────────────────────
+var table statsTable = table.new(position.top_right, 3, 3, border_width = 1)
+
+if barstate.isnew and showStatsTable
+    int totalRTH = array.size(tradeRsRTH)
+    float sumR   = 0.0
+    int   wins   = 0
+    float avgR   = 0.0
+    float winRate = 0.0
+
+    if totalRTH > 0
+        for i = 0 to totalRTH - 1
+            float rVal = array.get(tradeRsRTH, i)
+            sumR += rVal
+            if rVal > 0
+                wins += 1
+        avgR    := sumR / totalRTH
+        winRate := 100.0 * wins / totalRTH
+
+    string hdrTxt  = totalRTH > 0 ? "Last " + str.tostring(totalRTH) + " RTH trades" : "No RTH trades yet"
+    string winTxt  = totalRTH > 0 ? "Win%: " + str.tostring(winRate, "#.##") + "%" : ""
+    string avgTxt  = totalRTH > 0 ? "Avg R: " + str.tostring(avgR, "#.##") : ""
+    string netTxt  = totalRTH > 0 ? "Net R: " + str.tostring(sumR, "#.##") : ""
+
+    string todayHdr = "Today RTH"
+    string todayNet = "Net R: " + str.tostring(todayR_RTH, "#.##")
+    string todayTr  = "Trades: " + str.tostring(tradesTodayRTH)
+
+    table.cell(statsTable, 0, 0, hdrTxt,  text_color = color.white, bgcolor = color.new(color.black, 0))
+    table.cell(statsTable, 0, 1, winTxt,  text_color = color.white, bgcolor = color.new(color.black, 0))
+    table.cell(statsTable, 1, 1, avgTxt,  text_color = color.white, bgcolor = color.new(color.black, 0))
+    table.cell(statsTable, 2, 1, netTxt,  text_color = color.white, bgcolor = color.new(color.black, 0))
+
+    table.cell(statsTable, 0, 2, todayHdr, text_color = color.white, bgcolor = color.new(color.black, 0))
+    table.cell(statsTable, 1, 2, todayNet, text_color = color.white, bgcolor = color.new(color.black, 0))
+    table.cell(statsTable, 2, 2, todayTr,  text_color = color.white, bgcolor = color.new(color.black, 0))
+
+//────────────────────────────────────
+// TINY MARKERS
+//────────────────────────────────────
+plotshape(showTinyMarks and buyCall,
+     title    = "Buy Call marker",
+     style    = shape.triangleup,
+     location = location.belowbar,
+     size     = size.tiny,
+     color    = color.lime)
+
+plotshape(showTinyMarks and sellCall,
+     title    = "Sell Call marker",
+     style    = shape.triangledown,
+     location = location.abovebar,
+     size     = size.tiny,
+     color    = color.green)
+
+plotshape(showTinyMarks and buyPut,
+     title    = "Buy Put marker",
+     style    = shape.triangledown,
+     location = location.abovebar,
+     size     = size.tiny,
+     color    = color.red)
+
+plotshape(showTinyMarks and sellPut,
+     title    = "Sell Put marker",
+     style    = shape.triangleup,
+     location = location.belowbar,
+     size     = size.tiny,
+     color    = color.maroon)
+
+//────────────────────────────────────
+// ALERT TRIGGERS
+//────────────────────────────────────
+bool execBuyCall  = firstBuyCall
+bool execSellCall = firstSellCall
+bool execBuyPut   = firstBuyPut
+bool execSellPut  = firstSellPut
+
+// Classify by setup type
+bool execBuyCallTrend     = execBuyCall and currentSetupType == "TREND"
+bool execBuyCallScalp     = execBuyCall and currentSetupType == "SCALP"
+bool execBuyCallReversal  = execBuyCall and (currentSetupType == "SWING_REJECTION" or currentSetupType == "FAILED_BREAKDOWN")
+
+bool execBuyPutTrend      = execBuyPut and currentSetupType == "TREND"
+bool execBuyPutScalp      = execBuyPut and currentSetupType == "SCALP"
+bool execBuyPutReversal   = execBuyPut and (currentSetupType == "SWING_REJECTION" or currentSetupType == "FAILED_BREAKDOWN")
+
+bool firstPreBuyCall = preBuyCall and not preBuyCall[1]
+bool firstPreBuyPut  = preBuyPut  and not preBuyPut[1]
+
+// Alert messages
+string preCallMsg        = "PRE-SIGNAL BUY CALL setup on {{ticker}} {{interval}}. Do NOT enter yet. Get 0DTE/1DTE CALL chain ready."
+string prePutMsg         = "PRE-SIGNAL BUY PUT setup on {{ticker}} {{interval}}. Do NOT enter yet. Get 0DTE/1DTE PUT chain ready."
+string execCallTrendMsg  = "EXECUTE BUY CALL (TREND MODE) on {{ticker}} {{interval}}. Signal confirmed."
+string execCallScalpMsg  = "EXECUTE BUY CALL (SCALP MODE) on {{ticker}} {{interval}}. Expect smaller targets."
+string execCallRevMsg    = "EXECUTE BUY CALL (REVERSAL) on {{ticker}} {{interval}}. SWING REJECTION or FAILED BREAKDOWN detected. Start with PROBE size."
+string execPutTrendMsg   = "EXECUTE BUY PUT (TREND MODE) on {{ticker}} {{interval}}. Signal confirmed."
+string execPutScalpMsg   = "EXECUTE BUY PUT (SCALP MODE) on {{ticker}} {{interval}}. Expect smaller targets."
+string execPutRevMsg     = "EXECUTE BUY PUT (REVERSAL) on {{ticker}} {{interval}}. SWING REJECTION or FAILED BREAKOUT detected. Start with PROBE size."
+string exitCallMsg       = "EXIT CALL / SELL CALL on {{ticker}} {{interval}}."
+string exitPutMsg        = "EXIT PUT / SELL PUT on {{ticker}} {{interval}}."
+
+// Alert conditions
+alertcondition(firstPreBuyCall,      title = "PRE: BUY CALL setup",      message = preCallMsg)
+alertcondition(firstPreBuyPut,       title = "PRE: BUY PUT setup",       message = prePutMsg)
+
+alertcondition(execBuyCallTrend,     title = "EXEC: BUY CALL (TREND)",    message = execCallTrendMsg)
+alertcondition(execBuyCallScalp,     title = "EXEC: BUY CALL (SCALP)",    message = execCallScalpMsg)
+alertcondition(execBuyCallReversal,  title = "EXEC: BUY CALL (REVERSAL)", message = execCallRevMsg)
+
+alertcondition(execBuyPutTrend,      title = "EXEC: BUY PUT (TREND)",     message = execPutTrendMsg)
+alertcondition(execBuyPutScalp,      title = "EXEC: BUY PUT (SCALP)",     message = execPutScalpMsg)
+alertcondition(execBuyPutReversal,   title = "EXEC: BUY PUT (REVERSAL)",  message = execPutRevMsg)
+
+alertcondition(execSellCall,         title = "EXEC: SELL CALL",           message = exitCallMsg)
+alertcondition(execSellPut,          title = "EXEC: SELL PUT",            message = exitPutMsg)
+

@@ -1,0 +1,50 @@
+{
+  "ticker": "SPY",
+  "test_date": "2026-03-09",
+  "bars_per_day_1m": 387,
+  "resolution_5m": {
+    "trades": 126,
+    "win_rate": 89.68253968253968,
+    "total_pnl": 9197.2,
+    "profit_factor": 3.14,
+    "max_drawdown": 1.64,
+    "sharpe": 7.36
+  },
+  "resolution_1m_5m_params": {
+    "trades": 126,
+    "win_rate": 69.04761904761905,
+    "total_pnl": -2826.86,
+    "profit_factor": 0.75,
+    "max_drawdown": 8.84,
+    "sharpe": -1.74
+  },
+  "resolution_1m_1m_params": {
+    "trades": 88,
+    "win_rate": 76.13636363636364,
+    "total_pnl": 1359.26,
+    "profit_factor": 1.36,
+    "max_drawdown": 1.86,
+    "sharpe": 1.76
+  },
+  "picks_1m": {
+    "GREEN": {
+      "strategy": "call_credit",
+      "params": {
+        "delta": 0.15,
+        "stop_mult": 2.5,
+        "profit_target": 0.75,
+        "width": 2.0,
+        "entry_window": "30-60m",
+        "gamma_limit": 0.15
+      }
+    },
+    "YELLOW": {
+      "strategy": "none",
+      "params": null
+    },
+    "RED": {
+      "strategy": "none",
+      "params": null
+    }
+  }
+}

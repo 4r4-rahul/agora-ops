@@ -1,0 +1,380 @@
+//@version=5
+indicator("Rahul Momentum Options Engine (v3.3)", overlay=true, max_labels_count=500)
+
+//──────────────────────────────
+// CORE INDICATORS
+//──────────────────────────────
+vwapVal = ta.vwap(close)
+emaFast = ta.ema(close, 9)
+emaSlow = ta.ema(close, 21)
+
+volMA   = ta.sma(volume, 20)
+body    = math.abs(close - open)
+bodyMA  = ta.sma(body, 20)
+
+atr14   = ta.atr(14)
+rsi14   = ta.rsi(close, 14)
+
+//──────────────────────────────
+// VISUAL / BEHAVIOR INPUTS
+//──────────────────────────────
+entryLabelMult  = input.float(2.0, "Entry label distance (ATR)", minval = 0.5, step = 0.1)
+exitLabelMult   = input.float(1.8, "Exit label distance (ATR)",  minval = 0.5, step = 0.1)
+bannerAtrMult   = input.float(2.5, "Banner distance (ATR)",      minval = 1.0, step = 0.1)
+
+showTinyMarks   = input.bool(true,  "Show tiny markers on candles")
+showWaitZone    = input.bool(true,  "Show WAIT ZONE (EMA squeeze)")
+showRegimeBg    = input.bool(false, "Show regime background (trend / grind)")
+useLunchFilter  = input.bool(true,  "Use no-trade lunch filter")
+
+htfTf           = input.timeframe("5", "HTF timeframe for regime")        // e.g. 5m HTF on 1m chart
+
+dxySymbol       = input.symbol("DXY",   "Dollar index symbol (DXY)")
+us10ySymbol     = input.symbol("US10Y", "10Y yield symbol")
+
+lunchSession    = input.session("1130-1300", "No-trade session (exchange time)")
+
+//──────────────────────────────
+// MOMENTUM EXTENSION LOGIC (CALL / PUT)
+//──────────────────────────────
+
+// VWAP slope
+vwapUp   = vwapVal > vwapVal[1]
+vwapDown = vwapVal < vwapVal[1]
+
+// Bull momentum (CALL)
+bullMomentum =
+     close > vwapVal and
+     emaFast > emaSlow and
+     vwapUp and
+     body > bodyMA and
+     volume > volMA
+
+// Bear momentum (PUT)
+bearMomentum =
+     close < vwapVal and
+     emaFast < emaSlow and
+     vwapDown and
+     body > bodyMA and
+     volume > volMA
+
+//──────────────────────────────
+// REGIME DETECTION: TREND vs GRIND
+// (VWAP distance + RSI + HTF direction)
+//──────────────────────────────
+
+// Distance from VWAP in ATR units
+distFromVWAP = math.abs(close - vwapVal) / atr14
+nearVWAP     = distFromVWAP < 0.4
+farFromVWAP  = distFromVWAP > 0.8
+
+rsiDirectional = rsi14 > 60 or rsi14 < 40
+rsiCenter      = rsi14 <= 60 and rsi14 >= 40
+
+// HTF trend (on htfTf)
+htfClose = request.security(syminfo.tickerid, htfTf, close)
+htfEma   = request.security(syminfo.tickerid, htfTf, ta.ema(close, 21))
+htfUp    = htfClose > htfEma
+htfDown  = htfClose < htfEma
+htfTrend = htfUp or htfDown
+
+bool isTrendRegime   = farFromVWAP and rsiDirectional and htfTrend
+bool isGrindRegime   = nearVWAP and rsiCenter and not isTrendRegime
+bool isNeutralRegime = not isTrendRegime and not isGrindRegime
+
+// Optional subtle background
+bgcolor(
+     showRegimeBg ?
+          (isTrendRegime   ? color.new(color.teal,   92) :
+           isGrindRegime   ? color.new(color.purple, 94) :
+                             na)
+     : na)
+
+//──────────────────────────────
+// MACRO WIND: DXY + 10Y YIELDS
+//──────────────────────────────
+dxyClose = request.security(dxySymbol,  "60", close)
+dxyMa    = request.security(dxySymbol,  "60", ta.sma(close, 20))
+usdUp    = dxyClose > dxyMa
+usdDown  = dxyClose < dxyMa
+
+us10yClose = request.security(us10ySymbol, "60", close)
+us10yMa    = request.security(us10ySymbol, "60", ta.sma(close, 20))
+yieldsUp   = us10yClose > us10yMa
+yieldsDown = us10yClose < us10yMa
+
+// Simple metals macro logic:
+//   USD + yields UP   → bearish metals
+//   USD + yields DOWN → bullish metals
+macroBullMetals = usdDown and yieldsDown
+macroBearMetals = usdUp   and yieldsUp
+macroNeutral    = not macroBullMetals and not macroBearMetals
+
+//──────────────────────────────
+// POSITION STATE
+//──────────────────────────────
+var bool inCall = false
+var bool inPut  = false
+
+// Reset state at new daily session
+if ta.change(time("D")) != 0
+    inCall := false
+    inPut  := false
+
+
+// Hard no-trade zone (e.g., lunch)
+inLunchSession = time(timeframe.period, lunchSession) != 0
+noTradeZone    = useLunchFilter and inLunchSession
+
+//──────────────────────────────
+// ENTRY & EXIT CONDITIONS
+//──────────────────────────────
+buyCall = bullMomentum and not inCall and not inPut and not noTradeZone
+buyPut  = bearMomentum and not inPut  and not inCall and not noTradeZone
+
+sellCall = inCall and emaFast < emaSlow
+sellPut  = inPut  and emaFast > emaSlow
+
+//──────────────────────────────
+// STATE MANAGEMENT
+//──────────────────────────────
+if buyCall
+    inCall := true
+    inPut  := false
+
+if buyPut
+    inPut  := true
+    inCall := false
+
+if sellCall
+    inCall := false
+
+if sellPut
+    inPut := false
+
+
+//──────────────────────────────
+// PRE-SIGNAL (EARLY WARNING) LOGIC
+//  - Lighter momentum: no body/volume filters yet
+//  - Used only for "heads-up" alerts, NOT for entries
+//──────────────────────────────
+
+// Earlier, softer momentum
+preBullMomentum = close > vwapVal and emaFast > emaSlow and vwapUp
+preBearMomentum = close < vwapVal and emaFast < emaSlow and vwapDown
+
+// Pre-signals allowed only when flat
+preBuyCall = preBullMomentum and not inCall and not inPut
+preBuyPut  = preBearMomentum and not inCall and not inPut
+
+// First bar of each pre-signal streak
+firstPreBuyCall = preBuyCall and not preBuyCall[1]
+firstPreBuyPut  = preBuyPut  and not preBuyPut[1]
+
+
+//──────────────────────────────
+// CONFIDENCE METER (1–5)
+//──────────────────────────────
+var float confidence = 0.0
+
+confidence := 0.0
+confidence += body   > bodyMA                          ? 1.0 : 0.0
+confidence += volume > volMA                           ? 1.0 : 0.0
+confidence += math.abs(emaFast - emaSlow) > atr14 * 0.2 ? 1.0 : 0.0
+confidence += (vwapUp or vwapDown)                     ? 1.0 : 0.0
+confidence += (rsi14 > 55 or rsi14 < 45)               ? 1.0 : 0.0
+
+confidence := math.min(confidence, 5.0)
+
+//──────────────────────────────
+// POSITION SIZING HELPER (TEXT)
+//──────────────────────────────
+f_sizeText(_conf, _isTrend, _macroAligned) =>
+    float score = _conf
+    score += _isTrend      ? 0.5 : 0.0
+    score += _macroAligned ? 0.5 : -0.5
+    score := math.max(1.0, math.min(score, 5.0))
+    string txt =
+         score <= 2.0  ? "Size: SMALL" :
+         score <= 3.5  ? "Size: NORMAL" :
+                         "Size: AGGRESSIVE (scale-in only if working)"
+    txt
+
+sizeTextCall = f_sizeText(confidence, isTrendRegime, macroBullMetals)
+sizeTextPut  = f_sizeText(confidence, isTrendRegime, macroBearMetals)
+
+//──────────────────────────────
+// BIG ENTRY / EXIT LABELS
+//──────────────────────────────
+
+// Vertical spacing so labels don’t cover candles
+yBuyCall   = low  - atr14 * entryLabelMult
+ySellCall  = high + atr14 * exitLabelMult
+yBuyPut    = high + atr14 * entryLabelMult
+ySellPut   = low  - atr14 * exitLabelMult
+
+// Only show label on *first* bar of each signal streak
+firstBuyCall  = buyCall  and not buyCall[1]
+firstSellCall = sellCall and not sellCall[1]
+firstBuyPut   = buyPut   and not buyPut[1]
+firstSellPut  = sellPut  and not sellPut[1]
+
+// BUY CALL
+if firstBuyCall
+    label.new(
+         bar_index, yBuyCall,
+         "BUY CALL\n" + sizeTextCall,
+         style     = label.style_label_up,
+         color     = color.new(color.lime, 0),
+         textcolor = color.black,
+         size      = size.large)
+
+// SELL CALL
+if firstSellCall
+    label.new(
+         bar_index, ySellCall,
+         "SELL CALL",
+         style     = label.style_label_down,
+         color     = color.new(color.green, 10),
+         textcolor = color.black,
+         size      = size.large)
+
+// BUY PUT
+if firstBuyPut
+    label.new(
+         bar_index, yBuyPut,
+         "BUY PUT\n" + sizeTextPut,
+         style     = label.style_label_down,
+         color     = color.new(color.red, 0),
+         textcolor = color.white,
+         size      = size.large)
+
+// SELL PUT
+if firstSellPut
+    label.new(
+         bar_index, ySellPut,
+         "SELL PUT",
+         style     = label.style_label_up,
+         color     = color.new(color.maroon, 10),
+         textcolor = color.white,
+         size      = size.large)
+
+//──────────────────────────────
+// TINY MARKERS ON CANDLES (optional)
+//──────────────────────────────
+plotshape(showTinyMarks and buyCall,
+     title    = "Buy Call marker",
+     style    = shape.triangleup,
+     location = location.belowbar,
+     size     = size.tiny,
+     color    = color.lime)
+
+plotshape(showTinyMarks and sellCall,
+     title    = "Sell Call marker",
+     style    = shape.triangledown,
+     location = location.abovebar,
+     size     = size.tiny,
+     color    = color.green)
+
+plotshape(showTinyMarks and buyPut,
+     title    = "Buy Put marker",
+     style    = shape.triangledown,
+     location = location.abovebar,
+     size     = size.tiny,
+     color    = color.red)
+
+plotshape(showTinyMarks and sellPut,
+     title    = "Sell Put marker",
+     style    = shape.triangleup,
+     location = location.belowbar,
+     size     = size.tiny,
+     color    = color.maroon)
+
+//──────────────────────────────
+// TOP BANNER: CALL / PUT / NEUTRAL + REGIME + MACRO
+//──────────────────────────────
+var label banner = na
+
+if barstate.isnew
+    label.delete(banner)
+
+    string regimeText =
+         isTrendRegime   ? "Trend"   :
+         isGrindRegime   ? "Grind"   :
+                           "Neutral"
+
+    string macroText =
+         macroBullMetals ? "Macro: Bullish metals" :
+         macroBearMetals ? "Macro: Bearish metals" :
+                           "Macro: Neutral"
+
+    string bannerText =
+         (inCall ? "CALL DAY" : inPut ? "PUT DAY" : "NEUTRAL") +
+         "  |  Conf: " + str.tostring(confidence, "#") + "/5" +
+         "  |  Regime: " + regimeText +
+         "  |  " + macroText +
+         (noTradeZone ? "  |  NO-TRADE ZONE" : "")
+
+    color bannerColor =
+         inCall ? color.new(color.green, 0) :
+         inPut  ? color.new(color.red,   0) :
+                  color.new(color.gray,  0)
+
+    banner := label.new(
+         bar_index, high + atr14 * bannerAtrMult,
+         bannerText,
+         style     = label.style_label_center,
+         color     = bannerColor,
+         textcolor = color.white,
+         size      = size.large)
+
+//──────────────────────────────
+// PLOTS
+//──────────────────────────────
+plot(vwapVal, "VWAP", color=color.orange, linewidth=2)
+plot(emaFast, "EMA 9", color=color.aqua)
+plot(emaSlow, "EMA 21", color=color.blue)
+
+//──────────────────────────────
+// ALERT TRIGGERS
+//──────────────────────────────
+
+// execution triggers (your existing first-entry signals)
+execBuyCall  = firstBuyCall
+execSellCall = firstSellCall
+execBuyPut   = firstBuyPut
+execSellPut  = firstSellPut
+
+// pre-signal triggers (early heads-up, separate logic you defined)
+preAlertBuyCall = firstPreBuyCall
+preAlertBuyPut  = firstPreBuyPut
+
+//──────────────────────────────
+// PRE-SIGNAL ALERTS (HEADS-UP)
+//──────────────────────────────
+
+//──────────────────────────────
+// PRE-SIGNAL ALERTS (HEADS-UP)
+//──────────────────────────────
+
+// PRE: BUY CALL setup
+alertcondition(preAlertBuyCall, "PRE: BUY CALL setup", "PRE-SIGNAL BUY CALL setup on {{ticker}} {{interval}}. DO NOT enter yet. Get 0DTE/1DTE CALL chain ready (ATM or slight ITM). Wait for EXEC BUY CALL alert.")
+
+// PRE: BUY PUT setup
+alertcondition(preAlertBuyPut,  "PRE: BUY PUT setup",  "PRE-SIGNAL BUY PUT setup on {{ticker}} {{interval}}. DO NOT enter yet. Get 0DTE/1DTE PUT chain ready (ATM or slight ITM). Wait for EXEC BUY PUT alert.")
+
+//──────────────────────────────
+// EXECUTION ALERTS (ACTUAL ENTRY)
+//──────────────────────────────
+
+// EXEC: BUY CALL
+alertcondition(execBuyCall,  "EXEC: BUY CALL",  "EXECUTE BUY CALL on {{ticker}} {{interval}}. Signal confirmed. Follow your size rules.")
+
+// EXEC: SELL CALL
+alertcondition(execSellCall, "EXEC: SELL CALL", "EXIT CALL / SELL CALL on {{ticker}} {{interval}}.")
+
+// EXEC: BUY PUT
+alertcondition(execBuyPut,   "EXEC: BUY PUT",   "EXECUTE BUY PUT on {{ticker}} {{interval}}. Signal confirmed. Follow your size rules.")
+
+// EXEC: SELL PUT
+alertcondition(execSellPut,  "EXEC: SELL PUT",  "EXIT PUT / SELL PUT on {{ticker}} {{interval}}.")

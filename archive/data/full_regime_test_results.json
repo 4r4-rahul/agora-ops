@@ -1,0 +1,170 @@
+{
+  "test_date": "2026-03-08",
+  "data_source": "IBKR 5-min bars",
+  "period": "2025-06-18 \u2192 2026-03-06",
+  "total_days": 180,
+  "total_bars": 13932,
+  "regime_counts": {
+    "GREEN": 135,
+    "YELLOW": 42,
+    "RED": 3
+  },
+  "strategies": {
+    "put_credit": {
+      "all": {
+        "trades": 180,
+        "win_rate": 67.22222222222223,
+        "total_pnl": -4838.57,
+        "profit_factor": 0.44,
+        "max_drawdown_pct": 9.76,
+        "sharpe_ratio": -4.88,
+        "gamma_blowups": 0,
+        "monthly_pnl": {
+          "2025-06": -292.56,
+          "2025-07": -714.82,
+          "2025-08": 138.85,
+          "2025-09": -662.07,
+          "2025-10": -688.36,
+          "2025-11": -647.15,
+          "2025-12": -569.73,
+          "2026-01": -704.24,
+          "2026-02": -708.19,
+          "2026-03": 9.7
+        }
+      },
+      "by_regime": {
+        "GREEN": {
+          "days": 135,
+          "trades": 135,
+          "win_rate": 69.62962962962963,
+          "total_pnl": -2908.41,
+          "profit_factor": 0.5,
+          "max_drawdown_pct": 5.91,
+          "gamma_blowups": 0
+        },
+        "YELLOW": {
+          "days": 42,
+          "trades": 42,
+          "win_rate": 61.904761904761905,
+          "total_pnl": -1526.23,
+          "profit_factor": 0.38,
+          "max_drawdown_pct": 3.07,
+          "gamma_blowups": 0
+        },
+        "RED": {
+          "days": 3,
+          "trades": 3,
+          "win_rate": 33.33333333333333,
+          "total_pnl": -403.93,
+          "profit_factor": 0.07,
+          "max_drawdown_pct": 0.87,
+          "gamma_blowups": 0
+        }
+      }
+    },
+    "call_credit": {
+      "all": {
+        "trades": 180,
+        "win_rate": 73.33333333333333,
+        "total_pnl": -2105.51,
+        "profit_factor": 0.67,
+        "max_drawdown_pct": 4.65,
+        "sharpe_ratio": -2.49,
+        "gamma_blowups": 3,
+        "monthly_pnl": {
+          "2025-06": 68.6,
+          "2025-07": 159.13,
+          "2025-08": -213.94,
+          "2025-09": -275.8,
+          "2025-10": 233.56,
+          "2025-11": -398.24,
+          "2025-12": -10.16,
+          "2026-01": -585.8,
+          "2026-02": -575.83,
+          "2026-03": -507.03
+        }
+      },
+      "by_regime": {
+        "GREEN": {
+          "days": 135,
+          "trades": 135,
+          "win_rate": 77.77777777777779,
+          "total_pnl": -538.65,
+          "profit_factor": 0.86,
+          "max_drawdown_pct": 1.87,
+          "gamma_blowups": 3
+        },
+        "YELLOW": {
+          "days": 42,
+          "trades": 42,
+          "win_rate": 59.523809523809526,
+          "total_pnl": -1524.25,
+          "profit_factor": 0.37,
+          "max_drawdown_pct": 3.32,
+          "gamma_blowups": 0
+        },
+        "RED": {
+          "days": 3,
+          "trades": 3,
+          "win_rate": 66.66666666666666,
+          "total_pnl": -42.61,
+          "profit_factor": 0.65,
+          "max_drawdown_pct": 0.24,
+          "gamma_blowups": 0
+        }
+      }
+    },
+    "iron_condor": {
+      "all": {
+        "trades": 180,
+        "win_rate": 82.22222222222221,
+        "total_pnl": 1188.8,
+        "profit_factor": 1.14,
+        "max_drawdown_pct": 4.82,
+        "sharpe_ratio": 0.77,
+        "gamma_blowups": 3,
+        "monthly_pnl": {
+          "2025-06": 426.5,
+          "2025-07": 326.78,
+          "2025-08": 1375.45,
+          "2025-09": 924.84,
+          "2025-10": -1193.96,
+          "2025-11": -548.14,
+          "2025-12": 190.81,
+          "2026-01": -224.11,
+          "2026-02": -433.91,
+          "2026-03": 344.54
+        }
+      },
+      "by_regime": {
+        "GREEN": {
+          "days": 135,
+          "trades": 135,
+          "win_rate": 87.4074074074074,
+          "total_pnl": 3284.07,
+          "profit_factor": 1.72,
+          "max_drawdown_pct": 1.62,
+          "gamma_blowups": 2
+        },
+        "YELLOW": {
+          "days": 42,
+          "trades": 42,
+          "win_rate": 69.04761904761905,
+          "total_pnl": -1630.97,
+          "profit_factor": 0.56,
+          "max_drawdown_pct": 4.52,
+          "gamma_blowups": 1
+        },
+        "RED": {
+          "days": 3,
+          "trades": 3,
+          "win_rate": 33.33333333333333,
+          "total_pnl": -464.3,
+          "profit_factor": 0.12,
+          "max_drawdown_pct": 1.05,
+          "gamma_blowups": 0
+        }
+      }
+    }
+  }
+}

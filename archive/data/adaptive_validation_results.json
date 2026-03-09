@@ -1,0 +1,54 @@
+{
+  "test_date": "2026-03-09",
+  "adaptive": {
+    "trades": 177,
+    "win_rate": 83.05084745762711,
+    "total_pnl": 4711.29,
+    "profit_factor": 1.83,
+    "max_drawdown_pct": 1.65,
+    "sharpe_ratio": 3.98,
+    "total_return_pct": 9.42,
+    "annualized_return_pct": 13.2,
+    "monthly_pnl": {
+      "2025-06": 254.23,
+      "2025-07": 1338.08,
+      "2025-08": 854.65,
+      "2025-09": 67.72,
+      "2025-10": 487.33,
+      "2025-11": -657.63,
+      "2025-12": 1791.64,
+      "2026-01": 575.42,
+      "2026-02": 99.54,
+      "2026-03": -99.69
+    }
+  },
+  "fixed_baseline": {
+    "strategy": "iron_condor",
+    "total_pnl": 2165.21,
+    "profit_factor": 1.33,
+    "win_rate": 66.66666666666666
+  },
+  "improvement_dollars": 2546.08,
+  "regime_params": {
+    "GREEN": {
+      "strategy": "iron_condor",
+      "delta": 0.12,
+      "stop": 3.0,
+      "tp": 0.75,
+      "width": 2.0,
+      "entry": "30-60m"
+    },
+    "YELLOW": {
+      "strategy": "call_credit",
+      "delta": 0.18,
+      "stop": 3.0,
+      "tp": 0.75,
+      "width": 2.0,
+      "entry": "30-60m"
+    },
+    "RED": {
+      "strategy": "none",
+      "action": "skip"
+    }
+  }
+}
