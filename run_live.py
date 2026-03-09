@@ -421,7 +421,7 @@ class LiveTradingLoop:
         require_confirmation: bool = True,
         account_size: float = 50_000.0,
     ):
-        self.tickers = tickers or ["SPY"]
+        self.tickers = tickers or os.getenv("TRADE_TICKERS", "SPY").split(",")
         self.config = config or EngineConfig()
         self.dry_run = dry_run
         self.account_size = account_size

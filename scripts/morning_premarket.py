@@ -197,7 +197,11 @@ def run_morning_diagnostic(send_discord: bool = True) -> str:
     lines.append("")
 
     # ── 2. Ticker Analysis ──
-    tickers = ["SPY", "QQQ"]
+    tickers = os.getenv("TRADE_TICKERS", "SPY").split(",")
+    # Always include SPY and QQQ for reference even if not trading
+    for ref in ["SPY", "QQQ"]:
+        if ref not in tickers:
+            tickers.append(ref)
     lines.append("── TICKER ANALYSIS ─────────────────────────")
     for tk in tickers:
         df = _get_bars(tk)
