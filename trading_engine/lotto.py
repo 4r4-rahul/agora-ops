@@ -1,26 +1,31 @@
 """
-Momentum Lotto Scanner
-========================
-Systematic long-option scanner for asymmetric (lotto) plays on 0DTE options.
+Long Options Engine — Buy Calls & Buy Puts
+=============================================
+Systematic long-option scanner for 0DTE and short-dated options.
 
-Instead of selling premium (credit spreads), this module BUYS cheap OTM
-options when specific momentum triggers fire. The edge comes from
-gamma acceleration near expiration — a $0.10 option can go to $2.00+
-on a 0.5% sustained move.
+This is the PRIMARY strategy for small accounts (<$25K).
+Instead of selling premium for small gains, we BUY options
+when specific momentum triggers fire and ride gamma acceleration.
 
-Professional Methodologies Implemented:
+Two Strike Tiers:
+  • Tier 1 — SNIPER ($0.05-$0.50): Cheap OTM, big gamma, 5x-50x potential
+  • Tier 2 — MOMENTUM ($0.50-$2.00): Near-ATM, higher delta, 2x-10x potential
+
+Five Momentum Triggers:
   • Opening Range Breakout (ORB) — SMB Capital, prop shop staple
   • Mean-Reversion Snap — Kris Sidial / Ambrus Group style
   • VWAP Reclaim/Rejection — Institutional flow confirmation
   • Volume Surge + Direction — Market microstructure signal
+  • Trend Continuation — EMA stack alignment + pullback entry
 
 Risk Management:
-  • Fixed dollar budget per day (1% of account = $100 on $10K)
-  • Max $50 per single trade (0.5% of account)
-  • Max 2 open lotto positions at once
+  • Fixed dollar budget per day (5% of account = $500 on $10K)
+  • Max $200 per single trade (2% of account)
+  • Max 5 open positions at once
   • Hard stop at 50% loss of premium paid
-  • Auto-close 30 min before market close
-  • Profit target at 5x with 30% runner
+  • First profit at 3x (sell 70%, keep 30% runner)
+  • Runner trailing stop from high-water mark
+  • Auto-close 15 min before market close
 
 Usage:
     from trading_engine.lotto import LottoScanner, LottoTrigger
@@ -55,8 +60,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class LottoTrigger:
-    """A momentum trigger signal for a lotto entry."""
-    trigger_type: str = ""       # "ORB_BREAKOUT", "MEAN_REV", "VWAP_RECLAIM", "VOLUME_SURGE"
+    """A momentum trigger signal for a long option entry."""
+    trigger_type: str = ""       # "ORB_BREAKOUT", "MEAN_REV", "VWAP_RECLAIM", "VOLUME_SURGE", "TREND_CONT"
     direction: str = ""          # "CALL" or "PUT"
     ticker: str = ""
     underlying_price: float = 0.0
@@ -67,6 +72,7 @@ class LottoTrigger:
     num_contracts: int = 1
     reason: str = ""
     confidence: float = 0.0      # 0.0-1.0 signal strength
+    tier: str = "sniper"         # "sniper" ($0.05-$0.50) or "momentum" ($0.50-$2.00)
     timestamp: datetime = field(default_factory=datetime.now)
 
 
@@ -151,6 +157,11 @@ class MomentumDetector:
         vol = self._check_volume_surge(bars, ticker, underlying_price, expiry)
         if vol:
             triggers.append(vol)
+
+        # 5. Trend Continuation (EMA stack + pullback)
+        trend = self._check_trend_continuation(bars, ticker, underlying_price, expiry)
+        if trend:
+            triggers.append(trend)
 
         # Sort by confidence
         triggers.sort(key=lambda t: t.confidence, reverse=True)
@@ -460,6 +471,117 @@ class MomentumDetector:
                 reason=f"Volume surge {vol_ratio:.1f}x avg with "
                        f"{move_pct*100:.2f}% move over 3 bars",
                 confidence=confidence,
+                tier="sniper",
+            )
+
+    def _check_trend_continuation(
+        self, bars: pd.DataFrame, ticker: str, price: float, expiry: str,
+    ) -> Optional[LottoTrigger]:
+        """
+        Trend Continuation — EMA stack + pullback entry.
+
+        Logic:
+          1. Compute 9/21/50 EMA on 1-min bars
+          2. Bullish stack: 9 > 21 > 50 AND price pulls back to 9 EMA
+          3. Bearish stack: 9 < 21 < 50 AND price rallies back to 9 EMA
+          4. The pullback to EMA is a low-risk entry INTO the established trend
+
+        This is the HIGHEST PROBABILITY trigger — it waits for a
+        confirmed trend and buys the dip/rally within it.
+
+        Professional basis: Minervini / O'Neil trend-following principles
+        applied to intraday timeframe.
+        """
+        if len(bars) < 55:
+            return None
+
+        close = bars["close"]
+        ema9 = close.ewm(span=9, adjust=False).mean()
+        ema21 = close.ewm(span=21, adjust=False).mean()
+        ema50 = close.ewm(span=50, adjust=False).mean()
+
+        # Current values
+        cur_ema9 = ema9.iloc[-1]
+        cur_ema21 = ema21.iloc[-1]
+        cur_ema50 = ema50.iloc[-1]
+
+        # Check EMA stack alignment (last 5 bars must all agree)
+        bullish_stack = all(
+            ema9.iloc[-i] > ema21.iloc[-i] > ema50.iloc[-i]
+            for i in range(1, 6)
+        )
+        bearish_stack = all(
+            ema9.iloc[-i] < ema21.iloc[-i] < ema50.iloc[-i]
+            for i in range(1, 6)
+        )
+
+        if not bullish_stack and not bearish_stack:
+            return None
+
+        # Check for pullback to 9 EMA (price touched or came within 0.05%)
+        pullback_threshold = price * 0.0005  # 0.05% from EMA9
+        recent_lows = bars["low"].iloc[-5:]
+        recent_highs = bars["high"].iloc[-5:]
+        recent_ema9 = ema9.iloc[-5:]
+
+        if bullish_stack:
+            # Bullish: need a bar that touched 9 EMA from above
+            touched_ema = any(
+                low <= ema + pullback_threshold
+                for low, ema in zip(recent_lows, recent_ema9)
+            )
+            # And price has now bounced back above
+            bounced = price > cur_ema9
+
+            if not (touched_ema and bounced):
+                return None
+
+            # Confidence based on stack strength (gap between EMAs)
+            stack_gap = (cur_ema9 - cur_ema50) / price
+            confidence = min(1.0, stack_gap / 0.003) * 0.85  # 0.3% gap = strong trend
+
+            # MOMENTUM tier — trend-following uses closer-to-money strikes
+            strike = _round_strike(price + price * self.cfg.momentum_otm_distance_pct, ticker)
+            return LottoTrigger(
+                trigger_type="TREND_CONT",
+                direction="CALL",
+                ticker=ticker,
+                underlying_price=price,
+                strike=strike,
+                expiry=expiry,
+                right="C",
+                reason=f"Bullish EMA stack (9>{cur_ema9:.1f} > 21>{cur_ema21:.1f} "
+                       f"> 50>{cur_ema50:.1f}), pullback bounce",
+                confidence=confidence,
+                tier="momentum",
+            )
+
+        else:  # bearish_stack
+            touched_ema = any(
+                high >= ema - pullback_threshold
+                for high, ema in zip(recent_highs, recent_ema9)
+            )
+            bounced = price < cur_ema9
+
+            if not (touched_ema and bounced):
+                return None
+
+            stack_gap = (cur_ema50 - cur_ema9) / price
+            confidence = min(1.0, stack_gap / 0.003) * 0.85
+
+            strike = _round_strike(price - price * self.cfg.momentum_otm_distance_pct, ticker)
+            return LottoTrigger(
+                trigger_type="TREND_CONT",
+                direction="PUT",
+                ticker=ticker,
+                underlying_price=price,
+                strike=strike,
+                expiry=expiry,
+                right="P",
+                reason=f"Bearish EMA stack (9<{cur_ema9:.1f} < 21<{cur_ema21:.1f} "
+                       f"< 50<{cur_ema50:.1f}), pullback rejection",
+                confidence=confidence,
+                tier="momentum",
             )
 
 
@@ -566,13 +688,32 @@ class LottoScanner:
         """
         Given a trigger, find the best strike from the live options chain.
 
+        Two tiers:
+          - Sniper: delta 0.05-0.20, premium $0.05-$0.50 (cheap gamma)
+          - Momentum: delta 0.20-0.45, premium $0.50-$2.00 (high-prob move)
+
         Selects based on:
-          - Delta between target_delta_min and target_delta_max
-          - Premium within budget
+          - Delta within tier range
+          - Premium within tier budget
           - Reasonable bid-ask spread (< 50% of mid)
+          - Sorted by gamma for sniper, by delta for momentum
         """
         if not self.provider:
             return None
+
+        tier = trigger.tier
+
+        # Set filters based on tier
+        if tier == "momentum":
+            delta_min = self.lotto_cfg.momentum_delta_min
+            delta_max = self.lotto_cfg.momentum_delta_max
+            price_min = self.lotto_cfg.min_premium
+            price_max = self.lotto_cfg.momentum_max_premium
+        else:  # sniper
+            delta_min = self.lotto_cfg.sniper_delta_min
+            delta_max = self.lotto_cfg.sniper_delta_max
+            price_min = self.lotto_cfg.min_premium
+            price_max = self.lotto_cfg.sniper_max_premium
 
         try:
             chain = self.provider.get_options_chain(
@@ -581,7 +722,7 @@ class LottoScanner:
                 strikes_around_atm=20,
             )
         except Exception as e:
-            logger.warning(f"Failed to get chain for lotto: {e}")
+            logger.warning(f"Failed to get chain: {e}")
             return None
 
         if not chain:
@@ -596,7 +737,6 @@ class LottoScanner:
         if not options:
             return None
 
-        # Find best option: within delta range, cheapest that meets criteria
         candidates = []
         for opt in options:
             delta = abs(opt.get("delta", 0))
@@ -604,19 +744,10 @@ class LottoScanner:
             bid = opt.get("bid", 0)
             mid = opt.get("mid", (bid + ask) / 2 if bid and ask else 0)
 
-            # Delta filter
-            if delta < self.lotto_cfg.target_delta_min:
+            if delta < delta_min or delta > delta_max:
                 continue
-            if delta > self.lotto_cfg.target_delta_max:
+            if ask <= 0 or ask < price_min or ask > price_max:
                 continue
-
-            # Price filter
-            if ask <= 0 or ask < self.lotto_cfg.min_premium:
-                continue
-            if ask > self.lotto_cfg.max_premium_per_trade:
-                continue
-
-            # Spread quality: bid-ask should be < 50% of mid
             if mid > 0 and (ask - bid) / mid > 0.50:
                 continue
 
@@ -629,18 +760,27 @@ class LottoScanner:
                 "delta": delta,
                 "gamma": opt.get("gamma", 0),
                 "iv": opt.get("iv", 0),
+                "tier": tier,
             })
 
         if not candidates:
-            logger.info(f"No suitable lotto strikes for {trigger.ticker} {trigger.right}")
+            # If momentum tier found nothing, fall back to sniper
+            if tier == "momentum":
+                logger.info(f"No momentum strikes, falling back to sniper")
+                trigger.tier = "sniper"
+                return self.select_strike(trigger)
+            logger.info(f"No suitable strikes for {trigger.ticker} {trigger.right} ({tier})")
             return None
 
-        # Sort by gamma (higher gamma = more bang for the buck on 0DTE)
-        candidates.sort(key=lambda c: abs(c.get("gamma", 0)), reverse=True)
+        # Sort: sniper by gamma (bang for buck), momentum by delta (probability)
+        if tier == "momentum":
+            candidates.sort(key=lambda c: abs(c.get("delta", 0)), reverse=True)
+        else:
+            candidates.sort(key=lambda c: abs(c.get("gamma", 0)), reverse=True)
 
         best = candidates[0]
         logger.info(
-            f"Lotto strike selected: {trigger.ticker} {best['strike']}{best['right']} "
+            f"Strike selected [{tier}]: {trigger.ticker} {best['strike']}{best['right']} "
             f"ask=${best['ask']:.2f} Δ={best['delta']:.3f} Γ={best['gamma']:.4f}"
         )
         return best
@@ -696,9 +836,10 @@ class LottoScanner:
 
         total_cost = ask * num_contracts * 100
 
-        print(f"\n  🎰 LOTTO ENTRY:")
+        print(f"\n  � LONG OPTION ENTRY:")
         print(f"    Trigger:    {trigger.trigger_type} ({trigger.confidence:.0%} confidence)")
-        print(f"    Direction:  {trigger.direction}")
+        print(f"    Direction:  BUY {trigger.direction}")
+        print(f"    Tier:       {trigger.tier.upper()} ({'$0.05-$0.50' if trigger.tier == 'sniper' else '$0.50-$2.00'})")
         print(f"    Strike:     {trigger.ticker} {strike_info['strike']}{strike_info['right']}")
         print(f"    Ask:        ${ask:.2f}/contract")
         print(f"    Contracts:  {num_contracts}")
@@ -870,14 +1011,14 @@ class LottoScanner:
         if mult >= self.lotto_cfg.profit_target_mult and not pos.took_partial:
             return "PROFIT_TARGET"
 
-        # 3. Runner exit: if took partial and price drops below 3x from entry
-        if pos.took_partial and mult < 3.0:
-            return f"RUNNER_EXIT ({mult:.1f}x, below 3x floor)"
+        # 3. Runner exit: if took partial and price drops below floor
+        if pos.took_partial and mult < self.lotto_cfg.runner_floor_mult:
+            return f"RUNNER_EXIT ({mult:.1f}x, below {self.lotto_cfg.runner_floor_mult}x floor)"
 
         # 4. Trailing from high-water mark: if dropped 40% from peak
-        if pos.high_water_mark > entry * 2:  # Only trail if we've seen 2x+
+        if pos.high_water_mark > entry * self.lotto_cfg.trailing_start_mult:
             drop_from_peak = (pos.high_water_mark - current) / pos.high_water_mark
-            if drop_from_peak >= 0.40:
+            if drop_from_peak >= self.lotto_cfg.trailing_drop_pct:
                 return f"TRAILING_EXIT (dropped {drop_from_peak:.0%} from ${pos.high_water_mark:.2f})"
 
         return None
@@ -885,8 +1026,8 @@ class LottoScanner:
     # ─── Status ──────────────────────────────────────────────────
 
     def print_status(self):
-        """Print current lotto scanner status."""
-        print(f"\n  🎰 LOTTO SCANNER STATUS")
+        """Print current long options scanner status."""
+        print(f"\n  🎯 LONG OPTIONS STATUS")
         print(f"  {'─' * 50}")
         print(f"  Budget:     ${self.budget_remaining:.2f} / ${self.daily_budget:.2f} remaining")
         print(f"  Spent:      ${self.daily_spent:.2f}")
@@ -897,10 +1038,11 @@ class LottoScanner:
         for pos in self.open_positions:
             mult = pos.current_price / pos.entry_price if pos.entry_price > 0 else 0
             icon = "🟢" if mult > 1 else "🔴"
+            runner = " [RUNNER]" if pos.took_partial else ""
             print(f"    {icon} {pos.ticker} {pos.strike}{pos.right} "
                   f"({pos.trigger_type}) {pos.num_contracts}x "
                   f"entry=${pos.entry_price:.2f} now=${pos.current_price:.2f} "
-                  f"({mult:.1f}x)")
+                  f"({mult:.1f}x){runner}")
 
     def reset_daily(self):
         """Reset daily counters (call on new trading day)."""

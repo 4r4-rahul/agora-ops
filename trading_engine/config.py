@@ -24,10 +24,10 @@ class AccountConfig:
     weekly_income_target_pct: float = 0.02       # 2% per week target
     daily_income_target_pct: float = 0.005       # 0.5% per day target
     can_monitor_intraday: bool = True
-    # Lotto (long option) budget
-    lotto_daily_budget_pct: float = 0.01         # 1% of account per day on lottos ($100)
-    lotto_max_per_trade_pct: float = 0.005       # 0.5% max per single lotto ($50)
-    lotto_max_positions: int = 2                 # Max 2 open lotto positions
+    # Long options budget (PRIMARY strategy for small accounts)
+    lotto_daily_budget_pct: float = 0.05         # 5% of account per day ($500 on $10K)
+    lotto_max_per_trade_pct: float = 0.02        # 2% max per single trade ($200)
+    lotto_max_positions: int = 5                 # Max 5 open positions
 
 
 @dataclass
@@ -83,17 +83,36 @@ class TradingConfig:
 
 @dataclass
 class LottoConfig:
-    """Configuration for long-option momentum scanner (lotto plays)."""
-    # Budget
-    max_premium_per_trade: float = 0.50          # Max $0.50/contract ($50 per contract)
-    min_premium: float = 0.05                    # Min $0.05 (avoid penny options)
-    max_contracts_per_trade: int = 3             # Max 3 contracts per lotto
+    """
+    Configuration for long-option scanner (BUY calls / BUY puts).
 
-    # Strike selection
-    otm_distance_pct: float = 0.005              # 0.5% OTM from current price
-    max_otm_distance_pct: float = 0.02           # Max 2% OTM (too far = no gamma)
-    target_delta_min: float = 0.05               # Min delta (not too far OTM)
-    target_delta_max: float = 0.25               # Max delta (not too expensive)
+    This is the PRIMARY strategy for small accounts (<$25K).
+    Instead of selling premium for small gains, we buy options
+    when momentum triggers fire and ride gamma acceleration.
+    """
+    # Budget (sized for primary strategy, not side play)
+    max_premium_per_trade: float = 2.00          # Max $2.00/contract ($200 per contract)
+    min_premium: float = 0.05                    # Min $0.05 (avoid penny options)
+    max_contracts_per_trade: int = 5             # Max 5 contracts per trade
+
+    # Strike selection tiers
+    # Tier 1 — Sniper (cheap OTM, big gamma, 5x-50x potential)
+    sniper_otm_distance_pct: float = 0.005       # 0.5% OTM from current price
+    sniper_max_premium: float = 0.50             # Max $0.50 for sniper entries
+    sniper_delta_min: float = 0.05               # Cheapest gamma plays
+    sniper_delta_max: float = 0.20               # Not too far OTM
+
+    # Tier 2 — Momentum (near-ATM, higher cost, 2x-10x potential)
+    momentum_otm_distance_pct: float = 0.002     # 0.2% OTM — almost ATM
+    momentum_max_premium: float = 2.00           # Up to $2.00 for strong signals
+    momentum_delta_min: float = 0.20             # Closer to money
+    momentum_delta_max: float = 0.45             # Near ATM
+
+    # Legacy (backward compat)
+    otm_distance_pct: float = 0.005
+    max_otm_distance_pct: float = 0.02
+    target_delta_min: float = 0.05
+    target_delta_max: float = 0.45               # Widened to include momentum tier
 
     # Triggers (momentum thresholds)
     orb_breakout_min_pct: float = 0.003          # 0.3% beyond 15-min range = breakout
@@ -103,14 +122,17 @@ class LottoConfig:
 
     # Exit rules
     stop_loss_pct: float = 0.50                  # Close at 50% loss of premium
-    profit_target_mult: float = 5.0              # Take profit at 5x entry price
-    runner_keep_pct: float = 0.30                # Keep 30% as runner after 3x
-    time_exit_minutes_before_close: int = 30     # Close 30 min before market close
+    profit_target_mult: float = 3.0              # Take first profit at 3x (was 5x)
+    runner_keep_pct: float = 0.30                # Keep 30% as runner after target
+    runner_floor_mult: float = 1.5               # Close runner if drops below 1.5x
+    trailing_start_mult: float = 2.0             # Start trailing after 2x
+    trailing_drop_pct: float = 0.40              # Close if 40% drop from HWM
+    time_exit_minutes_before_close: int = 15     # Close 15 min before close (was 30)
 
-    # Scan timing
+    # Scan timing (expanded — primary strategy scans all day)
     scan_start_min: int = 16                     # Start 16 min after open (after 15-min ORB)
-    scan_end_min: int = 180                      # Stop scanning 3 hours after open
-    scan_interval_sec: int = 30                  # Check triggers every 30s
+    scan_end_min: int = 360                      # Scan until 15 min before close
+    scan_interval_sec: int = 20                  # Check triggers every 20s (was 30)
 
 
 @dataclass

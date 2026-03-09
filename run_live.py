@@ -2,16 +2,16 @@
 """
 Live Trading Loop — 0DTE Options Engine on IBKR
 =================================================
-Dual-mode execution loop:
+Buy-first execution loop for small accounts:
 
-  MODE A — INCOME (credit spreads):
+  MODE A — BUY (primary — long calls & puts):
+    Momentum-triggered option buying.
+    5 triggers × 2 tiers (sniper + momentum).
+    $500/day budget on $10K. This is where we grow.
+
+  MODE B — INCOME (secondary — put credit spreads):
     Put credit spreads in GREEN/YELLOW regime.
-    High win-rate, steady income. 1 trade/day per ticker.
-
-  MODE B — LOTTO (long options):
-    Momentum-triggered cheap OTM calls/puts.
-    Low win-rate, asymmetric 5x-50x payoff.
-    Fixed $100/day budget funded by income.
+    High win-rate, steady income. Secondary income stream.
 
 Production execution loop that:
   1. Connects to IBKR
@@ -39,11 +39,11 @@ Usage:
     # Paper trading (default, $10K account)
     python run_live.py
 
-    # Income only (no lotto)
-    python run_live.py --no-lotto
+    # Income only (no buying)
+    python run_live.py --no-buy
 
-    # Lotto only (no credit spreads)
-    python run_live.py --lotto-only
+    # Buy only (no credit spreads) — RECOMMENDED for small accounts
+    python run_live.py --buy-only
 
     # Skip confirmation gate (automated mode)
     python run_live.py --no-confirm
@@ -469,7 +469,7 @@ class LiveTradingLoop:
 
         # Timing
         self.scan_interval_sec = 60       # Scan for income entries every 60s
-        self.lotto_scan_interval_sec = 30 # Scan for lotto triggers every 30s
+        self.lotto_scan_interval_sec = 20 # Scan for buy triggers every 20s
         self.monitor_interval_sec = 30    # Check exits every 30s
 
     # ─── Setup ───────────────────────────────────────────────────
@@ -480,7 +480,7 @@ class LiveTradingLoop:
         if self.enable_income:
             mode_parts.append("INCOME (put credit spreads)")
         if self.enable_lotto:
-            mode_parts.append("LOTTO (momentum long options)")
+            mode_parts.append("BUY (long calls & puts)")
         mode_str = " + ".join(mode_parts) or "NONE"
 
         print("\n" + "═" * 60)
@@ -1122,10 +1122,10 @@ def main():
                         help="Skip order confirmation prompts")
     parser.add_argument("--dry-run", action="store_true",
                         help="Simulate without placing real orders")
-    parser.add_argument("--no-lotto", action="store_true",
-                        help="Disable lotto (momentum) scanner")
-    parser.add_argument("--lotto-only", action="store_true",
-                        help="Only run lotto scanner (no credit spreads)")
+    parser.add_argument("--no-lotto", "--no-buy", action="store_true",
+                        help="Disable long options (buy calls/puts) scanner")
+    parser.add_argument("--lotto-only", "--buy-only", action="store_true",
+                        help="Only buy calls/puts (no credit spreads)")
     parser.add_argument("--kill", action="store_true",
                         help="KILL SWITCH: flatten all positions immediately")
     parser.add_argument("--status", action="store_true",
