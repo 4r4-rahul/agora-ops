@@ -32,6 +32,7 @@ class TestBacktestRegression:
     def test_imports(self):
         """All engine modules import without error."""
         from trading_engine.config import EngineConfig, AdaptiveConfig, LottoConfig
+        from trading_engine.config import TickerProfile, get_ticker_profile, TICKER_PROFILES
         from trading_engine.filters import ProductionFilters, FilterDecision
         from trading_engine.engine import TradingEngine
         from trading_engine.models import MarketSnapshot
@@ -377,6 +378,131 @@ class TestBacktestRegression:
         # Sniper is cheaper and further OTM
         assert cfg.sniper_max_premium < cfg.momentum_max_premium
         assert cfg.sniper_delta_max < cfg.momentum_delta_max
+
+    # ── SPX Support Tests ──────────────────────────────────────
+
+    def test_ticker_profile_spx(self):
+        """SPX profile has correct Index/CBOE properties."""
+        from trading_engine.config import get_ticker_profile
+
+        profile = get_ticker_profile("SPX")
+        assert profile.symbol == "SPX"
+        assert profile.sec_type == "IND"
+        assert profile.exchange == "CBOE"
+        assert profile.option_exchange == "SMART"
+        assert profile.strike_increment == 5.0
+        assert profile.multiplier == 100
+        assert profile.is_cash_settled is True
+        assert profile.is_european is True
+        assert profile.tax_1256 is True
+        assert profile.notional_scale == 10.0
+        assert profile.premium_scale == 10.0
+
+    def test_ticker_profile_spy(self):
+        """SPY profile has correct Stock/SMART properties."""
+        from trading_engine.config import get_ticker_profile
+
+        profile = get_ticker_profile("SPY")
+        assert profile.symbol == "SPY"
+        assert profile.sec_type == "STK"
+        assert profile.exchange == "SMART"
+        assert profile.strike_increment == 1.0
+        assert profile.is_cash_settled is False
+        assert profile.is_european is False
+        assert profile.tax_1256 is False
+        assert profile.premium_scale == 1.0
+
+    def test_ticker_profile_fallback(self):
+        """Unknown ticker gets generic STK/SMART fallback."""
+        from trading_engine.config import get_ticker_profile
+
+        profile = get_ticker_profile("TSLA")
+        assert profile.symbol == "TSLA"
+        assert profile.sec_type == "STK"
+        assert profile.exchange == "SMART"
+        assert profile.option_exchange == "SMART"
+        assert profile.strike_increment == 1.0
+        assert profile.is_cash_settled is False
+        assert profile.premium_scale == 1.0
+
+    def test_ticker_profiles_all_defined(self):
+        """All expected tickers have profiles defined."""
+        from trading_engine.config import TICKER_PROFILES
+
+        expected = {"SPY", "QQQ", "SPX", "IWM", "AAPL"}
+        assert expected.issubset(set(TICKER_PROFILES.keys()))
+
+    def test_round_strike_spx(self):
+        """SPX strikes round to $5 increments."""
+        from trading_engine.lotto import _round_strike
+
+        # SPX: $5 increments
+        assert _round_strike(5675.3, "SPX") == 5675.0
+        assert _round_strike(5677.5, "SPX") == 5680.0
+        assert _round_strike(5672.4, "SPX") == 5670.0
+
+    def test_round_strike_spy(self):
+        """SPY strikes round to $1 increments."""
+        from trading_engine.lotto import _round_strike
+
+        # SPY: $1 increments
+        assert _round_strike(565.3, "SPY") == 565.0
+        assert _round_strike(565.7, "SPY") == 566.0
+
+    def test_round_strike_aapl(self):
+        """AAPL strikes round to $2.50 increments."""
+        from trading_engine.lotto import _round_strike
+
+        # AAPL: $2.50 increments
+        assert _round_strike(231.0, "AAPL") == 230.0   # round(231/2.5)=92 → 230
+        assert _round_strike(231.3, "AAPL") == 232.5   # round(231.3/2.5)=93 → 232.5
+        assert _round_strike(233.7, "AAPL") == 232.5   # round(233.7/2.5)=93 → 232.5
+        assert _round_strike(236.3, "AAPL") == 237.5   # round(236.3/2.5)=95 → 237.5
+
+    def test_ibkr_provider_index_tickers(self):
+        """IBKR provider knows which tickers are indices."""
+        from trading_engine.data.ibkr_provider import IBKRDataProvider
+
+        assert "SPX" in IBKRDataProvider.INDEX_TICKERS
+        assert "VIX" in IBKRDataProvider.INDEX_TICKERS
+        assert "NDX" in IBKRDataProvider.INDEX_TICKERS
+        assert "SPY" not in IBKRDataProvider.INDEX_TICKERS
+
+    def test_spx_premium_scaling(self):
+        """SPX premium scale is 10x SPY (options cost ~10x more)."""
+        from trading_engine.config import get_ticker_profile
+
+        spx = get_ticker_profile("SPX")
+        spy = get_ticker_profile("SPY")
+
+        assert spx.premium_scale == 10.0
+        assert spy.premium_scale == 1.0
+        assert spx.premium_scale / spy.premium_scale == 10.0
+
+    def test_spx_vs_spy_properties(self):
+        """SPX and SPY have fundamentally different properties."""
+        from trading_engine.config import get_ticker_profile
+
+        spx = get_ticker_profile("SPX")
+        spy = get_ticker_profile("SPY")
+
+        # SPX is an index, SPY is a stock
+        assert spx.sec_type == "IND"
+        assert spy.sec_type == "STK"
+
+        # Different exchanges
+        assert spx.exchange == "CBOE"
+        assert spy.exchange == "SMART"
+
+        # SPX is cash-settled + European, SPY is not
+        assert spx.is_cash_settled and not spy.is_cash_settled
+        assert spx.is_european and not spy.is_european
+
+        # SPX gets Section 1256 tax treatment
+        assert spx.tax_1256 and not spy.tax_1256
+
+        # SPX has wider strike increments
+        assert spx.strike_increment > spy.strike_increment
 
 
 if __name__ == "__main__":

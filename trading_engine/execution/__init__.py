@@ -202,8 +202,13 @@ class OrderExecutor:
         )
 
         # ── Build combo contract ──
-        short_opt = ib.Option(ticker.upper(), expiry, short_strike, right.upper(), "SMART")
-        long_opt = ib.Option(ticker.upper(), expiry, long_strike, right.upper(), "SMART")
+        # Use ticker profile for correct exchange routing
+        from ..config import get_ticker_profile
+        profile = get_ticker_profile(ticker)
+        opt_exchange = profile.option_exchange
+
+        short_opt = ib.Option(ticker.upper(), expiry, short_strike, right.upper(), opt_exchange)
+        long_opt = ib.Option(ticker.upper(), expiry, long_strike, right.upper(), opt_exchange)
 
         try:
             self._ib.qualifyContracts(short_opt, long_opt)
@@ -219,21 +224,21 @@ class OrderExecutor:
         combo.symbol = ticker.upper()
         combo.secType = "BAG"
         combo.currency = "USD"
-        combo.exchange = "SMART"
+        combo.exchange = opt_exchange
 
         # Short leg: SELL
         short_leg = ib.ComboLeg()
         short_leg.conId = short_opt.conId
         short_leg.ratio = 1
         short_leg.action = "SELL" if action == "SELL" else "BUY"
-        short_leg.exchange = "SMART"
+        short_leg.exchange = opt_exchange
 
         # Long leg: BUY
         long_leg = ib.ComboLeg()
         long_leg.conId = long_opt.conId
         long_leg.ratio = 1
         long_leg.action = "BUY" if action == "SELL" else "SELL"
-        long_leg.exchange = "SMART"
+        long_leg.exchange = opt_exchange
 
         combo.comboLegs = [short_leg, long_leg]
 
@@ -359,8 +364,10 @@ class OrderExecutor:
             num_contracts=num_contracts,
         )
 
-        # Build option contract
-        opt = ib.Option(ticker.upper(), expiry, strike, right.upper(), "SMART")
+        # Build option contract (SPX-aware routing)
+        from ..config import get_ticker_profile
+        profile = get_ticker_profile(ticker)
+        opt = ib.Option(ticker.upper(), expiry, strike, right.upper(), profile.option_exchange)
 
         try:
             self._ib.qualifyContracts(opt)
@@ -372,10 +379,12 @@ class OrderExecutor:
             return result
 
         # ── Human confirmation gate ──
+        settlement = " [CASH-SETTLED]" if profile.is_cash_settled else ""
+        tax_note = " [60/40 tax]" if profile.tax_1256 else ""
         order_desc = (
             f"BUY {num_contracts}x {ticker} "
             f"{strike} {'Call' if right == 'C' else 'Put'}  "
-            f"exp={expiry}"
+            f"exp={expiry}{settlement}{tax_note}"
         )
         if limit_price:
             order_desc += f"  limit=${limit_price:.2f}"
@@ -456,7 +465,10 @@ class OrderExecutor:
             num_contracts=num_contracts,
         )
 
-        opt = ib.Option(ticker.upper(), expiry, strike, right.upper(), "SMART")
+        # Build option contract (SPX-aware routing)
+        from ..config import get_ticker_profile
+        profile = get_ticker_profile(ticker)
+        opt = ib.Option(ticker.upper(), expiry, strike, right.upper(), profile.option_exchange)
 
         try:
             self._ib.qualifyContracts(opt)

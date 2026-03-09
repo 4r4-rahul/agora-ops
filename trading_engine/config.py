@@ -3,7 +3,7 @@ Core configuration for the Options Trading Engine.
 """
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Dict
 import os
 from dotenv import load_dotenv
 
@@ -218,3 +218,77 @@ class EngineConfig:
     trade_journal_path: str = field(default_factory=lambda: os.path.join(
         os.path.dirname(os.path.dirname(__file__)), "data", "trade_journal.json"
     ))
+
+
+# ─────────────────────────────────────────────────────────────────
+# Ticker Profiles
+# ─────────────────────────────────────────────────────────────────
+
+@dataclass
+class TickerProfile:
+    """
+    Per-ticker properties for correct IBKR routing and strike math.
+
+    SPX is an INDEX, not a stock — it requires different IBKR contract
+    types, exchange routing, and has different strike increments.
+    """
+    symbol: str
+    sec_type: str          # "STK" for stocks/ETFs, "IND" for indices
+    exchange: str          # "SMART" for stocks, "CBOE" for SPX/VIX
+    option_exchange: str   # Where options trade ("SMART" or "CBOE")
+    currency: str = "USD"
+    strike_increment: float = 1.0     # $1 for SPY/QQQ, $5 for SPX
+    multiplier: int = 100             # Option multiplier (100 for all US options)
+    is_cash_settled: bool = False     # True for SPX (no assignment risk)
+    is_european: bool = False         # True for SPX (no early exercise)
+    tax_1256: bool = False            # True for SPX (60/40 tax treatment)
+    notional_scale: float = 1.0       # SPX ≈ 10x SPY
+    # Premium scaling: SPX options cost more in absolute $ because
+    # the underlying is ~$5,700 vs SPY ~$570. We scale max premiums.
+    premium_scale: float = 1.0        # 1.0 for SPY, ~10.0 for SPX
+
+
+# Pre-built profiles for supported tickers
+TICKER_PROFILES: Dict[str, TickerProfile] = {
+    "SPY": TickerProfile(
+        symbol="SPY", sec_type="STK", exchange="SMART",
+        option_exchange="SMART", strike_increment=1.0,
+        multiplier=100, is_cash_settled=False, is_european=False,
+        tax_1256=False, notional_scale=1.0, premium_scale=1.0,
+    ),
+    "QQQ": TickerProfile(
+        symbol="QQQ", sec_type="STK", exchange="SMART",
+        option_exchange="SMART", strike_increment=1.0,
+        multiplier=100, is_cash_settled=False, is_european=False,
+        tax_1256=False, notional_scale=1.0, premium_scale=1.0,
+    ),
+    "SPX": TickerProfile(
+        symbol="SPX", sec_type="IND", exchange="CBOE",
+        option_exchange="SMART", strike_increment=5.0,
+        multiplier=100, is_cash_settled=True, is_european=True,
+        tax_1256=True, notional_scale=10.0, premium_scale=10.0,
+    ),
+    "IWM": TickerProfile(
+        symbol="IWM", sec_type="STK", exchange="SMART",
+        option_exchange="SMART", strike_increment=1.0,
+        multiplier=100, is_cash_settled=False, is_european=False,
+        tax_1256=False, notional_scale=1.0, premium_scale=1.0,
+    ),
+    "AAPL": TickerProfile(
+        symbol="AAPL", sec_type="STK", exchange="SMART",
+        option_exchange="SMART", strike_increment=2.5,
+        multiplier=100, is_cash_settled=False, is_european=False,
+        tax_1256=False, notional_scale=1.0, premium_scale=1.0,
+    ),
+}
+
+
+def get_ticker_profile(ticker: str) -> TickerProfile:
+    """Get the profile for a ticker. Falls back to generic STK/SMART defaults."""
+    return TICKER_PROFILES.get(
+        ticker.upper(),
+        TickerProfile(
+            symbol=ticker.upper(), sec_type="STK", exchange="SMART",
+            option_exchange="SMART", strike_increment=1.0,
+        ),
+    )

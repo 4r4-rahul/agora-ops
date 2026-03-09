@@ -49,7 +49,7 @@ from typing import List, Optional, Dict, Any
 import numpy as np
 import pandas as pd
 
-from .config import EngineConfig, LottoConfig
+from .config import EngineConfig, LottoConfig, get_ticker_profile, TickerProfile
 
 logger = logging.getLogger(__name__)
 
@@ -692,9 +692,12 @@ class LottoScanner:
           - Sniper: delta 0.05-0.20, premium $0.05-$0.50 (cheap gamma)
           - Momentum: delta 0.20-0.45, premium $0.50-$2.00 (high-prob move)
 
+        Premium limits are scaled for SPX (options are ~10x SPY price)
+        because SPX underlying is ~$5,700 vs SPY ~$570.
+
         Selects based on:
           - Delta within tier range
-          - Premium within tier budget
+          - Premium within tier budget (scaled by ticker)
           - Reasonable bid-ask spread (< 50% of mid)
           - Sorted by gamma for sniper, by delta for momentum
         """
@@ -702,18 +705,20 @@ class LottoScanner:
             return None
 
         tier = trigger.tier
+        profile = get_ticker_profile(trigger.ticker)
+        premium_scale = profile.premium_scale  # 1.0 for SPY, ~10.0 for SPX
 
-        # Set filters based on tier
+        # Set filters based on tier — scale premiums for SPX
         if tier == "momentum":
             delta_min = self.lotto_cfg.momentum_delta_min
             delta_max = self.lotto_cfg.momentum_delta_max
-            price_min = self.lotto_cfg.min_premium
-            price_max = self.lotto_cfg.momentum_max_premium
+            price_min = self.lotto_cfg.min_premium * premium_scale
+            price_max = self.lotto_cfg.momentum_max_premium * premium_scale
         else:  # sniper
             delta_min = self.lotto_cfg.sniper_delta_min
             delta_max = self.lotto_cfg.sniper_delta_max
-            price_min = self.lotto_cfg.min_premium
-            price_max = self.lotto_cfg.sniper_max_premium
+            price_min = self.lotto_cfg.min_premium * premium_scale
+            price_max = self.lotto_cfg.sniper_max_premium * premium_scale
 
         try:
             chain = self.provider.get_options_chain(
@@ -841,6 +846,16 @@ class LottoScanner:
         print(f"    Direction:  BUY {trigger.direction}")
         print(f"    Tier:       {trigger.tier.upper()} ({'$0.05-$0.50' if trigger.tier == 'sniper' else '$0.50-$2.00'})")
         print(f"    Strike:     {trigger.ticker} {strike_info['strike']}{strike_info['right']}")
+        profile = get_ticker_profile(trigger.ticker)
+        if profile.is_cash_settled or profile.tax_1256:
+            extras = []
+            if profile.is_cash_settled:
+                extras.append("CASH-SETTLED")
+            if profile.tax_1256:
+                extras.append("60/40 TAX")
+            if profile.is_european:
+                extras.append("EUROPEAN")
+            print(f"    Features:   [{' | '.join(extras)}]")
         print(f"    Ask:        ${ask:.2f}/contract")
         print(f"    Contracts:  {num_contracts}")
         print(f"    Total cost: ${total_cost:.2f}")
@@ -1057,11 +1072,7 @@ class LottoScanner:
 # ─────────────────────────────────────────────────────────────────
 
 def _round_strike(price: float, ticker: str) -> float:
-    """Round to nearest valid strike increment."""
-    ticker_upper = ticker.upper()
-    if ticker_upper in ("SPY", "QQQ", "IWM", "AAPL"):
-        return round(price)  # $1 increments
-    elif ticker_upper in ("SPX", "NDX"):
-        return round(price / 5) * 5  # $5 increments
-    else:
-        return round(price)
+    """Round to nearest valid strike increment using ticker profile."""
+    profile = get_ticker_profile(ticker)
+    inc = profile.strike_increment
+    return round(price / inc) * inc

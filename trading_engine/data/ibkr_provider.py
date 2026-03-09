@@ -174,7 +174,41 @@ class IBKRDataProvider:
                     "Not connected to IBKR. Start TWS/Gateway and call .connect()"
                 )
 
-    # ─── Historical Stock Bars ────────────────────────────────────
+    # ─── Contract Helpers ───────────────────────────────────────────
+
+    # Index tickers (SPX, VIX, NDX, etc.) require ib_insync.Index()
+    # instead of ib_insync.Stock(). The exchange is CBOE, not SMART.
+    INDEX_TICKERS = {"SPX", "VIX", "NDX", "RUT", "DJX"}
+
+    def _make_underlying_contract(self, ticker: str):
+        """
+        Create the correct underlying contract for a ticker.
+
+        SPX/VIX/NDX → Index("SPX", "CBOE")
+        SPY/QQQ/etc → Stock("SPY", "SMART", "USD")
+
+        This is critical: using Stock() for SPX will fail to qualify.
+        """
+        ib_insync = self._ib_insync
+        ticker_upper = ticker.upper()
+
+        if ticker_upper in self.INDEX_TICKERS:
+            return ib_insync.Index(ticker_upper, "CBOE")
+        else:
+            return ib_insync.Stock(ticker_upper, "SMART", "USD")
+
+    def _make_option_contract(self, ticker: str, expiry: str, strike: float,
+                               right: str, exchange: str = "SMART"):
+        """
+        Create an option contract with correct exchange routing.
+
+        For most tickers, SMART routing works. For SPX options,
+        SMART also works (IBKR routes to CBOE automatically).
+        """
+        ib_insync = self._ib_insync
+        return ib_insync.Option(ticker.upper(), expiry, strike, right.upper(), exchange)
+
+    # ─── Historical Stock/Index Bars ──────────────────────────────
 
     def get_historical_bars(
         self,
@@ -217,8 +251,11 @@ class IBKRDataProvider:
             years = max(1, days // 365)
             duration = f"{years} Y"
 
-        contract = ib_insync.Stock(ticker.upper(), "SMART", "USD")
+        contract = self._make_underlying_contract(ticker)
         self._ib.qualifyContracts(contract)
+
+        # Index data uses whatToShow="TRADES" on CBOE
+        what_to_show = "TRADES"
 
         print(f"  📊 Fetching {ticker} {interval} bars ({duration}) from IBKR ...")
         bars = self._ib.reqHistoricalData(
@@ -287,9 +324,9 @@ class IBKRDataProvider:
         ib_insync = self._ib_insync
 
         # Get underlying price
-        stock = ib_insync.Stock(ticker.upper(), "SMART", "USD")
-        self._ib.qualifyContracts(stock)
-        [stock_ticker] = self._ib.reqTickers(stock)
+        underlying = self._make_underlying_contract(ticker)
+        self._ib.qualifyContracts(underlying)
+        [stock_ticker] = self._ib.reqTickers(underlying)
         underlying_price = stock_ticker.marketPrice()
 
         if not underlying_price or underlying_price <= 0 or _isnan(underlying_price):
@@ -309,7 +346,7 @@ class IBKRDataProvider:
 
         # Get available expirations and strikes
         chains = self._ib.reqSecDefOptParams(
-            stock.symbol, "", stock.secType, stock.conId
+            underlying.symbol, "", underlying.secType, underlying.conId
         )
         if not chains:
             raise RuntimeError(f"No option parameters available for {ticker}")
@@ -349,8 +386,8 @@ class IBKRDataProvider:
         contracts = []
         for r in rights:
             for strike in selected_strikes:
-                opt = ib_insync.Option(
-                    ticker.upper(), chosen_expiry, strike, r, "SMART"
+                opt = self._make_option_contract(
+                    ticker, chosen_expiry, strike, r, chain.exchange
                 )
                 contracts.append(opt)
 
@@ -454,9 +491,9 @@ class IBKRDataProvider:
             expiry = date.today().strftime("%Y%m%d")
 
         # Create contracts
-        stock = ib_insync.Stock(ticker.upper(), "SMART", "USD")
-        short_opt = ib_insync.Option(ticker.upper(), expiry, short_strike, right, "SMART")
-        long_opt = ib_insync.Option(ticker.upper(), expiry, long_strike, right, "SMART")
+        stock = self._make_underlying_contract(ticker)
+        short_opt = self._make_option_contract(ticker, expiry, short_strike, right)
+        long_opt = self._make_option_contract(ticker, expiry, long_strike, right)
 
         self._ib.qualifyContracts(stock, short_opt, long_opt)
 
