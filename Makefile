@@ -29,7 +29,7 @@ LOG_DIR := $(PROJECT)/data/logs
 PID_FILE := $(PROJECT)/data/.trading.pid
 
 .PHONY: help start start-bg stop status kill validate validate-dry \
-        logs health backend frontend dashboard test clean install
+        logs health morning backend frontend dashboard test clean install
 
 # ── Default ──────────────────────────────────────────────────
 help:
@@ -48,6 +48,7 @@ help:
 	@echo "    make validate       Full validation (paper orders)"
 	@echo "    make validate-dry   Dry-run validation (no orders)"
 	@echo "    make health         Health check (IBKR + process)"
+	@echo "    make morning        Pre-market diagnostic + Discord"
 	@echo ""
 	@echo "  Services:"
 	@echo "    make backend        Start FastAPI API server"
@@ -129,6 +130,10 @@ validate-dry:
 
 health:
 	@$(PROJECT)/scripts/health_check.sh
+
+morning:
+	@echo "🌅 Running pre-market diagnostic ..."
+	$(PYTHON) scripts/morning_premarket.py
 
 # ── Logging ──────────────────────────────────────────────────
 logs:
