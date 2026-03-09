@@ -31,7 +31,7 @@ class TestBacktestRegression:
 
     def test_imports(self):
         """All engine modules import without error."""
-        from trading_engine.config import EngineConfig, AdaptiveConfig
+        from trading_engine.config import EngineConfig, AdaptiveConfig, LottoConfig
         from trading_engine.filters import ProductionFilters, FilterDecision
         from trading_engine.engine import TradingEngine
         from trading_engine.models import MarketSnapshot
@@ -39,6 +39,7 @@ class TestBacktestRegression:
         from trading_engine.execution.state import StateManager
         from trading_engine.execution.safety import SafetyMonitor
         from trading_engine.data.backtester import Backtester
+        from trading_engine.lotto import LottoScanner, LottoTrigger, MomentumDetector
         assert True
 
     def test_regime_classification(self):
@@ -50,7 +51,7 @@ class TestBacktestRegression:
         # GREEN
         green = cfg.for_regime("GREEN")
         assert green.trade_enabled is True
-        assert green.preferred_strategy == "call_credit"
+        assert green.preferred_strategy == "put_credit"
         assert green.position_size_mult == 1.0
 
         # YELLOW
@@ -228,6 +229,94 @@ class TestBacktestRegression:
             assert result is not None, f"Module {name} returned None"
 
         assert len(results) == 12
+
+
+    def test_lotto_config_defaults(self):
+        """LottoConfig has sane defaults for $10K account."""
+        from trading_engine.config import LottoConfig, AccountConfig
+        import os
+
+        lotto = LottoConfig()
+
+        # Clear env to get true defaults
+        old_val = os.environ.pop("ACCOUNT_SIZE", None)
+        try:
+            acct = AccountConfig()
+
+            # Budget sanity
+            daily_budget = acct.account_size * acct.lotto_daily_budget_pct
+            per_trade = acct.account_size * acct.lotto_max_per_trade_pct
+            assert daily_budget == 100.0  # 1% of $10K
+            assert per_trade == 50.0      # 0.5% of $10K
+        finally:
+            if old_val is not None:
+                os.environ["ACCOUNT_SIZE"] = old_val
+
+        # Strike selection
+        assert lotto.target_delta_min < lotto.target_delta_max
+        assert lotto.max_premium_per_trade > lotto.min_premium
+
+        # Exit rules
+        assert lotto.stop_loss_pct == 0.50
+        assert lotto.profit_target_mult == 5.0
+        assert 0 < lotto.runner_keep_pct < 1.0
+
+    def test_lotto_trigger_creation(self):
+        """LottoTrigger dataclass creates correctly."""
+        from trading_engine.lotto import LottoTrigger
+        from datetime import datetime, timezone
+
+        trigger = LottoTrigger(
+            trigger_type="orb_breakout",
+            direction="bullish",
+            ticker="SPY",
+            underlying_price=550.0,
+            strike=553.0,
+            expiry="20250214",
+            right="C",
+            estimated_premium=0.15,
+            num_contracts=3,
+            reason="ORB breakout: +0.45% above 15m high",
+            confidence=0.75,
+            timestamp=datetime.now(timezone.utc),
+        )
+        assert trigger.trigger_type == "orb_breakout"
+        assert trigger.direction == "bullish"
+        assert trigger.confidence == 0.75
+
+    def test_momentum_detector_init(self):
+        """MomentumDetector initializes with config."""
+        from trading_engine.config import LottoConfig
+        from trading_engine.lotto import MomentumDetector
+
+        cfg = LottoConfig()
+        detector = MomentumDetector(cfg)
+        assert detector.cfg is cfg
+
+    def test_engine_config_has_lotto(self):
+        """EngineConfig includes LottoConfig."""
+        from trading_engine.config import EngineConfig, LottoConfig
+
+        cfg = EngineConfig()
+        assert hasattr(cfg, "lotto")
+        assert isinstance(cfg.lotto, LottoConfig)
+
+    def test_account_config_10k_default(self):
+        """AccountConfig defaults to $10K for small account."""
+        from trading_engine.config import AccountConfig
+        import os
+
+        # Clear env to test defaults
+        old_val = os.environ.pop("ACCOUNT_SIZE", None)
+        try:
+            acct = AccountConfig()
+            assert acct.account_size == 10_000.0
+            assert acct.max_risk_per_trade_pct == 0.02
+            assert acct.max_daily_loss_pct == 0.03
+            assert acct.max_buying_power_usage_pct == 0.15
+        finally:
+            if old_val is not None:
+                os.environ["ACCOUNT_SIZE"] = old_val
 
 
 if __name__ == "__main__":

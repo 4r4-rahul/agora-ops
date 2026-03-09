@@ -13,15 +13,21 @@ load_dotenv()
 @dataclass
 class AccountConfig:
     """Trading account configuration."""
-    account_size: float = 50_000.0
-    max_risk_per_trade_pct: float = 0.03        # 3% max per trade
-    max_daily_loss_pct: float = 0.05             # 5% daily stop
-    max_weekly_loss_pct: float = 0.08            # 8% weekly stop
+    account_size: float = field(
+        default_factory=lambda: float(os.getenv("ACCOUNT_SIZE", "10000"))
+    )
+    max_risk_per_trade_pct: float = 0.02        # 2% max per trade ($200 on $10K)
+    max_daily_loss_pct: float = 0.03             # 3% daily stop ($300 on $10K)
+    max_weekly_loss_pct: float = 0.06            # 6% weekly stop
     max_monthly_drawdown_pct: float = 0.10       # 10% monthly circuit breaker
-    max_buying_power_usage_pct: float = 0.50     # Never use more than 50% BP
-    weekly_income_target_pct: float = 0.01       # 1% per week target
-    daily_income_target_pct: float = 0.002       # 0.2% per day target
+    max_buying_power_usage_pct: float = 0.15     # 15% BP max (conservative for small acct)
+    weekly_income_target_pct: float = 0.02       # 2% per week target
+    daily_income_target_pct: float = 0.005       # 0.5% per day target
     can_monitor_intraday: bool = True
+    # Lotto (long option) budget
+    lotto_daily_budget_pct: float = 0.01         # 1% of account per day on lottos ($100)
+    lotto_max_per_trade_pct: float = 0.005       # 0.5% max per single lotto ($50)
+    lotto_max_positions: int = 2                 # Max 2 open lotto positions
 
 
 @dataclass
@@ -76,6 +82,38 @@ class TradingConfig:
 
 
 @dataclass
+class LottoConfig:
+    """Configuration for long-option momentum scanner (lotto plays)."""
+    # Budget
+    max_premium_per_trade: float = 0.50          # Max $0.50/contract ($50 per contract)
+    min_premium: float = 0.05                    # Min $0.05 (avoid penny options)
+    max_contracts_per_trade: int = 3             # Max 3 contracts per lotto
+
+    # Strike selection
+    otm_distance_pct: float = 0.005              # 0.5% OTM from current price
+    max_otm_distance_pct: float = 0.02           # Max 2% OTM (too far = no gamma)
+    target_delta_min: float = 0.05               # Min delta (not too far OTM)
+    target_delta_max: float = 0.25               # Max delta (not too expensive)
+
+    # Triggers (momentum thresholds)
+    orb_breakout_min_pct: float = 0.003          # 0.3% beyond 15-min range = breakout
+    volume_surge_mult: float = 3.0               # 3x avg volume = surge
+    mean_rev_flush_pct: float = 0.008            # 0.8% flush for mean-rev entry
+    vwap_reclaim_bars: int = 2                   # 2 consecutive bars above VWAP
+
+    # Exit rules
+    stop_loss_pct: float = 0.50                  # Close at 50% loss of premium
+    profit_target_mult: float = 5.0              # Take profit at 5x entry price
+    runner_keep_pct: float = 0.30                # Keep 30% as runner after 3x
+    time_exit_minutes_before_close: int = 30     # Close 30 min before market close
+
+    # Scan timing
+    scan_start_min: int = 16                     # Start 16 min after open (after 15-min ORB)
+    scan_end_min: int = 180                      # Stop scanning 3 hours after open
+    scan_interval_sec: int = 30                  # Check triggers every 30s
+
+
+@dataclass
 class RegimeParams:
     """Per-regime optimized parameters (from optimizer sweep)."""
     delta: float = 0.12
@@ -113,13 +151,13 @@ class AdaptiveConfig:
     green: RegimeParams = field(default_factory=lambda: RegimeParams(
         delta=0.15, stop_mult=2.5, profit_target=0.75,
         width=2.0, entry_start_min=30, entry_end_min=60,
-        gamma_limit=0.15, preferred_strategy="call_credit",
+        gamma_limit=0.15, preferred_strategy="put_credit",
         trade_enabled=True, position_size_mult=1.0,
     ))
     yellow: RegimeParams = field(default_factory=lambda: RegimeParams(
         delta=0.15, stop_mult=3.0, profit_target=0.30,
         width=2.0, entry_start_min=30, entry_end_min=90,
-        gamma_limit=0.15, preferred_strategy="call_credit",
+        gamma_limit=0.15, preferred_strategy="put_credit",
         trade_enabled=True, position_size_mult=0.5,  # Half size
     ))
     red: RegimeParams = field(default_factory=lambda: RegimeParams(
@@ -148,6 +186,7 @@ class EngineConfig:
     ibkr: IBKRConfig = field(default_factory=IBKRConfig)
     trading: TradingConfig = field(default_factory=TradingConfig)
     adaptive: AdaptiveConfig = field(default_factory=AdaptiveConfig)
+    lotto: LottoConfig = field(default_factory=LottoConfig)
     data_dir: str = field(default_factory=lambda: os.path.join(
         os.path.dirname(os.path.dirname(__file__)), "data"
     ))

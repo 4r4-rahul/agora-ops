@@ -1,16 +1,28 @@
 #!/usr/bin/env python3
 """
-Live Trading Loop — 0DTE Credit Spreads on IBKR
+Live Trading Loop — 0DTE Options Engine on IBKR
 =================================================
+Dual-mode execution loop:
+
+  MODE A — INCOME (credit spreads):
+    Put credit spreads in GREEN/YELLOW regime.
+    High win-rate, steady income. 1 trade/day per ticker.
+
+  MODE B — LOTTO (long options):
+    Momentum-triggered cheap OTM calls/puts.
+    Low win-rate, asymmetric 5x-50x payoff.
+    Fixed $100/day budget funded by income.
+
 Production execution loop that:
   1. Connects to IBKR
   2. Classifies market regime (VIX-based)
   3. Runs production filter stack (ATR sizing)
-  4. Scans options chains for optimal strikes
-  5. Passes through risk manager pre-trade checks
-  6. Executes via OrderExecutor with human confirmation
-  7. Monitors positions for stop/target/gamma exits
-  8. Persists all state to survive restarts
+  4. Scans options chains for optimal strikes (income)
+  5. Scans momentum triggers for lotto entries
+  6. Passes through risk manager pre-trade checks
+  7. Executes via OrderExecutor with human confirmation
+  8. Monitors BOTH position types for exit triggers
+  9. Persists all state to survive restarts
 
 Safety layers:
   ┌──────────────────────────────────────────────────────────┐
@@ -20,11 +32,18 @@ Safety layers:
   │  Layer 4: RiskManager checks   (7 pre-trade rules)       │
   │  Layer 5: Human Confirmation   (y/N prompt before order)  │
   │  Layer 6: Kill Switch          (flatten_all on demand)    │
+  │  Layer 7: Lotto Budget Cap     ($100/day hard limit)      │
   └──────────────────────────────────────────────────────────┘
 
 Usage:
-    # Paper trading (default)
+    # Paper trading (default, $10K account)
     python run_live.py
+
+    # Income only (no lotto)
+    python run_live.py --no-lotto
+
+    # Lotto only (no credit spreads)
+    python run_live.py --lotto-only
 
     # Skip confirmation gate (automated mode)
     python run_live.py --no-confirm
@@ -60,6 +79,7 @@ from trading_engine.filters import ProductionFilters, FilterDecision
 from trading_engine.execution import OrderExecutor, OrderStatus, FillResult, LivePosition
 from trading_engine.execution.state import StateManager
 from trading_engine.execution.safety import SafetyMonitor, AlertLevel
+from trading_engine.lotto import LottoScanner, LottoTrigger
 
 logger = logging.getLogger(__name__)
 
@@ -419,12 +439,16 @@ class LiveTradingLoop:
         config: EngineConfig = None,
         dry_run: bool = False,
         require_confirmation: bool = True,
-        account_size: float = 50_000.0,
+        account_size: float = 10_000.0,
+        enable_lotto: bool = True,
+        enable_income: bool = True,
     ):
         self.tickers = tickers or os.getenv("TRADE_TICKERS", "SPY").split(",")
         self.config = config or EngineConfig()
         self.dry_run = dry_run
         self.account_size = account_size
+        self.enable_lotto = enable_lotto
+        self.enable_income = enable_income
 
         # Components
         self.adaptive = AdaptiveConfig()
@@ -434,29 +458,42 @@ class LiveTradingLoop:
         self.provider = None
         self.monitor = None
         self.safety: Optional[SafetyMonitor] = None
+        self.lotto: Optional[LottoScanner] = None  # Momentum lotto scanner
 
         # Confirmation gate
         self.require_confirmation = require_confirmation
 
         # Loop control
         self._running = False
-        self._entry_placed_today = set()  # Track tickers we've entered
+        self._entry_placed_today = set()  # Track tickers we've entered (income)
 
         # Timing
-        self.scan_interval_sec = 60       # Scan for entries every 60s
+        self.scan_interval_sec = 60       # Scan for income entries every 60s
+        self.lotto_scan_interval_sec = 30 # Scan for lotto triggers every 30s
         self.monitor_interval_sec = 30    # Check exits every 30s
 
     # ─── Setup ───────────────────────────────────────────────────
 
     def setup(self) -> bool:
         """Initialize all components. Returns True if ready."""
+        mode_parts = []
+        if self.enable_income:
+            mode_parts.append("INCOME (put credit spreads)")
+        if self.enable_lotto:
+            mode_parts.append("LOTTO (momentum long options)")
+        mode_str = " + ".join(mode_parts) or "NONE"
+
         print("\n" + "═" * 60)
         print("  0DTE LIVE TRADING ENGINE")
         print("═" * 60)
+        print(f"  Mode:         {mode_str}")
         print(f"  Tickers:      {', '.join(self.tickers)}")
         print(f"  Account:      ${self.account_size:,.0f}")
         print(f"  Dry Run:      {'YES ⚠️' if self.dry_run else 'NO — LIVE ORDERS'}")
         print(f"  Confirmation: {'Required' if self.require_confirmation else 'Auto'}")
+        if self.enable_lotto:
+            lotto_budget = self.account_size * self.config.account.lotto_daily_budget_pct
+            print(f"  Lotto budget: ${lotto_budget:,.0f}/day")
         print("═" * 60)
 
         # 1. Load persisted state
@@ -505,14 +542,26 @@ class LiveTradingLoop:
         else:
             print(f"  🔔 Webhook alerts: OFF (set ALERT_WEBHOOK_URL to enable)")
 
-        # 4. Position monitor
+        # 4. Lotto scanner
+        if self.enable_lotto:
+            self.lotto = LottoScanner(
+                provider=self.provider,
+                executor=self.executor,
+                config=self.config,
+                account_size=self.account_size,
+            )
+            print(f"  🎰 Lotto scanner: ENABLED")
+        else:
+            print(f"  🎰 Lotto scanner: OFF")
+
+        # 5. Position monitor
         self.monitor = PositionMonitor(
             executor=self.executor,
             state=self.state,
             safety=self.safety,
         )
 
-        # 5. Sync with IBKR positions
+        # 6. Sync with IBKR positions
         if self.provider and not self.dry_run:
             print("\n  🔄 Syncing positions with IBKR...")
             sync = self.state.sync_positions(self.provider)
@@ -754,6 +803,66 @@ class LiveTradingLoop:
         else:
             print(f"  ❌ Not filled: {fill.status.value} — {fill.error_msg}")
 
+    # ─── Lotto Entry Logic ────────────────────────────────────────
+
+    def scan_lotto(self):
+        """
+        Scan for momentum lotto triggers.
+
+        Runs independently from income scan. Checks momentum
+        triggers every 30s during the lotto scan window
+        (16 min to 180 min after open).
+        """
+        if not self.lotto:
+            return
+
+        now = eastern_now()
+        msopen = minutes_since_open()
+        lotto_cfg = self.config.lotto
+
+        # Check scan window
+        if msopen < lotto_cfg.scan_start_min:
+            return
+        if msopen > lotto_cfg.scan_end_min:
+            return
+
+        # Budget check
+        can, reason = self.lotto.can_enter()
+        if not can:
+            return
+
+        print(f"\n  🎰 Lotto Scan [{now.strftime('%H:%M:%S')} ET, "
+              f"${self.lotto.budget_remaining:.0f} budget remaining]")
+
+        for ticker in self.tickers:
+            triggers = self.lotto.scan(ticker)
+
+            if not triggers:
+                print(f"  🎰 {ticker}: No triggers")
+                continue
+
+            # Take the best trigger (highest confidence)
+            best = triggers[0]
+            print(f"  🎰 {ticker}: {best.trigger_type} {best.direction} "
+                  f"(confidence={best.confidence:.0%})")
+
+            # Require minimum confidence
+            if best.confidence < 0.3:
+                print(f"  🎰 Confidence too low ({best.confidence:.0%} < 30%) — skip")
+                continue
+
+            # Select strike from live chain
+            strike_info = self.lotto.select_strike(best)
+            if not strike_info:
+                print(f"  🎰 No suitable strike found")
+                continue
+
+            # Execute
+            self.lotto.execute_lotto(best, strike_info, dry_run=self.dry_run)
+
+            # Only one lotto entry per scan cycle
+            break
+
     def _try_iron_condor(self, ticker, chain, params, vix, size_mult, expiry):
         """Try to enter an iron condor."""
         underlying_price = chain[0].get("underlying_price", 0) if chain else 0
@@ -865,13 +974,14 @@ class LiveTradingLoop:
         print(f"  Press Ctrl+C to stop gracefully\n")
 
         last_scan = 0
+        last_lotto_scan = 0
         last_monitor = 0
-        entry_done = False
+        income_entry_done = False
 
         try:
             while self._running:
                 if not market_is_open():
-                    if entry_done:
+                    if income_entry_done or (self.lotto and self.lotto.trades_today > 0):
                         # Market closed after we were trading
                         print(f"\n  🏁 Market closed")
                         break
@@ -884,8 +994,9 @@ class LiveTradingLoop:
                 msopen = minutes_since_open()
                 ttc = minutes_to_close()
 
-                # Entry scan (during entry window, once per scan_interval)
-                if not entry_done and now - last_scan >= self.scan_interval_sec:
+                # ── Income entry scan (during entry window, once per scan_interval) ──
+                if (self.enable_income and not income_entry_done
+                        and now - last_scan >= self.scan_interval_sec):
                     if msopen >= 30:  # At least 30 min after open
                         self.scan_entry()
                         last_scan = now
@@ -897,15 +1008,21 @@ class LiveTradingLoop:
                             )
                         )
                         if msopen > params.entry_end_min:
-                            entry_done = True
+                            income_entry_done = True
                             remaining = [t for t in self.tickers
                                          if t not in self._entry_placed_today]
                             if remaining:
-                                print(f"\n  ⏰ Entry window closed. No entry for: {', '.join(remaining)}")
+                                print(f"\n  ⏰ Income entry window closed. No entry for: {', '.join(remaining)}")
                             else:
-                                print(f"\n  ✅ All entries placed. Switching to monitor mode.")
+                                print(f"\n  ✅ All income entries placed.")
 
-                # Safety check each monitoring cycle
+                # ── Lotto scan (runs continuously during lotto window) ──
+                if (self.enable_lotto and self.lotto
+                        and now - last_lotto_scan >= self.lotto_scan_interval_sec):
+                    self.scan_lotto()
+                    last_lotto_scan = now
+
+                # ── Safety + position monitoring ──
                 if now - last_monitor >= self.monitor_interval_sec:
                     if self.safety:
                         safe, alerts = self.safety.check()
@@ -921,15 +1038,26 @@ class LiveTradingLoop:
                             if spike:
                                 print(f"\n  {spike}")
 
-                    # Position monitoring (continuous after entries)
+                    # Income position monitoring
                     if self.monitor and self.monitor.positions:
                         self.monitor_positions()
+
+                    # Lotto position monitoring
+                    if self.lotto and self.lotto.open_positions:
+                        closed_lottos = self.lotto.check_exits(ttc)
+                        if closed_lottos:
+                            print(f"  🎰 Closed {len(closed_lottos)} lotto position(s)")
+
                     last_monitor = now
 
                 # Time exit warning
-                if ttc <= 20 and self.monitor and self.monitor.positions:
-                    print(f"\n  ⏱️  {ttc} min to close — checking time exits...")
-                    self.monitor_positions()
+                if ttc <= 20:
+                    if self.monitor and self.monitor.positions:
+                        print(f"\n  ⏱️  {ttc} min to close — checking income time exits...")
+                        self.monitor_positions()
+                    if self.lotto and self.lotto.open_positions:
+                        print(f"  🎰 {ttc} min to close — checking lotto time exits...")
+                        self.lotto.check_exits(ttc)
 
                 # Sleep between iterations
                 time.sleep(5)
@@ -957,11 +1085,19 @@ class LiveTradingLoop:
         # Print daily summary
         self.state.print_status()
 
+        # Lotto summary
+        if self.lotto:
+            self.lotto.print_status()
+
         # Send daily summary alert
         if self.safety:
+            lotto_info = ""
+            if self.lotto:
+                lotto_info = (f" | Lotto: {self.lotto.trades_today} trades, "
+                              f"${self.lotto.daily_realized_pnl:+.2f}")
             self.safety.send_daily_summary()
             self.safety.send_alert(
-                "🔴 Trading engine shutting down", AlertLevel.INFO
+                f"🔴 Trading engine shutting down{lotto_info}", AlertLevel.INFO
             )
 
         # Disconnect
@@ -979,12 +1115,17 @@ def main():
     parser = argparse.ArgumentParser(description="0DTE Live Trading Engine")
     parser.add_argument("--tickers", nargs="+", default=["SPY"],
                         help="Tickers to trade (default: SPY)")
-    parser.add_argument("--account-size", type=float, default=50_000,
-                        help="Account size in dollars")
+    parser.add_argument("--account-size", type=float,
+                        default=float(os.getenv("ACCOUNT_SIZE", "10000")),
+                        help="Account size in dollars (default: $10,000)")
     parser.add_argument("--no-confirm", action="store_true",
                         help="Skip order confirmation prompts")
     parser.add_argument("--dry-run", action="store_true",
                         help="Simulate without placing real orders")
+    parser.add_argument("--no-lotto", action="store_true",
+                        help="Disable lotto (momentum) scanner")
+    parser.add_argument("--lotto-only", action="store_true",
+                        help="Only run lotto scanner (no credit spreads)")
     parser.add_argument("--kill", action="store_true",
                         help="KILL SWITCH: flatten all positions immediately")
     parser.add_argument("--status", action="store_true",
@@ -1046,11 +1187,16 @@ def main():
         return
 
     # ── Live trading mode ──
+    enable_lotto = not args.no_lotto
+    enable_income = not args.lotto_only
+
     loop = LiveTradingLoop(
         tickers=args.tickers,
         dry_run=args.dry_run,
         require_confirmation=not args.no_confirm,
         account_size=args.account_size,
+        enable_lotto=enable_lotto,
+        enable_income=enable_income,
     )
     loop.run()
 

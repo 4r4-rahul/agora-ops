@@ -101,6 +101,7 @@ class OrderExecutor:
     Supports:
       - Credit spreads (put credit, call credit)
       - Iron condors
+      - Long options (buy calls, buy puts) — for lotto/momentum plays
       - Single-leg closes
       - Combo (spread) orders with limit credit
     """
@@ -316,6 +317,199 @@ class OrderExecutor:
             limit_credit=limit_debit,
             action="BUY",
         )
+
+    # ─── Long Option Orders (Lotto / Momentum) ────────────────
+
+    def buy_option(
+        self,
+        ticker: str,
+        expiry: str,
+        strike: float,
+        right: str,
+        num_contracts: int = 1,
+        limit_price: Optional[float] = None,
+    ) -> FillResult:
+        """
+        Buy a single-leg option (long call or long put).
+
+        Used for momentum/lotto plays where you BUY cheap OTM options
+        for asymmetric payoff.
+
+        Args:
+            ticker:         Underlying symbol (e.g., "SPY")
+            expiry:         Expiry in YYYYMMDD format
+            strike:         Strike price
+            right:          "C" for call, "P" for put
+            num_contracts:  Number of contracts to buy
+            limit_price:    Max price to pay (None = market order)
+
+        Returns:
+            FillResult with fill details
+        """
+        self._require_connection()
+        ib = self._ib_insync
+
+        result = FillResult(
+            strategy=f"long_{'call' if right == 'C' else 'put'}",
+            ticker=ticker,
+            short_strike=strike,  # Reuse field for the strike
+            long_strike=0.0,
+            right=right,
+            expiry=expiry,
+            num_contracts=num_contracts,
+        )
+
+        # Build option contract
+        opt = ib.Option(ticker.upper(), expiry, strike, right.upper(), "SMART")
+
+        try:
+            self._ib.qualifyContracts(opt)
+        except Exception as e:
+            result.status = OrderStatus.ERROR
+            result.error_msg = f"Failed to qualify contract: {e}"
+            logger.error(result.error_msg)
+            self.order_history.append(result)
+            return result
+
+        # ── Human confirmation gate ──
+        order_desc = (
+            f"BUY {num_contracts}x {ticker} "
+            f"{strike} {'Call' if right == 'C' else 'Put'}  "
+            f"exp={expiry}"
+        )
+        if limit_price:
+            order_desc += f"  limit=${limit_price:.2f}"
+            total_cost = limit_price * num_contracts * 100
+            order_desc += f"  (total cost: ${total_cost:.2f})"
+
+        if self.require_confirmation:
+            if not self._confirm_order(order_desc):
+                result.status = OrderStatus.CANCELLED
+                result.error_msg = "User cancelled"
+                self.order_history.append(result)
+                return result
+
+        # ── Build order ──
+        if limit_price and limit_price > 0:
+            order = ib.LimitOrder("BUY", num_contracts, limit_price)
+        else:
+            order = ib.MarketOrder("BUY", num_contracts)
+
+        order.tif = "DAY"
+        order.transmit = True
+
+        # ── Submit and monitor fill ──
+        logger.info(f"Submitting: {order_desc}")
+        print(f"  📤 Submitting: {order_desc}")
+
+        try:
+            trade = self._ib.placeOrder(opt, order)
+            result.order_id = trade.order.orderId
+            result.status = OrderStatus.SUBMITTED
+            result.submit_time = datetime.now()
+            self.open_orders[result.order_id] = trade
+
+            result = self._wait_for_fill(trade, result)
+
+        except Exception as e:
+            result.status = OrderStatus.ERROR
+            result.error_msg = f"Order submission failed: {e}"
+            logger.error(result.error_msg)
+            print(f"  ❌ {result.error_msg}")
+
+        self.order_history.append(result)
+        return result
+
+    def sell_option(
+        self,
+        ticker: str,
+        expiry: str,
+        strike: float,
+        right: str,
+        num_contracts: int = 1,
+        limit_price: Optional[float] = None,
+    ) -> FillResult:
+        """
+        Sell (close) a long option position.
+
+        Args:
+            ticker:         Underlying symbol
+            expiry:         Expiry YYYYMMDD
+            strike:         Strike price
+            right:          "C" or "P"
+            num_contracts:  Contracts to sell
+            limit_price:    Min price to accept (None = market)
+
+        Returns:
+            FillResult with fill details
+        """
+        self._require_connection()
+        ib = self._ib_insync
+
+        result = FillResult(
+            strategy=f"close_long_{'call' if right == 'C' else 'put'}",
+            ticker=ticker,
+            short_strike=strike,
+            long_strike=0.0,
+            right=right,
+            expiry=expiry,
+            num_contracts=num_contracts,
+        )
+
+        opt = ib.Option(ticker.upper(), expiry, strike, right.upper(), "SMART")
+
+        try:
+            self._ib.qualifyContracts(opt)
+        except Exception as e:
+            result.status = OrderStatus.ERROR
+            result.error_msg = f"Failed to qualify contract: {e}"
+            logger.error(result.error_msg)
+            self.order_history.append(result)
+            return result
+
+        order_desc = (
+            f"SELL {num_contracts}x {ticker} "
+            f"{strike} {'Call' if right == 'C' else 'Put'}  "
+            f"exp={expiry}"
+        )
+        if limit_price:
+            order_desc += f"  limit=${limit_price:.2f}"
+
+        if self.require_confirmation:
+            if not self._confirm_order(order_desc):
+                result.status = OrderStatus.CANCELLED
+                result.error_msg = "User cancelled"
+                self.order_history.append(result)
+                return result
+
+        if limit_price and limit_price > 0:
+            order = ib.LimitOrder("SELL", num_contracts, limit_price)
+        else:
+            order = ib.MarketOrder("SELL", num_contracts)
+
+        order.tif = "DAY"
+        order.transmit = True
+
+        logger.info(f"Submitting: {order_desc}")
+        print(f"  📤 Submitting: {order_desc}")
+
+        try:
+            trade = self._ib.placeOrder(opt, order)
+            result.order_id = trade.order.orderId
+            result.status = OrderStatus.SUBMITTED
+            result.submit_time = datetime.now()
+            self.open_orders[result.order_id] = trade
+
+            result = self._wait_for_fill(trade, result)
+
+        except Exception as e:
+            result.status = OrderStatus.ERROR
+            result.error_msg = f"Order submission failed: {e}"
+            logger.error(result.error_msg)
+            print(f"  ❌ {result.error_msg}")
+
+        self.order_history.append(result)
+        return result
 
     # ─── Iron Condor Orders ──────────────────────────────────────
 
