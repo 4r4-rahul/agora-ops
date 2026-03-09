@@ -1,0 +1,72 @@
+# ══════════════════════════════════════════════════════════════
+#  .gitignore — 0DTE Options Trading Engine
+# ══════════════════════════════════════════════════════════════
+
+# ── Python ───────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# ── Virtual Environment ──────────────────────────────────────
+.venv/
+venv/
+ENV/
+env/
+
+# ── IDE ──────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ── Environment & Secrets ────────────────────────────────────
+.env
+!.env.example
+
+# ── Data (large, regenerable) ────────────────────────────────
+data/backtest_results.json
+data/snapshots.json
+data/historical_*.csv
+data/intraday/
+data/logs/
+data/.trading.pid
+data/.restart_count
+data/validation_state.json
+data/validation_report.json
+data/validation_orders.json
+
+# ── Logs ─────────────────────────────────────────────────────
+logs/
+*.log
+
+# ── TradingView CSVs (raw data exports) ─────────────────────
+BATS_*.csv
+BITSTAMP_*.csv
+COINBASE_*.csv
+CRYPTO_*.csv
+
+# ── Research artifacts (one-off analysis) ────────────────────
+research/*.csv
+feb10_detailed_trades.csv
+latest_analysis_trades.csv
+
+# ── Node / Frontend ──────────────────────────────────────────
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# ── Docker ───────────────────────────────────────────────────
+*.pyc
+
+# ── OS ───────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
