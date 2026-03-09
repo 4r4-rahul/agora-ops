@@ -26,7 +26,7 @@ import os
 import json
 import logging
 import requests
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, Tuple
 
 logger = logging.getLogger(__name__)
@@ -261,14 +261,37 @@ class SafetyMonitor:
             self._send_webhook(message, level)
 
     def _send_webhook(self, message: str, level: str):
-        """Send alert to Discord/Slack webhook."""
+        """Send alert to Discord/Slack webhook with rich formatting."""
         try:
-            payload = {
-                "content": f"**[{level}]** {message}",
-            }
-            # Detect if Slack or Discord
+            # Detect Slack vs Discord
             if "slack" in self.webhook_url.lower():
                 payload = {"text": f"*[{level}]* {message}"}
+            else:
+                # Discord rich embed
+                color_map = {
+                    "INFO": 0x3498DB,       # blue
+                    "WARNING": 0xF39C12,    # amber
+                    "CRITICAL": 0xE74C3C,   # red
+                    "EMERGENCY": 0x8B0000,  # dark red
+                }
+                color = color_map.get(str(level), 0x95A5A6)
+
+                icon_map = {
+                    "INFO": "ℹ️",
+                    "WARNING": "⚠️",
+                    "CRITICAL": "🔴",
+                    "EMERGENCY": "🚨",
+                }
+                icon = icon_map.get(str(level), "📢")
+
+                embed = {
+                    "title": f"{icon} {level}",
+                    "description": message,
+                    "color": color,
+                    "footer": {"text": "0DTE Trading Engine"},
+                    "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+                }
+                payload = {"embeds": [embed]}
 
             resp = requests.post(
                 self.webhook_url,
@@ -282,25 +305,56 @@ class SafetyMonitor:
 
     def send_trade_alert(self, action: str, ticker: str, strikes: str,
                          credit: float, pnl: float = 0.0):
-        """Convenience: send a trade notification."""
+        """Send a rich trade notification via Discord embed."""
         if action == "OPEN":
             msg = f"📤 OPENED: {ticker} {strikes} for ${credit:.2f} credit"
         elif action == "CLOSE":
-            msg = f"📥 CLOSED: {ticker} {strikes} | P&L: ${pnl:+.2f}"
+            pnl_emoji = "🟢" if pnl >= 0 else "🔴"
+            msg = f"📥 CLOSED: {ticker} {strikes} | {pnl_emoji} P&L: ${pnl:+.2f}"
         else:
             msg = f"📋 {action}: {ticker} {strikes}"
 
         self.send_alert(msg, AlertLevel.INFO)
 
     def send_daily_summary(self):
-        """Send end-of-day summary alert."""
+        """Send end-of-day summary with a rich Discord embed."""
         if not self.state:
             return
 
         s = self.state.state
+        pnl_emoji = "🟢" if s.daily_pnl >= 0 else "🔴"
+
+        # Build embed fields for Discord
+        if self.webhook_url and "discord" in self.webhook_url.lower():
+            try:
+                color = 0x2ECC71 if s.daily_pnl >= 0 else 0xE74C3C
+                embed = {
+                    "title": f"📊 Daily Summary — {s.date}",
+                    "color": color,
+                    "fields": [
+                        {"name": "Daily P&L", "value": f"${s.daily_pnl:+.2f}", "inline": True},
+                        {"name": "Trades", "value": str(s.trades_today), "inline": True},
+                        {"name": "Open Positions", "value": str(len(s.open_positions)), "inline": True},
+                        {"name": "Weekly P&L", "value": f"${s.weekly_pnl:+.2f}", "inline": True},
+                        {"name": "Monthly P&L", "value": f"${s.monthly_pnl:+.2f}", "inline": True},
+                    ],
+                    "footer": {"text": "0DTE Trading Engine"},
+                    "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+                }
+                resp = requests.post(
+                    self.webhook_url,
+                    json={"embeds": [embed]},
+                    timeout=5,
+                )
+                if resp.status_code in (200, 204):
+                    return
+            except Exception as e:
+                logger.warning(f"Rich daily summary failed: {e}")
+
+        # Fallback to plain text
         msg = (
             f"📊 DAILY SUMMARY ({s.date})\n"
-            f"  P&L: ${s.daily_pnl:+.2f} | Trades: {s.trades_today}\n"
+            f"  {pnl_emoji} P&L: ${s.daily_pnl:+.2f} | Trades: {s.trades_today}\n"
             f"  Weekly: ${s.weekly_pnl:+.2f} | Monthly: ${s.monthly_pnl:+.2f}\n"
             f"  Open positions: {len(s.open_positions)}"
         )
