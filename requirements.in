@@ -1,0 +1,25 @@
+# 0DTE Options Trading Engine - Direct Dependencies
+# Install: pip install -r requirements.in
+# For exact reproducible builds: pip install -r requirements.txt
+
+# === Core Trading Engine ===
+ib-insync>=0.9.86          # IBKR API wrapper
+yfinance>=1.2.0            # Yahoo Finance (VIX fallback)
+pandas>=2.0                # DataFrames
+numpy>=1.24                # Numerics
+scipy>=1.10                # Statistics (Black-Scholes)
+
+# === Backend API ===
+fastapi>=0.115.0           # REST API framework
+uvicorn>=0.30.0            # ASGI server
+pydantic>=2.9              # Data validation
+python-dotenv>=1.0         # .env loading
+
+# === Notifications ===
+requests>=2.31             # Discord webhooks, HTTP
+
+# === Testing ===
+pytest>=8.0                # Test runner
+
+# === Optional: AI Analysis ===
+# openai>=1.50.0           # GPT scoring (requires API key)
