@@ -226,6 +226,15 @@ class ScalpConfig:
     ema_slope_min_pct: float = 0.0001   # Min EMA slope per bar (0.01%)
     vwap_distance_min_pct: float = 0.0005  # Min 0.05% from VWAP for signal
 
+    # ── New Signal Components ───────────────────────────────────
+    # CANDLE_MOM: 3+ consecutive directional candles with strong bodies
+    candle_mom_bars: int = 3            # Consecutive candle count for momentum
+    candle_mom_body_pct: float = 0.40   # Min body/range ratio for each candle
+    # RANGE_BRK: Donchian channel breakout (works all day, replaces ORB after 60m)
+    range_brk_lookback: int = 20        # Bars to define the range (20-bar high/low)
+    # PREV_HL: Previous day high/low breakout (key institutional level)
+    prev_hl_confirm_bars: int = 2       # Bars to confirm fresh breakout
+
     # ── Runner Tier (OTM Power-Hour Plays) ──────────────────────
     # The "vacation fund": cheap OTM options that ride big moves.
     # Enters ONLY in power hour when momentum is confirmed.

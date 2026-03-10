@@ -568,7 +568,7 @@ class TestBacktestRegression:
 
         bt = LottoBacktester(account_size=10_000)
         assert bt.account_size == 10_000
-        assert bt.detector is not None
+        assert bt._detector is None  # Created at run time with bar_minutes
         assert bt.pricer is not None
 
     def test_lotto_backtester_empty_data(self):

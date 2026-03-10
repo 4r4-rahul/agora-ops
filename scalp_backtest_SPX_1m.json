@@ -1,5 +1,5 @@
 {
-  "strategy": "gamma_scalp",
+  "strategy": "multi_strategy_scalp",
   "spx_mode": true,
   "price_scale": 10.0,
   "period": "2025-09-02 to 2026-03-06",
@@ -16,54 +16,122 @@
     "windows": "20-60, 270-360"
   },
   "results": {
-    "total_trades": 33,
-    "win_rate": 45.5,
-    "total_pnl": 3612.71,
-    "profit_factor": 1.3,
-    "avg_return_pct": 6.8,
-    "avg_hold_minutes": 20.4,
+    "total_trades": 160,
+    "win_rate": 41.9,
+    "total_pnl": -8065.62,
+    "profit_factor": 0.58,
+    "avg_return_pct": -4.4,
+    "avg_hold_minutes": 8.3,
     "starting_balance": 10000.0,
-    "ending_balance": 13612.71,
-    "max_drawdown_pct": 25.8
+    "ending_balance": 1934.38,
+    "max_drawdown_pct": 83.8,
+    "scalp_trades": 25,
+    "scalp_pnl": 1623.06,
+    "runner_trades": 1,
+    "runner_pnl": -78.85,
+    "runner_biggest_win": -78.85,
+    "mr_trades": 134,
+    "mr_pnl": -9609.83,
+    "mr_biggest_win": 432.93
   },
   "exit_stats": {
-    "STOP_LOSS": {
-      "count": 10,
+    "MR_STOP_LOSS": {
+      "count": 60,
       "wins": 0,
-      "losses": 10,
-      "pnl": -8917.91,
-      "avg_hold_min": 13.7,
+      "losses": 60,
+      "pnl": -13699.34,
+      "avg_hold_min": 6.4,
       "win_rate": 0.0
     },
-    "PROFIT_TARGET": {
-      "count": 16,
-      "wins": 15,
-      "losses": 1,
-      "pnl": 15384.8,
-      "avg_hold_min": 19.1,
-      "win_rate": 93.8
-    },
-    "TIME_STOP": {
+    "MR_TIME_STOP": {
       "count": 7,
       "wins": 0,
       "losses": 7,
-      "pnl": -2854.18,
-      "avg_hold_min": 32.7,
+      "pnl": -767.5,
+      "avg_hold_min": 19.7,
+      "win_rate": 0.0
+    },
+    "MR_PROFIT_TARGET": {
+      "count": 25,
+      "wins": 25,
+      "losses": 0,
+      "pnl": 3558.27,
+      "avg_hold_min": 4.8,
+      "win_rate": 100.0
+    },
+    "STOP_LOSS": {
+      "count": 8,
+      "wins": 0,
+      "losses": 8,
+      "pnl": -3541.05,
+      "avg_hold_min": 14.4,
+      "win_rate": 0.0
+    },
+    "PROFIT_TARGET": {
+      "count": 12,
+      "wins": 12,
+      "losses": 0,
+      "pnl": 6156.76,
+      "avg_hold_min": 15.8,
+      "win_rate": 100.0
+    },
+    "MR_TRAILING_STOP": {
+      "count": 41,
+      "wins": 30,
+      "losses": 5,
+      "pnl": 1379.08,
+      "avg_hold_min": 5.2,
+      "win_rate": 73.2
+    },
+    "RUNNER_STOP": {
+      "count": 1,
+      "wins": 0,
+      "losses": 1,
+      "pnl": -78.85,
+      "avg_hold_min": 8.0,
+      "win_rate": 0.0
+    },
+    "TIME_STOP": {
+      "count": 5,
+      "wins": 0,
+      "losses": 5,
+      "pnl": -992.65,
+      "avg_hold_min": 31.2,
+      "win_rate": 0.0
+    },
+    "EOD_CLOSE": {
+      "count": 1,
+      "wins": 0,
+      "losses": 1,
+      "pnl": -80.34,
+      "avg_hold_min": 2.0,
       "win_rate": 0.0
     }
   },
   "confirmation_stats": {
+    "BB_EXTREME+RSI_EXTREME": {
+      "count": 131,
+      "wins": 54,
+      "pnl": -9518.29,
+      "win_rate": 41.2
+    },
     "EMA+ORB+VOLUME+VWAP": {
-      "count": 5,
-      "wins": 1,
-      "pnl": -1702.15,
-      "win_rate": 20.0
+      "count": 2,
+      "wins": 0,
+      "pnl": -875.85,
+      "win_rate": 0.0
     },
     "EMA+VOLUME+VWAP": {
-      "count": 28,
-      "wins": 14,
-      "pnl": 5314.86,
+      "count": 24,
+      "wins": 12,
+      "pnl": 2420.06,
       "win_rate": 50.0
+    },
+    "RSI_EXTREME+VWAP_REVERT": {
+      "count": 3,
+      "wins": 1,
+      "pnl": -91.54,
+      "win_rate": 33.3
     }
   },
   "equity_curve": [
@@ -73,524 +141,672 @@
     },
     {
       "date": "2025-09-02",
-      "balance": 10000.0
+      "balance": 9271.29
     },
     {
       "date": "2025-09-03",
-      "balance": 10000.0
+      "balance": 8677.79
     },
     {
       "date": "2025-09-04",
-      "balance": 9567.15
+      "balance": 8072.34
     },
     {
       "date": "2025-09-05",
-      "balance": 9567.15
+      "balance": 8280.59
     },
     {
       "date": "2025-09-08",
-      "balance": 9857.89
+      "balance": 8347.63
     },
     {
       "date": "2025-09-09",
-      "balance": 9857.89
+      "balance": 8096.34
     },
     {
       "date": "2025-09-10",
-      "balance": 9857.89
+      "balance": 8011.64
     },
     {
       "date": "2025-09-11",
-      "balance": 9857.89
+      "balance": 7672.37
     },
     {
       "date": "2025-09-12",
-      "balance": 9857.89
+      "balance": 7672.37
     },
     {
       "date": "2025-09-15",
-      "balance": 9857.89
+      "balance": 7719.02
     },
     {
       "date": "2025-09-16",
-      "balance": 9857.89
+      "balance": 7824.46
     },
     {
       "date": "2025-09-17",
-      "balance": 10960.81
+      "balance": 8496.4
     },
     {
       "date": "2025-09-18",
-      "balance": 10960.81
+      "balance": 8100.68
     },
     {
       "date": "2025-09-19",
-      "balance": 10960.81
+      "balance": 8109.51
     },
     {
       "date": "2025-09-22",
-      "balance": 10960.81
+      "balance": 7428.74
     },
     {
       "date": "2025-09-23",
-      "balance": 10960.81
+      "balance": 7210.34
     },
     {
       "date": "2025-09-24",
-      "balance": 10960.81
+      "balance": 6875.64
     },
     {
       "date": "2025-09-25",
-      "balance": 9945.26
+      "balance": 6315.09
     },
     {
       "date": "2025-09-26",
-      "balance": 9945.26
+      "balance": 6129.93
     },
     {
       "date": "2025-09-29",
-      "balance": 9945.26
+      "balance": 5881.04
     },
     {
       "date": "2025-09-30",
-      "balance": 9945.26
+      "balance": 5868.73
     },
     {
       "date": "2025-10-01",
-      "balance": 9945.26
+      "balance": 5667.94
     },
     {
       "date": "2025-10-02",
-      "balance": 9945.26
+      "balance": 6027.19
     },
     {
       "date": "2025-10-03",
-      "balance": 9116.35
+      "balance": 5240.89
     },
     {
       "date": "2025-10-06",
-      "balance": 9116.35
+      "balance": 5158.88
     },
     {
       "date": "2025-10-07",
-      "balance": 9116.35
+      "balance": 5217.33
     },
     {
       "date": "2025-10-08",
-      "balance": 9116.35
+      "balance": 5386.83
     },
     {
       "date": "2025-10-09",
-      "balance": 9116.35
+      "balance": 5026.8
     },
     {
       "date": "2025-10-10",
-      "balance": 9116.35
+      "balance": 3515.28
     },
     {
       "date": "2025-10-13",
-      "balance": 9116.35
+      "balance": 3515.28
     },
     {
       "date": "2025-10-14",
-      "balance": 9116.35
+      "balance": 3515.28
     },
     {
       "date": "2025-10-15",
-      "balance": 8130.86
+      "balance": 3186.78
     },
     {
       "date": "2025-10-16",
-      "balance": 8130.86
+      "balance": 3186.78
     },
     {
       "date": "2025-10-17",
-      "balance": 8130.86
+      "balance": 3186.78
     },
     {
       "date": "2025-10-20",
-      "balance": 8130.86
+      "balance": 2908.09
     },
     {
       "date": "2025-10-21",
-      "balance": 8130.86
+      "balance": 2701.62
     },
     {
       "date": "2025-10-22",
-      "balance": 8962.29
+      "balance": 3339.54
     },
     {
       "date": "2025-10-23",
-      "balance": 8962.29
+      "balance": 3097.82
     },
     {
       "date": "2025-10-24",
-      "balance": 8962.29
+      "balance": 3206.12
     },
     {
       "date": "2025-10-27",
-      "balance": 8962.29
+      "balance": 3192.93
     },
     {
       "date": "2025-10-28",
-      "balance": 8962.29
+      "balance": 2919.57
     },
     {
       "date": "2025-10-29",
-      "balance": 8962.29
+      "balance": 2765.12
     },
     {
       "date": "2025-10-30",
-      "balance": 9519.03
+      "balance": 3043.49
     },
     {
       "date": "2025-10-31",
-      "balance": 9519.03
+      "balance": 2654.81
     },
     {
       "date": "2025-11-03",
-      "balance": 9519.03
+      "balance": 2654.81
     },
     {
       "date": "2025-11-04",
-      "balance": 9519.03
+      "balance": 2654.81
     },
     {
       "date": "2025-11-05",
-      "balance": 9519.03
+      "balance": 2654.81
     },
     {
       "date": "2025-11-06",
-      "balance": 8826.87
+      "balance": 2308.73
     },
     {
       "date": "2025-11-07",
-      "balance": 8826.87
+      "balance": 2308.73
     },
     {
       "date": "2025-11-10",
-      "balance": 8826.87
+      "balance": 2143.34
     },
     {
       "date": "2025-11-11",
-      "balance": 8826.87
+      "balance": 2118.85
     },
     {
       "date": "2025-11-12",
-      "balance": 8826.87
+      "balance": 2118.85
     },
     {
       "date": "2025-11-13",
-      "balance": 8826.87
+      "balance": 2118.85
     },
     {
       "date": "2025-11-14",
-      "balance": 8826.87
+      "balance": 2118.85
     },
     {
       "date": "2025-11-17",
-      "balance": 8826.87
+      "balance": 2118.85
     },
     {
       "date": "2025-11-18",
-      "balance": 8826.87
+      "balance": 2118.85
     },
     {
       "date": "2025-11-19",
-      "balance": 10353.98
+      "balance": 2627.89
     },
     {
       "date": "2025-11-20",
-      "balance": 10353.98
+      "balance": 2627.89
     },
     {
       "date": "2025-11-21",
-      "balance": 10353.98
+      "balance": 2627.89
     },
     {
       "date": "2025-11-24",
-      "balance": 10353.98
+      "balance": 2627.89
     },
     {
       "date": "2025-11-25",
-      "balance": 10353.98
+      "balance": 2627.89
     },
     {
       "date": "2025-11-26",
-      "balance": 10353.98
+      "balance": 2730.91
     },
     {
       "date": "2025-11-28",
-      "balance": 10353.98
+      "balance": 2650.57
     },
     {
       "date": "2025-12-01",
-      "balance": 11296.94
+      "balance": 2964.89
     },
     {
       "date": "2025-12-02",
-      "balance": 9885.92
+      "balance": 2290.73
     },
     {
       "date": "2025-12-03",
-      "balance": 9885.92
+      "balance": 2290.73
     },
     {
       "date": "2025-12-04",
-      "balance": 9885.92
+      "balance": 2290.73
     },
     {
       "date": "2025-12-05",
-      "balance": 9885.92
+      "balance": 2191.19
     },
     {
       "date": "2025-12-08",
-      "balance": 9885.92
+      "balance": 1619.21
     },
     {
       "date": "2025-12-09",
-      "balance": 9885.92
+      "balance": 1619.21
     },
     {
       "date": "2025-12-10",
-      "balance": 11989.13
+      "balance": 2322.87
     },
     {
       "date": "2025-12-11",
-      "balance": 11989.13
+      "balance": 2322.87
     },
     {
       "date": "2025-12-12",
-      "balance": 11989.13
+      "balance": 2639.59
     },
     {
       "date": "2025-12-15",
-      "balance": 11989.13
+      "balance": 2639.59
     },
     {
       "date": "2025-12-16",
-      "balance": 11989.13
+      "balance": 2639.59
     },
     {
       "date": "2025-12-17",
-      "balance": 11989.13
+      "balance": 2639.59
     },
     {
       "date": "2025-12-18",
-      "balance": 13272.65
+      "balance": 2968.2
     },
     {
       "date": "2025-12-19",
-      "balance": 13272.65
+      "balance": 2968.2
     },
     {
       "date": "2025-12-22",
-      "balance": 13272.65
+      "balance": 2785.84
     },
     {
       "date": "2025-12-23",
-      "balance": 12304.1
+      "balance": 2336.51
     },
     {
       "date": "2025-12-24",
-      "balance": 12304.1
+      "balance": 2336.51
     },
     {
       "date": "2025-12-26",
-      "balance": 12304.1
+      "balance": 2227.14
     },
     {
       "date": "2025-12-29",
-      "balance": 12304.1
+      "balance": 2229.8
     },
     {
       "date": "2025-12-30",
-      "balance": 12050.05
+      "balance": 2229.8
     },
     {
       "date": "2025-12-31",
-      "balance": 12050.05
+      "balance": 2071.8
     },
     {
       "date": "2026-01-02",
-      "balance": 12621.95
+      "balance": 2071.8
     },
     {
       "date": "2026-01-05",
-      "balance": 12004.98
+      "balance": 1910.34
     },
     {
       "date": "2026-01-06",
-      "balance": 12004.98
+      "balance": 1738.15
     },
     {
       "date": "2026-01-07",
-      "balance": 11518.35
+      "balance": 1629.1
     },
     {
       "date": "2026-01-08",
-      "balance": 11518.35
+      "balance": 1629.1
     },
     {
       "date": "2026-01-09",
-      "balance": 10762.8
+      "balance": 1629.1
     },
     {
       "date": "2026-01-12",
-      "balance": 10762.8
+      "balance": 1629.1
     },
     {
       "date": "2026-01-13",
-      "balance": 10762.8
+      "balance": 1629.1
     },
     {
       "date": "2026-01-14",
-      "balance": 11993.47
+      "balance": 2039.32
     },
     {
       "date": "2026-01-15",
-      "balance": 11993.47
+      "balance": 2039.32
     },
     {
       "date": "2026-01-16",
-      "balance": 11993.47
+      "balance": 2039.32
     },
     {
       "date": "2026-01-20",
-      "balance": 11993.47
+      "balance": 2039.32
     },
     {
       "date": "2026-01-21",
-      "balance": 14420.44
+      "balance": 3495.95
     },
     {
       "date": "2026-01-22",
-      "balance": 14627.71
+      "balance": 3673.11
     },
     {
       "date": "2026-01-23",
-      "balance": 14113.8
+      "balance": 3211.73
     },
     {
       "date": "2026-01-26",
-      "balance": 14113.8
+      "balance": 3355.4
     },
     {
       "date": "2026-01-27",
-      "balance": 14113.8
+      "balance": 3475.12
     },
     {
       "date": "2026-01-28",
-      "balance": 14113.8
+      "balance": 3502.92
     },
     {
       "date": "2026-01-29",
-      "balance": 14113.8
+      "balance": 3502.92
     },
     {
       "date": "2026-01-30",
-      "balance": 13731.39
+      "balance": 2212.2
     },
     {
       "date": "2026-02-02",
-      "balance": 13731.39
+      "balance": 2212.2
     },
     {
       "date": "2026-02-03",
-      "balance": 13731.39
+      "balance": 2212.2
     },
     {
       "date": "2026-02-04",
-      "balance": 13731.39
+      "balance": 2212.2
     },
     {
       "date": "2026-02-05",
-      "balance": 13731.39
+      "balance": 2212.2
     },
     {
       "date": "2026-02-06",
-      "balance": 13731.39
+      "balance": 2212.2
     },
     {
       "date": "2026-02-09",
-      "balance": 13731.39
+      "balance": 2212.2
     },
     {
       "date": "2026-02-10",
-      "balance": 13731.39
+      "balance": 2212.2
     },
     {
       "date": "2026-02-11",
-      "balance": 13731.39
+      "balance": 2212.2
     },
     {
       "date": "2026-02-12",
-      "balance": 13731.39
+      "balance": 2212.2
     },
     {
       "date": "2026-02-13",
-      "balance": 13619.77
+      "balance": 2212.2
     },
     {
       "date": "2026-02-17",
-      "balance": 13619.77
+      "balance": 2212.2
     },
     {
       "date": "2026-02-18",
-      "balance": 13619.77
+      "balance": 2212.2
     },
     {
       "date": "2026-02-19",
-      "balance": 13619.77
+      "balance": 2212.2
     },
     {
       "date": "2026-02-20",
-      "balance": 13619.77
+      "balance": 2212.2
     },
     {
       "date": "2026-02-23",
-      "balance": 13619.77
+      "balance": 2212.2
     },
     {
       "date": "2026-02-24",
-      "balance": 13619.77
+      "balance": 2212.2
     },
     {
       "date": "2026-02-25",
-      "balance": 13619.77
+      "balance": 2212.2
     },
     {
       "date": "2026-02-26",
-      "balance": 13619.77
+      "balance": 2212.2
     },
     {
       "date": "2026-02-27",
-      "balance": 12857.53
+      "balance": 2489.65
     },
     {
       "date": "2026-03-02",
-      "balance": 12857.53
+      "balance": 2489.65
     },
     {
       "date": "2026-03-03",
-      "balance": 12857.53
+      "balance": 2489.65
     },
     {
       "date": "2026-03-04",
-      "balance": 13944.25
+      "balance": 2489.65
     },
     {
       "date": "2026-03-05",
-      "balance": 13944.25
+      "balance": 2489.65
     },
     {
       "date": "2026-03-06",
-      "balance": 13612.71
+      "balance": 1934.38
     }
   ],
   "trades": [
     {
+      "date": "2025-09-02",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6365.0,
+      "right": "C",
+      "entry_underlying": 6357.2,
+      "exit_underlying": 6352.21,
+      "underlying_move": -4.987,
+      "entry_premium": 21.8005,
+      "exit_premium": 18.379,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -343.45,
+      "hold_minutes": 15.0,
+      "atr": 2.4933
+    },
+    {
+      "date": "2025-09-02",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6360.0,
+      "right": "P",
+      "entry_underlying": 6368.5,
+      "exit_underlying": 6368.3,
+      "underlying_move": 0.2,
+      "entry_premium": 16.7499,
+      "exit_premium": 15.3746,
+      "exit_reason": "MR_TIME_STOP",
+      "num_contracts": 1,
+      "pnl": -138.83,
+      "hold_minutes": 19.0,
+      "atr": 2.3933
+    },
+    {
+      "date": "2025-09-02",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6370.0,
+      "right": "P",
+      "entry_underlying": 6375.6,
+      "exit_underlying": 6379.43,
+      "underlying_move": -3.827,
+      "entry_premium": 16.3983,
+      "exit_premium": 13.947,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -246.43,
+      "hold_minutes": 7.0,
+      "atr": 1.9133
+    },
+    {
+      "date": "2025-09-03",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6430.0,
+      "right": "P",
+      "entry_underlying": 6438.3,
+      "exit_underlying": 6438.9,
+      "underlying_move": -0.6,
+      "entry_premium": 13.4602,
+      "exit_premium": 12.261,
+      "exit_reason": "MR_TIME_STOP",
+      "num_contracts": 1,
+      "pnl": -121.22,
+      "hold_minutes": 24.0,
+      "atr": 2.4
+    },
+    {
+      "date": "2025-09-03",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6435.0,
+      "right": "C",
+      "entry_underlying": 6427.2,
+      "exit_underlying": 6422.67,
+      "underlying_move": -4.533,
+      "entry_premium": 13.1594,
+      "exit_premium": 10.8751,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -229.72,
+      "hold_minutes": 4.0,
+      "atr": 2.2667
+    },
+    {
+      "date": "2025-09-03",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6425.0,
+      "right": "C",
+      "entry_underlying": 6417.5,
+      "exit_underlying": 6421.37,
+      "underlying_move": 3.867,
+      "entry_premium": 10.8433,
+      "exit_premium": 12.165,
+      "exit_reason": "MR_PROFIT_TARGET",
+      "num_contracts": 1,
+      "pnl": 130.87,
+      "hold_minutes": 3.0,
+      "atr": 1.9333
+    },
+    {
+      "date": "2025-09-03",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6420.0,
+      "right": "C",
+      "entry_underlying": 6412.2,
+      "exit_underlying": 6407.79,
+      "underlying_move": -4.413,
+      "entry_premium": 8.2271,
+      "exit_premium": 6.373,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 2,
+      "pnl": -373.42,
+      "hold_minutes": 1.0,
+      "atr": 2.2067
+    },
+    {
       "date": "2025-09-04",
+      "tier": "scalp",
       "direction": "PUT",
       "confirmations": [
         "VWAP",
@@ -612,7 +828,50 @@
       "atr": 2.88
     },
     {
+      "date": "2025-09-04",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6465.0,
+      "right": "P",
+      "entry_underlying": 6472.2,
+      "exit_underlying": 6472.2,
+      "underlying_move": 0.0,
+      "entry_premium": 7.817,
+      "exit_premium": 6.967,
+      "exit_reason": "MR_TIME_STOP",
+      "num_contracts": 2,
+      "pnl": -172.6,
+      "hold_minutes": 16.0,
+      "atr": 1.26
+    },
+    {
+      "date": "2025-09-05",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6455.0,
+      "right": "C",
+      "entry_underlying": 6448.8,
+      "exit_underlying": 6454.4,
+      "underlying_move": 5.6,
+      "entry_premium": 13.5648,
+      "exit_premium": 15.6602,
+      "exit_reason": "MR_PROFIT_TARGET",
+      "num_contracts": 1,
+      "pnl": 208.25,
+      "hold_minutes": 3.0,
+      "atr": 2.8
+    },
+    {
       "date": "2025-09-08",
+      "tier": "scalp",
       "direction": "CALL",
       "confirmations": [
         "VWAP",
@@ -633,7 +892,386 @@
       "atr": 2.42
     },
     {
+      "date": "2025-09-08",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6495.0,
+      "right": "C",
+      "entry_underlying": 6486.6,
+      "exit_underlying": 6488.3,
+      "underlying_move": 1.695,
+      "entry_premium": 11.8222,
+      "exit_premium": 12.1283,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 1,
+      "pnl": 29.31,
+      "hold_minutes": 4.0,
+      "atr": 1.8733
+    },
+    {
+      "date": "2025-09-08",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6485.0,
+      "right": "C",
+      "entry_underlying": 6479.2,
+      "exit_underlying": 6480.63,
+      "underlying_move": 1.43,
+      "entry_premium": 11.2633,
+      "exit_premium": 11.5503,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 1,
+      "pnl": 27.4,
+      "hold_minutes": 2.0,
+      "atr": 1.8267
+    },
+    {
+      "date": "2025-09-08",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6485.0,
+      "right": "C",
+      "entry_underlying": 6478.4,
+      "exit_underlying": 6475.64,
+      "underlying_move": -2.76,
+      "entry_premium": 8.1722,
+      "exit_premium": 6.7832,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 2,
+      "pnl": -280.41,
+      "hold_minutes": 3.0,
+      "atr": 1.38
+    },
+    {
+      "date": "2025-09-09",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6485.0,
+      "right": "C",
+      "entry_underlying": 6480.5,
+      "exit_underlying": 6475.65,
+      "underlying_move": -4.853,
+      "entry_premium": 13.4083,
+      "exit_premium": 10.9084,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -251.29,
+      "hold_minutes": 3.0,
+      "atr": 2.4267
+    },
+    {
+      "date": "2025-09-10",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6535.0,
+      "right": "C",
+      "entry_underlying": 6527.0,
+      "exit_underlying": 6527.1,
+      "underlying_move": 0.1,
+      "entry_premium": 12.1839,
+      "exit_premium": 11.3664,
+      "exit_reason": "MR_TIME_STOP",
+      "num_contracts": 1,
+      "pnl": -83.05,
+      "hold_minutes": 20.0,
+      "atr": 1.9333
+    },
+    {
+      "date": "2025-09-10",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6525.0,
+      "right": "P",
+      "entry_underlying": 6533.3,
+      "exit_underlying": 6531.99,
+      "underlying_move": 1.31,
+      "entry_premium": 8.3392,
+      "exit_premium": 8.1923,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 1,
+      "pnl": -15.99,
+      "hold_minutes": 14.0,
+      "atr": 1.72
+    },
+    {
+      "date": "2025-09-10",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6530.0,
+      "right": "C",
+      "entry_underlying": 6522.9,
+      "exit_underlying": 6524.5,
+      "underlying_move": 1.6,
+      "entry_premium": 8.3846,
+      "exit_premium": 8.541,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 1,
+      "pnl": 14.33,
+      "hold_minutes": 8.0,
+      "atr": 1.7333
+    },
+    {
+      "date": "2025-09-11",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6555.0,
+      "right": "P",
+      "entry_underlying": 6563.9,
+      "exit_underlying": 6568.07,
+      "underlying_move": -4.173,
+      "entry_premium": 10.7979,
+      "exit_premium": 8.8645,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -194.63,
+      "hold_minutes": 6.0,
+      "atr": 2.0867
+    },
+    {
+      "date": "2025-09-11",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6565.0,
+      "right": "P",
+      "entry_underlying": 6572.8,
+      "exit_underlying": 6575.84,
+      "underlying_move": -3.04,
+      "entry_premium": 10.2846,
+      "exit_premium": 8.8513,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -144.63,
+      "hold_minutes": 1.0,
+      "atr": 1.52
+    },
+    {
+      "date": "2025-09-15",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6610.0,
+      "right": "C",
+      "entry_underlying": 6603.1,
+      "exit_underlying": 6604.64,
+      "underlying_move": 1.545,
+      "entry_premium": 11.3087,
+      "exit_premium": 11.6241,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 1,
+      "pnl": 30.24,
+      "hold_minutes": 3.0,
+      "atr": 1.4067
+    },
+    {
+      "date": "2025-09-15",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6610.0,
+      "right": "C",
+      "entry_underlying": 6601.8,
+      "exit_underlying": 6603.02,
+      "underlying_move": 1.225,
+      "entry_premium": 8.0545,
+      "exit_premium": 8.0602,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 1,
+      "pnl": -0.73,
+      "hold_minutes": 9.0,
+      "atr": 1.1667
+    },
+    {
+      "date": "2025-09-15",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6605.0,
+      "right": "C",
+      "entry_underlying": 6597.8,
+      "exit_underlying": 6598.98,
+      "underlying_move": 1.18,
+      "entry_premium": 7.7324,
+      "exit_premium": 7.5445,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 1,
+      "pnl": -20.1,
+      "hold_minutes": 14.0,
+      "atr": 1.36
+    },
+    {
+      "date": "2025-09-15",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6600.0,
+      "right": "P",
+      "entry_underlying": 6606.5,
+      "exit_underlying": 6605.4,
+      "underlying_move": 1.1,
+      "entry_premium": 6.3265,
+      "exit_premium": 6.5257,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 2,
+      "pnl": 37.24,
+      "hold_minutes": 2.0,
+      "atr": 1.0667
+    },
+    {
+      "date": "2025-09-16",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6600.0,
+      "right": "C",
+      "entry_underlying": 6594.4,
+      "exit_underlying": 6597.6,
+      "underlying_move": 3.2,
+      "entry_premium": 12.4162,
+      "exit_premium": 13.4836,
+      "exit_reason": "MR_PROFIT_TARGET",
+      "num_contracts": 1,
+      "pnl": 105.44,
+      "hold_minutes": 4.0,
+      "atr": 1.6
+    },
+    {
       "date": "2025-09-17",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6595.0,
+      "right": "C",
+      "entry_underlying": 6589.2,
+      "exit_underlying": 6590.48,
+      "underlying_move": 1.285,
+      "entry_premium": 11.6309,
+      "exit_premium": 11.8636,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 1,
+      "pnl": 21.97,
+      "hold_minutes": 2.0,
+      "atr": 1.22
+    },
+    {
+      "date": "2025-09-17",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6590.0,
+      "right": "C",
+      "entry_underlying": 6585.0,
+      "exit_underlying": 6582.49,
+      "underlying_move": -2.507,
+      "entry_premium": 9.9702,
+      "exit_premium": 8.6104,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -137.28,
+      "hold_minutes": 2.0,
+      "atr": 1.2533
+    },
+    {
+      "date": "2025-09-17",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6585.0,
+      "right": "P",
+      "entry_underlying": 6590.4,
+      "exit_underlying": 6589.38,
+      "underlying_move": 1.015,
+      "entry_premium": 7.4366,
+      "exit_premium": 7.4699,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 2,
+      "pnl": 4.06,
+      "hold_minutes": 6.0,
+      "atr": 1.0467
+    },
+    {
+      "date": "2025-09-17",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6590.0,
+      "right": "P",
+      "entry_underlying": 6596.6,
+      "exit_underlying": 6599.44,
+      "underlying_move": -2.84,
+      "entry_premium": 6.2388,
+      "exit_premium": 5.0474,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 2,
+      "pnl": -240.88,
+      "hold_minutes": 1.0,
+      "atr": 1.42
+    },
+    {
+      "date": "2025-09-17",
+      "tier": "scalp",
       "direction": "CALL",
       "confirmations": [
         "VWAP",
@@ -654,7 +1292,471 @@
       "atr": 2.4933
     },
     {
+      "date": "2025-09-17",
+      "tier": "runner",
+      "direction": "CALL",
+      "confirmations": [
+        "VWAP",
+        "EMA",
+        "VOLUME"
+      ],
+      "strike": 6640.0,
+      "right": "C",
+      "entry_underlying": 6609.1,
+      "exit_underlying": 6598.4,
+      "underlying_move": -10.7,
+      "entry_premium": 1.0279,
+      "exit_premium": 0.2523,
+      "exit_reason": "RUNNER_STOP",
+      "num_contracts": 1,
+      "pnl": -78.85,
+      "hold_minutes": 8.0,
+      "atr": 3.5667
+    },
+    {
+      "date": "2025-09-18",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6630.0,
+      "right": "C",
+      "entry_underlying": 6625.1,
+      "exit_underlying": 6626.88,
+      "underlying_move": 1.775,
+      "entry_premium": 17.0907,
+      "exit_premium": 17.1455,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 1,
+      "pnl": 4.18,
+      "hold_minutes": 9.0,
+      "atr": 2.0333
+    },
+    {
+      "date": "2025-09-18",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6630.0,
+      "right": "P",
+      "entry_underlying": 6637.7,
+      "exit_underlying": 6640.73,
+      "underlying_move": -3.027,
+      "entry_premium": 13.5885,
+      "exit_premium": 11.5611,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -204.04,
+      "hold_minutes": 12.0,
+      "atr": 1.5133
+    },
+    {
+      "date": "2025-09-18",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6640.0,
+      "right": "C",
+      "entry_underlying": 6633.7,
+      "exit_underlying": 6630.82,
+      "underlying_move": -2.88,
+      "entry_premium": 12.3667,
+      "exit_premium": 10.4211,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -195.86,
+      "hold_minutes": 9.0,
+      "atr": 1.44
+    },
+    {
+      "date": "2025-09-19",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6620.0,
+      "right": "C",
+      "entry_underlying": 6612.6,
+      "exit_underlying": 6616.37,
+      "underlying_move": 3.773,
+      "entry_premium": 12.0896,
+      "exit_premium": 13.3036,
+      "exit_reason": "MR_PROFIT_TARGET",
+      "num_contracts": 1,
+      "pnl": 120.1,
+      "hold_minutes": 7.0,
+      "atr": 1.8867
+    },
+    {
+      "date": "2025-09-19",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6610.0,
+      "right": "P",
+      "entry_underlying": 6618.8,
+      "exit_underlying": 6621.48,
+      "underlying_move": -2.68,
+      "entry_premium": 8.8858,
+      "exit_premium": 7.5462,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -135.27,
+      "hold_minutes": 6.0,
+      "atr": 1.34
+    },
+    {
+      "date": "2025-09-19",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6620.0,
+      "right": "P",
+      "entry_underlying": 6626.1,
+      "exit_underlying": 6624.42,
+      "underlying_move": 1.675,
+      "entry_premium": 9.4442,
+      "exit_premium": 9.6972,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 1,
+      "pnl": 24.0,
+      "hold_minutes": 8.0,
+      "atr": 1.5
+    },
+    {
+      "date": "2025-09-22",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6635.0,
+      "right": "P",
+      "entry_underlying": 6640.9,
+      "exit_underlying": 6643.95,
+      "underlying_move": -3.053,
+      "entry_premium": 12.2908,
+      "exit_premium": 10.5328,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -177.1,
+      "hold_minutes": 10.0,
+      "atr": 1.5267
+    },
+    {
+      "date": "2025-09-22",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6645.0,
+      "right": "P",
+      "entry_underlying": 6650.0,
+      "exit_underlying": 6653.03,
+      "underlying_move": -3.027,
+      "entry_premium": 12.2386,
+      "exit_premium": 10.4615,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -179.01,
+      "hold_minutes": 10.0,
+      "atr": 1.5133
+    },
+    {
+      "date": "2025-09-22",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6645.0,
+      "right": "P",
+      "entry_underlying": 6652.3,
+      "exit_underlying": 6655.22,
+      "underlying_move": -2.92,
+      "entry_premium": 9.3411,
+      "exit_premium": 7.8038,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -155.02,
+      "hold_minutes": 8.0,
+      "atr": 1.46
+    },
+    {
+      "date": "2025-09-22",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6650.0,
+      "right": "P",
+      "entry_underlying": 6658.5,
+      "exit_underlying": 6661.83,
+      "underlying_move": -3.333,
+      "entry_premium": 8.3957,
+      "exit_premium": 6.7122,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -169.65,
+      "hold_minutes": 11.0,
+      "atr": 1.6667
+    },
+    {
+      "date": "2025-09-23",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6670.0,
+      "right": "C",
+      "entry_underlying": 6662.1,
+      "exit_underlying": 6664.99,
+      "underlying_move": 2.893,
+      "entry_premium": 12.2118,
+      "exit_premium": 13.057,
+      "exit_reason": "MR_PROFIT_TARGET",
+      "num_contracts": 1,
+      "pnl": 83.21,
+      "hold_minutes": 5.0,
+      "atr": 1.4467
+    },
+    {
+      "date": "2025-09-23",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6665.0,
+      "right": "C",
+      "entry_underlying": 6656.7,
+      "exit_underlying": 6657.98,
+      "underlying_move": 1.28,
+      "entry_premium": 10.341,
+      "exit_premium": 10.5375,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 1,
+      "pnl": 18.35,
+      "hold_minutes": 3.0,
+      "atr": 1.36
+    },
+    {
+      "date": "2025-09-23",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6660.0,
+      "right": "C",
+      "entry_underlying": 6653.5,
+      "exit_underlying": 6651.29,
+      "underlying_move": -2.213,
+      "entry_premium": 10.3689,
+      "exit_premium": 9.1464,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -123.55,
+      "hold_minutes": 2.0,
+      "atr": 1.1067
+    },
+    {
+      "date": "2025-09-23",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6645.0,
+      "right": "C",
+      "entry_underlying": 6638.1,
+      "exit_underlying": 6634.03,
+      "underlying_move": -4.067,
+      "entry_premium": 7.6446,
+      "exit_premium": 5.6934,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -196.42,
+      "hold_minutes": 8.0,
+      "atr": 2.0333
+    },
+    {
+      "date": "2025-09-24",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6620.0,
+      "right": "C",
+      "entry_underlying": 6615.8,
+      "exit_underlying": 6611.25,
+      "underlying_move": -4.547,
+      "entry_premium": 11.8949,
+      "exit_premium": 9.5478,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -236.01,
+      "hold_minutes": 4.0,
+      "atr": 2.2733
+    },
+    {
+      "date": "2025-09-24",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "RSI_EXTREME",
+        "VWAP_REVERT"
+      ],
+      "strike": 6610.0,
+      "right": "C",
+      "entry_underlying": 6603.8,
+      "exit_underlying": 6597.73,
+      "underlying_move": -6.067,
+      "entry_premium": 10.5441,
+      "exit_premium": 7.6352,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -292.19,
+      "hold_minutes": 10.0,
+      "atr": 3.0333
+    },
+    {
+      "date": "2025-09-24",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6605.0,
+      "right": "P",
+      "entry_underlying": 6613.9,
+      "exit_underlying": 6610.07,
+      "underlying_move": 3.827,
+      "entry_premium": 6.9821,
+      "exit_premium": 7.9552,
+      "exit_reason": "MR_PROFIT_TARGET",
+      "num_contracts": 2,
+      "pnl": 192.02,
+      "hold_minutes": 11.0,
+      "atr": 1.9133
+    },
+    {
+      "date": "2025-09-24",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6610.0,
+      "right": "C",
+      "entry_underlying": 6605.8,
+      "exit_underlying": 6607.08,
+      "underlying_move": 1.275,
+      "entry_premium": 8.0534,
+      "exit_premium": 8.0813,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 1,
+      "pnl": 1.49,
+      "hold_minutes": 9.0,
+      "atr": 1.6333
+    },
+    {
       "date": "2025-09-25",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6580.0,
+      "right": "C",
+      "entry_underlying": 6573.9,
+      "exit_underlying": 6579.1,
+      "underlying_move": 5.2,
+      "entry_premium": 17.4236,
+      "exit_premium": 19.3553,
+      "exit_reason": "MR_PROFIT_TARGET",
+      "num_contracts": 1,
+      "pnl": 191.87,
+      "hold_minutes": 3.0,
+      "atr": 2.6
+    },
+    {
+      "date": "2025-09-25",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6575.0,
+      "right": "C",
+      "entry_underlying": 6567.1,
+      "exit_underlying": 6571.2,
+      "underlying_move": 4.1,
+      "entry_premium": 11.2131,
+      "exit_premium": 12.5869,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 1,
+      "pnl": 136.08,
+      "hold_minutes": 3.0,
+      "atr": 3.3333
+    },
+    {
+      "date": "2025-09-25",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6565.0,
+      "right": "C",
+      "entry_underlying": 6557.5,
+      "exit_underlying": 6552.99,
+      "underlying_move": -4.507,
+      "entry_premium": 9.6309,
+      "exit_premium": 7.5292,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -211.47,
+      "hold_minutes": 3.0,
+      "atr": 2.2533
+    },
+    {
+      "date": "2025-09-25",
+      "tier": "scalp",
       "direction": "CALL",
       "confirmations": [
         "VWAP",
@@ -669,13 +1771,371 @@
       "entry_premium": 8.3739,
       "exit_premium": 5.0017,
       "exit_reason": "STOP_LOSS",
-      "num_contracts": 3,
-      "pnl": -1015.55,
+      "num_contracts": 2,
+      "pnl": -677.04,
       "hold_minutes": 5.0,
       "atr": 2.5667
     },
     {
+      "date": "2025-09-26",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6590.0,
+      "right": "P",
+      "entry_underlying": 6598.6,
+      "exit_underlying": 6603.64,
+      "underlying_move": -5.04,
+      "entry_premium": 8.6973,
+      "exit_premium": 6.6423,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -206.8,
+      "hold_minutes": 3.0,
+      "atr": 2.52
+    },
+    {
+      "date": "2025-09-26",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6605.0,
+      "right": "P",
+      "entry_underlying": 6614.1,
+      "exit_underlying": 6614.5,
+      "underlying_move": -0.4,
+      "entry_premium": 7.4684,
+      "exit_premium": 6.5547,
+      "exit_reason": "MR_TIME_STOP",
+      "num_contracts": 1,
+      "pnl": -92.67,
+      "hold_minutes": 20.0,
+      "atr": 2.18
+    },
+    {
+      "date": "2025-09-26",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6615.0,
+      "right": "C",
+      "entry_underlying": 6608.2,
+      "exit_underlying": 6611.56,
+      "underlying_move": 3.36,
+      "entry_premium": 6.8022,
+      "exit_premium": 7.9582,
+      "exit_reason": "MR_PROFIT_TARGET",
+      "num_contracts": 1,
+      "pnl": 114.31,
+      "hold_minutes": 2.0,
+      "atr": 1.68
+    },
+    {
+      "date": "2025-09-29",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6645.0,
+      "right": "C",
+      "entry_underlying": 6639.7,
+      "exit_underlying": 6636.26,
+      "underlying_move": -3.44,
+      "entry_premium": 12.4198,
+      "exit_premium": 10.5398,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -189.3,
+      "hold_minutes": 4.0,
+      "atr": 1.72
+    },
+    {
+      "date": "2025-09-29",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6635.0,
+      "right": "C",
+      "entry_underlying": 6626.6,
+      "exit_underlying": 6627.0,
+      "underlying_move": 0.4,
+      "entry_premium": 7.8586,
+      "exit_premium": 7.2757,
+      "exit_reason": "MR_TIME_STOP",
+      "num_contracts": 1,
+      "pnl": -59.59,
+      "hold_minutes": 17.0,
+      "atr": 1.44
+    },
+    {
+      "date": "2025-09-30",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6625.0,
+      "right": "C",
+      "entry_underlying": 6617.9,
+      "exit_underlying": 6620.93,
+      "underlying_move": 3.03,
+      "entry_premium": 12.3827,
+      "exit_premium": 13.3822,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 1,
+      "pnl": 98.65,
+      "hold_minutes": 2.0,
+      "atr": 3.0267
+    },
+    {
+      "date": "2025-09-30",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6630.0,
+      "right": "P",
+      "entry_underlying": 6635.3,
+      "exit_underlying": 6639.27,
+      "underlying_move": -3.973,
+      "entry_premium": 9.8823,
+      "exit_premium": 8.0467,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -184.86,
+      "hold_minutes": 1.0,
+      "atr": 1.9867
+    },
+    {
+      "date": "2025-09-30",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6630.0,
+      "right": "C",
+      "entry_underlying": 6622.7,
+      "exit_underlying": 6624.52,
+      "underlying_move": 1.815,
+      "entry_premium": 7.9997,
+      "exit_premium": 8.3829,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 1,
+      "pnl": 37.02,
+      "hold_minutes": 5.0,
+      "atr": 1.98
+    },
+    {
+      "date": "2025-09-30",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6625.0,
+      "right": "C",
+      "entry_underlying": 6619.1,
+      "exit_underlying": 6620.63,
+      "underlying_move": 1.53,
+      "entry_premium": 8.0291,
+      "exit_premium": 8.411,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 1,
+      "pnl": 36.88,
+      "hold_minutes": 2.0,
+      "atr": 1.8267
+    },
+    {
+      "date": "2025-10-01",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6655.0,
+      "right": "P",
+      "entry_underlying": 6661.9,
+      "exit_underlying": 6657.82,
+      "underlying_move": 4.08,
+      "entry_premium": 16.5085,
+      "exit_premium": 17.7982,
+      "exit_reason": "MR_PROFIT_TARGET",
+      "num_contracts": 1,
+      "pnl": 127.67,
+      "hold_minutes": 4.0,
+      "atr": 2.04
+    },
+    {
+      "date": "2025-10-01",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6660.0,
+      "right": "P",
+      "entry_underlying": 6666.8,
+      "exit_underlying": 6670.11,
+      "underlying_move": -3.307,
+      "entry_premium": 15.579,
+      "exit_premium": 13.3556,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -223.64,
+      "hold_minutes": 14.0,
+      "atr": 1.6533
+    },
+    {
+      "date": "2025-10-01",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6665.0,
+      "right": "P",
+      "entry_underlying": 6673.4,
+      "exit_underlying": 6676.24,
+      "underlying_move": -2.84,
+      "entry_premium": 11.3878,
+      "exit_premium": 9.5586,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -184.23,
+      "hold_minutes": 11.0,
+      "atr": 1.42
+    },
+    {
+      "date": "2025-10-01",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6675.0,
+      "right": "P",
+      "entry_underlying": 6682.9,
+      "exit_underlying": 6680.13,
+      "underlying_move": 2.773,
+      "entry_premium": 9.0942,
+      "exit_premium": 9.9014,
+      "exit_reason": "MR_PROFIT_TARGET",
+      "num_contracts": 1,
+      "pnl": 79.41,
+      "hold_minutes": 2.0,
+      "atr": 1.3867
+    },
+    {
+      "date": "2025-10-02",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6685.0,
+      "right": "C",
+      "entry_underlying": 6677.2,
+      "exit_underlying": 6679.64,
+      "underlying_move": 2.435,
+      "entry_premium": 12.3904,
+      "exit_premium": 13.0995,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 1,
+      "pnl": 69.61,
+      "hold_minutes": 2.0,
+      "atr": 2.4867
+    },
+    {
+      "date": "2025-10-02",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6675.0,
+      "right": "C",
+      "entry_underlying": 6670.6,
+      "exit_underlying": 6673.38,
+      "underlying_move": 2.785,
+      "entry_premium": 13.4323,
+      "exit_premium": 14.3644,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 1,
+      "pnl": 91.91,
+      "hold_minutes": 2.0,
+      "atr": 2.2867
+    },
+    {
+      "date": "2025-10-02",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6675.0,
+      "right": "C",
+      "entry_underlying": 6668.3,
+      "exit_underlying": 6672.71,
+      "underlying_move": 4.413,
+      "entry_premium": 11.4784,
+      "exit_premium": 13.1416,
+      "exit_reason": "MR_PROFIT_TARGET",
+      "num_contracts": 1,
+      "pnl": 165.02,
+      "hold_minutes": 2.0,
+      "atr": 2.2067
+    },
+    {
+      "date": "2025-10-02",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6685.0,
+      "right": "P",
+      "entry_underlying": 6690.0,
+      "exit_underlying": 6688.48,
+      "underlying_move": 1.515,
+      "entry_premium": 7.8437,
+      "exit_premium": 8.1838,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 1,
+      "pnl": 32.71,
+      "hold_minutes": 3.0,
+      "atr": 1.3133
+    },
+    {
       "date": "2025-10-03",
+      "tier": "scalp",
       "direction": "PUT",
       "confirmations": [
         "VWAP",
@@ -690,13 +2150,308 @@
       "entry_premium": 12.7485,
       "exit_premium": 8.6169,
       "exit_reason": "STOP_LOSS",
-      "num_contracts": 2,
-      "pnl": -828.91,
+      "num_contracts": 1,
+      "pnl": -414.46,
       "hold_minutes": 21.0,
       "atr": 3.0133
     },
     {
+      "date": "2025-10-03",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6720.0,
+      "right": "C",
+      "entry_underlying": 6714.0,
+      "exit_underlying": 6710.53,
+      "underlying_move": -3.467,
+      "entry_premium": 8.9954,
+      "exit_premium": 7.3671,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -164.13,
+      "hold_minutes": 1.0,
+      "atr": 1.7333
+    },
+    {
+      "date": "2025-10-03",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6705.0,
+      "right": "C",
+      "entry_underlying": 6696.1,
+      "exit_underlying": 6690.67,
+      "underlying_move": -5.427,
+      "entry_premium": 6.2787,
+      "exit_premium": 4.2146,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -207.71,
+      "hold_minutes": 5.0,
+      "atr": 2.7133
+    },
+    {
+      "date": "2025-10-06",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6710.0,
+      "right": "P",
+      "entry_underlying": 6715.6,
+      "exit_underlying": 6717.97,
+      "underlying_move": -2.373,
+      "entry_premium": 10.7939,
+      "exit_premium": 9.4655,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -134.14,
+      "hold_minutes": 4.0,
+      "atr": 1.1867
+    },
+    {
+      "date": "2025-10-06",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6715.0,
+      "right": "P",
+      "entry_underlying": 6721.2,
+      "exit_underlying": 6718.51,
+      "underlying_move": 2.693,
+      "entry_premium": 7.7967,
+      "exit_premium": 8.331,
+      "exit_reason": "MR_PROFIT_TARGET",
+      "num_contracts": 1,
+      "pnl": 52.14,
+      "hold_minutes": 12.0,
+      "atr": 1.3467
+    },
+    {
+      "date": "2025-10-07",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6710.0,
+      "right": "C",
+      "entry_underlying": 6703.7,
+      "exit_underlying": 6699.14,
+      "underlying_move": -4.56,
+      "entry_premium": 12.2966,
+      "exit_premium": 10.0834,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -222.62,
+      "hold_minutes": 1.0,
+      "atr": 2.28
+    },
+    {
+      "date": "2025-10-07",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6690.0,
+      "right": "C",
+      "entry_underlying": 6684.2,
+      "exit_underlying": 6691.12,
+      "underlying_move": 6.92,
+      "entry_premium": 11.6167,
+      "exit_premium": 14.4404,
+      "exit_reason": "MR_PROFIT_TARGET",
+      "num_contracts": 1,
+      "pnl": 281.07,
+      "hold_minutes": 7.0,
+      "atr": 3.46
+    },
+    {
+      "date": "2025-10-08",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6715.0,
+      "right": "P",
+      "entry_underlying": 6721.6,
+      "exit_underlying": 6717.55,
+      "underlying_move": 4.053,
+      "entry_premium": 12.1245,
+      "exit_premium": 13.5276,
+      "exit_reason": "MR_PROFIT_TARGET",
+      "num_contracts": 1,
+      "pnl": 139.01,
+      "hold_minutes": 3.0,
+      "atr": 2.0267
+    },
+    {
+      "date": "2025-10-08",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6720.0,
+      "right": "P",
+      "entry_underlying": 6726.7,
+      "exit_underlying": 6725.02,
+      "underlying_move": 1.685,
+      "entry_premium": 10.8667,
+      "exit_premium": 11.1846,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 1,
+      "pnl": 30.5,
+      "hold_minutes": 5.0,
+      "atr": 1.4867
+    },
+    {
+      "date": "2025-10-09",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6715.0,
+      "right": "C",
+      "entry_underlying": 6707.2,
+      "exit_underlying": 6702.45,
+      "underlying_move": -4.747,
+      "entry_premium": 12.4855,
+      "exit_premium": 9.9348,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -256.37,
+      "hold_minutes": 14.0,
+      "atr": 2.3733
+    },
+    {
+      "date": "2025-10-09",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6710.0,
+      "right": "C",
+      "entry_underlying": 6702.9,
+      "exit_underlying": 6706.77,
+      "underlying_move": 3.867,
+      "entry_premium": 9.1849,
+      "exit_premium": 10.5793,
+      "exit_reason": "MR_PROFIT_TARGET",
+      "num_contracts": 1,
+      "pnl": 138.14,
+      "hold_minutes": 2.0,
+      "atr": 1.9333
+    },
+    {
+      "date": "2025-10-09",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6705.0,
+      "right": "C",
+      "entry_underlying": 6699.8,
+      "exit_underlying": 6694.99,
+      "underlying_move": -4.813,
+      "entry_premium": 9.4836,
+      "exit_premium": 7.0786,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -241.8,
+      "hold_minutes": 8.0,
+      "atr": 2.4067
+    },
+    {
+      "date": "2025-10-10",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6715.0,
+      "right": "C",
+      "entry_underlying": 6710.1,
+      "exit_underlying": 6703.58,
+      "underlying_move": -6.52,
+      "entry_premium": 13.4818,
+      "exit_premium": 10.3808,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -311.4,
+      "hold_minutes": 1.0,
+      "atr": 3.26
+    },
+    {
+      "date": "2025-10-10",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6655.0,
+      "right": "C",
+      "entry_underlying": 6647.4,
+      "exit_underlying": 6624.72,
+      "underlying_move": -22.68,
+      "entry_premium": 11.5126,
+      "exit_premium": 4.1253,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -740.03,
+      "hold_minutes": 5.0,
+      "atr": 11.34
+    },
+    {
+      "date": "2025-10-10",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6600.0,
+      "right": "C",
+      "entry_underlying": 6593.8,
+      "exit_underlying": 6582.29,
+      "underlying_move": -11.507,
+      "entry_premium": 9.3575,
+      "exit_premium": 4.7695,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -460.1,
+      "hold_minutes": 13.0,
+      "atr": 5.7533
+    },
+    {
       "date": "2025-10-15",
+      "tier": "scalp",
       "direction": "CALL",
       "confirmations": [
         "VWAP",
@@ -711,13 +2466,98 @@
       "entry_premium": 8.399,
       "exit_premium": 5.127,
       "exit_reason": "STOP_LOSS",
-      "num_contracts": 3,
-      "pnl": -985.49,
+      "num_contracts": 1,
+      "pnl": -328.5,
       "hold_minutes": 9.0,
       "atr": 2.1467
     },
     {
+      "date": "2025-10-20",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6700.0,
+      "right": "P",
+      "entry_underlying": 6707.5,
+      "exit_underlying": 6712.03,
+      "underlying_move": -4.533,
+      "entry_premium": 11.5123,
+      "exit_premium": 9.3841,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -214.13,
+      "hold_minutes": 5.0,
+      "atr": 2.2667
+    },
+    {
+      "date": "2025-10-20",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6705.0,
+      "right": "P",
+      "entry_underlying": 6712.5,
+      "exit_underlying": 6715.14,
+      "underlying_move": -2.64,
+      "entry_premium": 7.9434,
+      "exit_premium": 6.7234,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -123.31,
+      "hold_minutes": 2.0,
+      "atr": 1.32
+    },
+    {
+      "date": "2025-10-20",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6715.0,
+      "right": "P",
+      "entry_underlying": 6720.9,
+      "exit_underlying": 6718.75,
+      "underlying_move": 2.147,
+      "entry_premium": 7.2855,
+      "exit_premium": 7.886,
+      "exit_reason": "MR_PROFIT_TARGET",
+      "num_contracts": 1,
+      "pnl": 58.75,
+      "hold_minutes": 3.0,
+      "atr": 1.0733
+    },
+    {
+      "date": "2025-10-21",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6725.0,
+      "right": "C",
+      "entry_underlying": 6720.1,
+      "exit_underlying": 6716.02,
+      "underlying_move": -4.08,
+      "entry_premium": 11.1335,
+      "exit_premium": 9.0818,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -206.47,
+      "hold_minutes": 2.0,
+      "atr": 2.04
+    },
+    {
       "date": "2025-10-22",
+      "tier": "scalp",
       "direction": "PUT",
       "confirmations": [
         "VWAP",
@@ -732,13 +2572,266 @@
       "entry_premium": 11.6669,
       "exit_premium": 15.837,
       "exit_reason": "PROFIT_TARGET",
-      "num_contracts": 2,
-      "pnl": 831.43,
+      "num_contracts": 1,
+      "pnl": 415.71,
       "hold_minutes": 12.0,
       "atr": 2.9933
     },
     {
+      "date": "2025-10-22",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6680.0,
+      "right": "C",
+      "entry_underlying": 6675.0,
+      "exit_underlying": 6677.86,
+      "underlying_move": 2.86,
+      "entry_premium": 10.599,
+      "exit_premium": 11.588,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 1,
+      "pnl": 97.59,
+      "hold_minutes": 2.0,
+      "atr": 3.12
+    },
+    {
+      "date": "2025-10-22",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6645.0,
+      "right": "C",
+      "entry_underlying": 6638.4,
+      "exit_underlying": 6642.28,
+      "underlying_move": 3.88,
+      "entry_premium": 7.2687,
+      "exit_premium": 8.5279,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 1,
+      "pnl": 124.62,
+      "hold_minutes": 6.0,
+      "atr": 4.56
+    },
+    {
+      "date": "2025-10-23",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6710.0,
+      "right": "P",
+      "entry_underlying": 6716.2,
+      "exit_underlying": 6715.06,
+      "underlying_move": 1.14,
+      "entry_premium": 10.5379,
+      "exit_premium": 10.6869,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 1,
+      "pnl": 13.6,
+      "hold_minutes": 2.0,
+      "atr": 1.28
+    },
+    {
+      "date": "2025-10-23",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6710.0,
+      "right": "P",
+      "entry_underlying": 6719.0,
+      "exit_underlying": 6723.75,
+      "underlying_move": -4.747,
+      "entry_premium": 8.0445,
+      "exit_premium": 5.5043,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -255.32,
+      "hold_minutes": 19.0,
+      "atr": 2.3733
+    },
+    {
+      "date": "2025-10-24",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6770.0,
+      "right": "C",
+      "entry_underlying": 6762.0,
+      "exit_underlying": 6764.56,
+      "underlying_move": 2.565,
+      "entry_premium": 12.302,
+      "exit_premium": 13.0646,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 1,
+      "pnl": 74.96,
+      "hold_minutes": 2.0,
+      "atr": 2.7133
+    },
+    {
+      "date": "2025-10-24",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6780.0,
+      "right": "C",
+      "entry_underlying": 6774.8,
+      "exit_underlying": 6776.38,
+      "underlying_move": 1.575,
+      "entry_premium": 10.6668,
+      "exit_premium": 11.0132,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 1,
+      "pnl": 33.34,
+      "hold_minutes": 3.0,
+      "atr": 1.5
+    },
+    {
+      "date": "2025-10-27",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6830.0,
+      "right": "P",
+      "entry_underlying": 6837.1,
+      "exit_underlying": 6836.21,
+      "underlying_move": 0.885,
+      "entry_premium": 9.9263,
+      "exit_premium": 9.8041,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 1,
+      "pnl": -13.52,
+      "hold_minutes": 9.0,
+      "atr": 1.0867
+    },
+    {
+      "date": "2025-10-27",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6840.0,
+      "right": "C",
+      "entry_underlying": 6832.6,
+      "exit_underlying": 6833.64,
+      "underlying_move": 1.045,
+      "entry_premium": 7.9604,
+      "exit_premium": 7.9766,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 1,
+      "pnl": 0.33,
+      "hold_minutes": 6.0,
+      "atr": 1.0067
+    },
+    {
+      "date": "2025-10-28",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6860.0,
+      "right": "C",
+      "entry_underlying": 6851.7,
+      "exit_underlying": 6848.93,
+      "underlying_move": -2.773,
+      "entry_premium": 12.4605,
+      "exit_premium": 10.9937,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -147.98,
+      "hold_minutes": 1.0,
+      "atr": 1.3867
+    },
+    {
+      "date": "2025-10-28",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6855.0,
+      "right": "P",
+      "entry_underlying": 6861.8,
+      "exit_underlying": 6864.39,
+      "underlying_move": -2.587,
+      "entry_premium": 10.7565,
+      "exit_premium": 9.4368,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -133.28,
+      "hold_minutes": 1.0,
+      "atr": 1.2933
+    },
+    {
+      "date": "2025-10-28",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6870.0,
+      "right": "P",
+      "entry_underlying": 6876.8,
+      "exit_underlying": 6875.68,
+      "underlying_move": 1.12,
+      "entry_premium": 7.8702,
+      "exit_premium": 7.9622,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 1,
+      "pnl": 7.9,
+      "hold_minutes": 4.0,
+      "atr": 1.44
+    },
+    {
+      "date": "2025-10-29",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6885.0,
+      "right": "C",
+      "entry_underlying": 6879.8,
+      "exit_underlying": 6877.09,
+      "underlying_move": -2.707,
+      "entry_premium": 8.8183,
+      "exit_premium": 7.2868,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -154.45,
+      "hold_minutes": 6.0,
+      "atr": 1.3533
+    },
+    {
       "date": "2025-10-30",
+      "tier": "scalp",
       "direction": "PUT",
       "confirmations": [
         "VWAP",
@@ -753,13 +2846,35 @@
       "entry_premium": 12.505,
       "exit_premium": 15.3017,
       "exit_reason": "PROFIT_TARGET",
-      "num_contracts": 2,
-      "pnl": 556.74,
+      "num_contracts": 1,
+      "pnl": 278.37,
       "hold_minutes": 9.0,
       "atr": 2.2
     },
     {
+      "date": "2025-10-31",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6825.0,
+      "right": "C",
+      "entry_underlying": 6817.4,
+      "exit_underlying": 6808.96,
+      "underlying_move": -8.44,
+      "entry_premium": 10.8926,
+      "exit_premium": 7.0187,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -388.68,
+      "hold_minutes": 17.0,
+      "atr": 4.22
+    },
+    {
       "date": "2025-11-06",
+      "tier": "scalp",
       "direction": "CALL",
       "confirmations": [
         "VWAP",
@@ -774,13 +2889,98 @@
       "entry_premium": 11.4986,
       "exit_premium": 8.0509,
       "exit_reason": "TIME_STOP",
-      "num_contracts": 2,
-      "pnl": -692.16,
+      "num_contracts": 1,
+      "pnl": -346.08,
       "hold_minutes": 36.0,
       "atr": 3.8133
     },
     {
+      "date": "2025-11-10",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6780.0,
+      "right": "P",
+      "entry_underlying": 6788.4,
+      "exit_underlying": 6785.98,
+      "underlying_move": 2.42,
+      "entry_premium": 9.0073,
+      "exit_premium": 9.6892,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 1,
+      "pnl": 66.89,
+      "hold_minutes": 2.0,
+      "atr": 2.1067
+    },
+    {
+      "date": "2025-11-10",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "RSI_EXTREME",
+        "VWAP_REVERT"
+      ],
+      "strike": 6785.0,
+      "right": "P",
+      "entry_underlying": 6794.1,
+      "exit_underlying": 6798.54,
+      "underlying_move": -4.44,
+      "entry_premium": 8.2792,
+      "exit_premium": 5.9693,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -232.28,
+      "hold_minutes": 19.0,
+      "atr": 2.22
+    },
+    {
+      "date": "2025-11-11",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6810.0,
+      "right": "P",
+      "entry_underlying": 6818.4,
+      "exit_underlying": 6822.41,
+      "underlying_move": -4.013,
+      "entry_premium": 8.0317,
+      "exit_premium": 6.3147,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -172.99,
+      "hold_minutes": 4.0,
+      "atr": 2.0067
+    },
+    {
+      "date": "2025-11-11",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6825.0,
+      "right": "P",
+      "entry_underlying": 6831.3,
+      "exit_underlying": 6827.02,
+      "underlying_move": 4.28,
+      "entry_premium": 8.0228,
+      "exit_premium": 9.5209,
+      "exit_reason": "MR_PROFIT_TARGET",
+      "num_contracts": 1,
+      "pnl": 148.5,
+      "hold_minutes": 4.0,
+      "atr": 2.14
+    },
+    {
       "date": "2025-11-19",
+      "tier": "scalp",
       "direction": "CALL",
       "confirmations": [
         "VWAP",
@@ -795,13 +2995,77 @@
       "entry_premium": 3.3541,
       "exit_premium": 8.4575,
       "exit_reason": "PROFIT_TARGET",
-      "num_contracts": 3,
-      "pnl": 1527.11,
+      "num_contracts": 1,
+      "pnl": 509.04,
       "hold_minutes": 3.0,
       "atr": 3.4467
     },
     {
+      "date": "2025-11-26",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6805.0,
+      "right": "P",
+      "entry_underlying": 6813.0,
+      "exit_underlying": 6811.2,
+      "underlying_move": 1.8,
+      "entry_premium": 10.4561,
+      "exit_premium": 10.6737,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 1,
+      "pnl": 20.46,
+      "hold_minutes": 10.0,
+      "atr": 2.0
+    },
+    {
+      "date": "2025-11-26",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6810.0,
+      "right": "C",
+      "entry_underlying": 6803.0,
+      "exit_underlying": 6805.56,
+      "underlying_move": 2.565,
+      "entry_premium": 8.7554,
+      "exit_premium": 9.594,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 1,
+      "pnl": 82.56,
+      "hold_minutes": 1.0,
+      "atr": 2.58
+    },
+    {
+      "date": "2025-11-28",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6825.0,
+      "right": "P",
+      "entry_underlying": 6832.5,
+      "exit_underlying": 6833.9,
+      "underlying_move": -1.4,
+      "entry_premium": 8.2595,
+      "exit_premium": 7.4691,
+      "exit_reason": "EOD_CLOSE",
+      "num_contracts": 1,
+      "pnl": -80.34,
+      "hold_minutes": 2.0,
+      "atr": 2.6467
+    },
+    {
       "date": "2025-12-01",
+      "tier": "scalp",
       "direction": "PUT",
       "confirmations": [
         "VWAP",
@@ -816,13 +3080,14 @@
       "entry_premium": 7.0272,
       "exit_premium": 10.1834,
       "exit_reason": "PROFIT_TARGET",
-      "num_contracts": 3,
-      "pnl": 942.96,
+      "num_contracts": 1,
+      "pnl": 314.32,
       "hold_minutes": 8.0,
       "atr": 2.44
     },
     {
       "date": "2025-12-02",
+      "tier": "scalp",
       "direction": "PUT",
       "confirmations": [
         "VWAP",
@@ -838,13 +3103,77 @@
       "entry_premium": 12.7484,
       "exit_premium": 8.3314,
       "exit_reason": "STOP_LOSS",
-      "num_contracts": 2,
-      "pnl": -886.0,
+      "num_contracts": 1,
+      "pnl": -443.0,
       "hold_minutes": 13.0,
       "atr": 3.4
     },
     {
       "date": "2025-12-02",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "RSI_EXTREME",
+        "VWAP_REVERT"
+      ],
+      "strike": 6810.0,
+      "right": "C",
+      "entry_underlying": 6801.5,
+      "exit_underlying": 6812.21,
+      "underlying_move": 10.707,
+      "entry_premium": 10.971,
+      "exit_premium": 15.3133,
+      "exit_reason": "MR_PROFIT_TARGET",
+      "num_contracts": 1,
+      "pnl": 432.93,
+      "hold_minutes": 15.0,
+      "atr": 5.3533
+    },
+    {
+      "date": "2025-12-02",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6815.0,
+      "right": "P",
+      "entry_underlying": 6821.6,
+      "exit_underlying": 6827.29,
+      "underlying_move": -5.693,
+      "entry_premium": 9.6996,
+      "exit_premium": 7.0346,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -267.8,
+      "hold_minutes": 12.0,
+      "atr": 2.8467
+    },
+    {
+      "date": "2025-12-02",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6820.0,
+      "right": "C",
+      "entry_underlying": 6813.3,
+      "exit_underlying": 6808.29,
+      "underlying_move": -5.013,
+      "entry_premium": 9.1342,
+      "exit_premium": 6.9344,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -221.28,
+      "hold_minutes": 2.0,
+      "atr": 2.5067
+    },
+    {
+      "date": "2025-12-02",
+      "tier": "scalp",
       "direction": "CALL",
       "confirmations": [
         "VWAP",
@@ -859,13 +3188,98 @@
       "entry_premium": 5.0992,
       "exit_premium": 3.3622,
       "exit_reason": "TIME_STOP",
-      "num_contracts": 3,
-      "pnl": -525.02,
+      "num_contracts": 1,
+      "pnl": -175.01,
       "hold_minutes": 30.0,
       "atr": 2.5733
     },
     {
+      "date": "2025-12-05",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6855.0,
+      "right": "P",
+      "entry_underlying": 6862.5,
+      "exit_underlying": 6862.8,
+      "underlying_move": -0.3,
+      "entry_premium": 8.4589,
+      "exit_premium": 7.4766,
+      "exit_reason": "MR_TIME_STOP",
+      "num_contracts": 1,
+      "pnl": -99.54,
+      "hold_minutes": 22.0,
+      "atr": 2.6467
+    },
+    {
+      "date": "2025-12-08",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6830.0,
+      "right": "P",
+      "entry_underlying": 6837.7,
+      "exit_underlying": 6841.9,
+      "underlying_move": -4.2,
+      "entry_premium": 8.2187,
+      "exit_premium": 6.4578,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -177.4,
+      "hold_minutes": 2.0,
+      "atr": 2.1
+    },
+    {
+      "date": "2025-12-08",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6835.0,
+      "right": "C",
+      "entry_underlying": 6828.3,
+      "exit_underlying": 6824.13,
+      "underlying_move": -4.173,
+      "entry_premium": 7.9547,
+      "exit_premium": 6.0282,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -193.95,
+      "hold_minutes": 5.0,
+      "atr": 2.0867
+    },
+    {
+      "date": "2025-12-08",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6825.0,
+      "right": "C",
+      "entry_underlying": 6820.5,
+      "exit_underlying": 6816.11,
+      "underlying_move": -4.387,
+      "entry_premium": 7.8475,
+      "exit_premium": 5.8541,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -200.64,
+      "hold_minutes": 2.0,
+      "atr": 2.1933
+    },
+    {
       "date": "2025-12-10",
+      "tier": "scalp",
       "direction": "CALL",
       "confirmations": [
         "VWAP",
@@ -874,41 +3288,62 @@
       ],
       "strike": 6845.0,
       "right": "C",
-      "entry_underlying": 6840.5,
-      "exit_underlying": 6854.43,
-      "underlying_move": 13.93,
-      "entry_premium": 8.434,
-      "exit_premium": 15.4577,
-      "exit_reason": "PROFIT_TARGET",
-      "num_contracts": 3,
-      "pnl": 2103.21,
-      "hold_minutes": 6.0,
-      "atr": 3.98
-    },
-    {
-      "date": "2025-12-18",
-      "direction": "CALL",
-      "confirmations": [
-        "VWAP",
-        "EMA",
-        "VOLUME",
-        "ORB"
-      ],
-      "strike": 6795.0,
-      "right": "C",
-      "entry_underlying": 6789.9,
-      "exit_underlying": 6806.23,
-      "underlying_move": 16.333,
-      "entry_premium": 22.2749,
-      "exit_premium": 28.5509,
+      "entry_underlying": 6835.7,
+      "exit_underlying": 6851.19,
+      "underlying_move": 15.493,
+      "entry_premium": 6.4443,
+      "exit_premium": 13.4939,
       "exit_reason": "PROFIT_TARGET",
       "num_contracts": 1,
-      "pnl": 626.3,
-      "hold_minutes": 45.0,
-      "atr": 4.6667
+      "pnl": 703.66,
+      "hold_minutes": 4.0,
+      "atr": 4.4267
+    },
+    {
+      "date": "2025-12-12",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6820.0,
+      "right": "P",
+      "entry_underlying": 6828.8,
+      "exit_underlying": 6822.25,
+      "underlying_move": 6.547,
+      "entry_premium": 8.8248,
+      "exit_premium": 11.1768,
+      "exit_reason": "MR_PROFIT_TARGET",
+      "num_contracts": 1,
+      "pnl": 233.9,
+      "hold_minutes": 6.0,
+      "atr": 3.2733
+    },
+    {
+      "date": "2025-12-12",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6835.0,
+      "right": "P",
+      "entry_underlying": 6839.8,
+      "exit_underlying": 6837.3,
+      "underlying_move": 2.505,
+      "entry_premium": 8.9242,
+      "exit_premium": 9.7654,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 1,
+      "pnl": 82.82,
+      "hold_minutes": 1.0,
+      "atr": 3.3267
     },
     {
       "date": "2025-12-18",
+      "tier": "scalp",
       "direction": "PUT",
       "confirmations": [
         "VWAP",
@@ -923,13 +3358,56 @@
       "entry_premium": 12.0797,
       "exit_premium": 15.3788,
       "exit_reason": "PROFIT_TARGET",
-      "num_contracts": 2,
-      "pnl": 657.22,
+      "num_contracts": 1,
+      "pnl": 328.61,
       "hold_minutes": 35.0,
       "atr": 3.2733
     },
     {
+      "date": "2025-12-22",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6835.0,
+      "right": "P",
+      "entry_underlying": 6844.3,
+      "exit_underlying": 6847.91,
+      "underlying_move": -3.613,
+      "entry_premium": 10.4017,
+      "exit_premium": 8.6813,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -173.34,
+      "hold_minutes": 6.0,
+      "atr": 1.8067
+    },
+    {
+      "date": "2025-12-22",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6845.0,
+      "right": "P",
+      "entry_underlying": 6851.5,
+      "exit_underlying": 6850.2,
+      "underlying_move": 1.3,
+      "entry_premium": 8.8464,
+      "exit_premium": 8.7692,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 1,
+      "pnl": -9.02,
+      "hold_minutes": 13.0,
+      "atr": 1.3333
+    },
+    {
       "date": "2025-12-23",
+      "tier": "scalp",
       "direction": "PUT",
       "confirmations": [
         "VWAP",
@@ -944,56 +3422,119 @@
       "entry_premium": 13.3891,
       "exit_premium": 8.5594,
       "exit_reason": "STOP_LOSS",
-      "num_contracts": 2,
-      "pnl": -968.55,
+      "num_contracts": 1,
+      "pnl": -484.27,
       "hold_minutes": 29.0,
       "atr": 3.44
     },
     {
-      "date": "2025-12-30",
+      "date": "2025-12-23",
+      "tier": "mean_rev",
       "direction": "PUT",
       "confirmations": [
-        "VWAP",
-        "EMA",
-        "VOLUME",
-        "ORB"
+        "BB_EXTREME",
+        "RSI_EXTREME"
       ],
-      "strike": 6865.0,
+      "strike": 6870.0,
       "right": "P",
-      "entry_underlying": 6870.3,
-      "exit_underlying": 6870.6,
-      "underlying_move": -0.3,
-      "entry_premium": 13.4485,
-      "exit_premium": 12.1912,
-      "exit_reason": "TIME_STOP",
-      "num_contracts": 2,
-      "pnl": -254.05,
-      "hold_minutes": 36.0,
-      "atr": 2.1733
+      "entry_underlying": 6876.4,
+      "exit_underlying": 6874.63,
+      "underlying_move": 1.773,
+      "entry_premium": 8.0193,
+      "exit_premium": 8.3817,
+      "exit_reason": "MR_PROFIT_TARGET",
+      "num_contracts": 1,
+      "pnl": 34.95,
+      "hold_minutes": 5.0,
+      "atr": 0.8867
     },
     {
-      "date": "2026-01-02",
+      "date": "2025-12-26",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6900.0,
+      "right": "C",
+      "entry_underlying": 6895.0,
+      "exit_underlying": 6893.03,
+      "underlying_move": -1.973,
+      "entry_premium": 9.0397,
+      "exit_premium": 7.959,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -109.37,
+      "hold_minutes": 1.0,
+      "atr": 0.9867
+    },
+    {
+      "date": "2025-12-29",
+      "tier": "mean_rev",
       "direction": "PUT",
       "confirmations": [
-        "VWAP",
-        "EMA",
-        "VOLUME"
+        "BB_EXTREME",
+        "RSI_EXTREME"
       ],
-      "strike": 6840.0,
+      "strike": 6870.0,
       "right": "P",
-      "entry_underlying": 6845.5,
-      "exit_underlying": 6832.25,
-      "underlying_move": 13.253,
-      "entry_premium": 22.3531,
-      "exit_premium": 28.0851,
-      "exit_reason": "PROFIT_TARGET",
+      "entry_underlying": 6877.5,
+      "exit_underlying": 6876.37,
+      "underlying_move": 1.13,
+      "entry_premium": 8.6543,
+      "exit_premium": 8.6939,
+      "exit_reason": "MR_TRAILING_STOP",
       "num_contracts": 1,
-      "pnl": 571.9,
-      "hold_minutes": 7.0,
-      "atr": 3.7867
+      "pnl": 2.66,
+      "hold_minutes": 5.0,
+      "atr": 1.2933
+    },
+    {
+      "date": "2025-12-31",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6850.0,
+      "right": "P",
+      "entry_underlying": 6858.7,
+      "exit_underlying": 6861.33,
+      "underlying_move": -2.627,
+      "entry_premium": 6.2279,
+      "exit_premium": 4.6608,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -158.0,
+      "hold_minutes": 16.0,
+      "atr": 1.3133
     },
     {
       "date": "2026-01-05",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6885.0,
+      "right": "C",
+      "entry_underlying": 6877.2,
+      "exit_underlying": 6878.9,
+      "underlying_move": 1.705,
+      "entry_premium": 8.2049,
+      "exit_premium": 8.6599,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 1,
+      "pnl": 44.19,
+      "hold_minutes": 1.0,
+      "atr": 1.86
+    },
+    {
+      "date": "2026-01-05",
+      "tier": "scalp",
       "direction": "PUT",
       "confirmations": [
         "VWAP",
@@ -1008,34 +3549,35 @@
       "entry_premium": 5.8518,
       "exit_premium": 3.8083,
       "exit_reason": "STOP_LOSS",
-      "num_contracts": 3,
-      "pnl": -616.97,
+      "num_contracts": 1,
+      "pnl": -205.66,
       "hold_minutes": 5.0,
       "atr": 1.5667
     },
     {
-      "date": "2026-01-07",
+      "date": "2026-01-06",
+      "tier": "mean_rev",
       "direction": "PUT",
       "confirmations": [
-        "VWAP",
-        "EMA",
-        "VOLUME"
+        "BB_EXTREME",
+        "RSI_EXTREME"
       ],
       "strike": 6910.0,
       "right": "P",
-      "entry_underlying": 6918.8,
-      "exit_underlying": 6918.0,
-      "underlying_move": 0.8,
-      "entry_premium": 12.302,
-      "exit_premium": 11.5176,
-      "exit_reason": "TIME_STOP",
-      "num_contracts": 2,
-      "pnl": -159.49,
-      "hold_minutes": 37.0,
-      "atr": 2.92
+      "entry_underlying": 6915.6,
+      "exit_underlying": 6918.31,
+      "underlying_move": -2.707,
+      "entry_premium": 7.5463,
+      "exit_premium": 5.8375,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -172.19,
+      "hold_minutes": 14.0,
+      "atr": 1.3533
     },
     {
       "date": "2026-01-07",
+      "tier": "scalp",
       "direction": "PUT",
       "confirmations": [
         "VWAP",
@@ -1050,35 +3592,14 @@
       "entry_premium": 7.0553,
       "exit_premium": 5.9778,
       "exit_reason": "TIME_STOP",
-      "num_contracts": 3,
-      "pnl": -327.14,
+      "num_contracts": 1,
+      "pnl": -109.05,
       "hold_minutes": 30.0,
       "atr": 1.92
     },
     {
-      "date": "2026-01-09",
-      "direction": "PUT",
-      "confirmations": [
-        "VWAP",
-        "EMA",
-        "VOLUME",
-        "ORB"
-      ],
-      "strike": 6895.0,
-      "right": "P",
-      "entry_underlying": 6903.6,
-      "exit_underlying": 6920.96,
-      "underlying_move": -17.36,
-      "entry_premium": 20.1803,
-      "exit_premium": 12.6379,
-      "exit_reason": "STOP_LOSS",
-      "num_contracts": 1,
-      "pnl": -755.55,
-      "hold_minutes": 17.0,
-      "atr": 5.7867
-    },
-    {
       "date": "2026-01-14",
+      "tier": "scalp",
       "direction": "CALL",
       "confirmations": [
         "VWAP",
@@ -1093,34 +3614,57 @@
       "entry_premium": 7.47,
       "exit_premium": 11.5852,
       "exit_reason": "PROFIT_TARGET",
-      "num_contracts": 3,
-      "pnl": 1230.67,
+      "num_contracts": 1,
+      "pnl": 410.22,
       "hold_minutes": 31.0,
       "atr": 3.88
     },
     {
       "date": "2026-01-21",
+      "tier": "scalp",
       "direction": "CALL",
       "confirmations": [
         "VWAP",
         "EMA",
         "VOLUME"
       ],
-      "strike": 6845.0,
+      "strike": 6860.0,
       "right": "C",
-      "entry_underlying": 6839.9,
-      "exit_underlying": 6862.7,
-      "underlying_move": 22.797,
-      "entry_premium": 11.1417,
-      "exit_premium": 23.2895,
+      "entry_underlying": 6851.5,
+      "exit_underlying": 6879.57,
+      "underlying_move": 28.07,
+      "entry_premium": 9.4211,
+      "exit_premium": 24.0003,
       "exit_reason": "PROFIT_TARGET",
-      "num_contracts": 2,
-      "pnl": 2426.97,
-      "hold_minutes": 9.0,
-      "atr": 6.5133
+      "num_contracts": 1,
+      "pnl": 1456.63,
+      "hold_minutes": 15.0,
+      "atr": 8.02
     },
     {
       "date": "2026-01-22",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6905.0,
+      "right": "C",
+      "entry_underlying": 6899.7,
+      "exit_underlying": 6903.02,
+      "underlying_move": 3.32,
+      "entry_premium": 10.4174,
+      "exit_premium": 11.5111,
+      "exit_reason": "MR_PROFIT_TARGET",
+      "num_contracts": 1,
+      "pnl": 108.07,
+      "hold_minutes": 3.0,
+      "atr": 1.66
+    },
+    {
+      "date": "2026-01-22",
+      "tier": "scalp",
       "direction": "PUT",
       "confirmations": [
         "VWAP",
@@ -1135,13 +3679,77 @@
       "entry_premium": 6.4696,
       "exit_premium": 7.1735,
       "exit_reason": "PROFIT_TARGET",
-      "num_contracts": 3,
-      "pnl": 207.27,
+      "num_contracts": 1,
+      "pnl": 69.09,
       "hold_minutes": 31.0,
       "atr": 2.1
     },
     {
       "date": "2026-01-23",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6895.0,
+      "right": "P",
+      "entry_underlying": 6902.4,
+      "exit_underlying": 6906.6,
+      "underlying_move": -4.2,
+      "entry_premium": 11.8185,
+      "exit_premium": 9.7201,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -211.15,
+      "hold_minutes": 8.0,
+      "atr": 2.1
+    },
+    {
+      "date": "2026-01-23",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6900.0,
+      "right": "C",
+      "entry_underlying": 6895.3,
+      "exit_underlying": 6899.57,
+      "underlying_move": 4.267,
+      "entry_premium": 12.6808,
+      "exit_premium": 14.3142,
+      "exit_reason": "MR_PROFIT_TARGET",
+      "num_contracts": 1,
+      "pnl": 162.04,
+      "hold_minutes": 3.0,
+      "atr": 2.1333
+    },
+    {
+      "date": "2026-01-23",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6895.0,
+      "right": "C",
+      "entry_underlying": 6889.7,
+      "exit_underlying": 6884.7,
+      "underlying_move": -5.0,
+      "entry_premium": 10.2712,
+      "exit_premium": 7.8745,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -240.96,
+      "hold_minutes": 4.0,
+      "atr": 2.5
+    },
+    {
+      "date": "2026-01-23",
+      "tier": "scalp",
       "direction": "CALL",
       "confirmations": [
         "VWAP",
@@ -1156,13 +3764,224 @@
       "entry_premium": 5.7172,
       "exit_premium": 4.0172,
       "exit_reason": "TIME_STOP",
-      "num_contracts": 3,
-      "pnl": -513.91,
+      "num_contracts": 1,
+      "pnl": -171.3,
       "hold_minutes": 30.0,
       "atr": 2.04
     },
     {
+      "date": "2026-01-26",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6930.0,
+      "right": "C",
+      "entry_underlying": 6922.5,
+      "exit_underlying": 6926.23,
+      "underlying_move": 3.733,
+      "entry_premium": 11.8232,
+      "exit_premium": 13.1629,
+      "exit_reason": "MR_PROFIT_TARGET",
+      "num_contracts": 1,
+      "pnl": 132.67,
+      "hold_minutes": 1.0,
+      "atr": 1.8667
+    },
+    {
+      "date": "2026-01-26",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6930.0,
+      "right": "P",
+      "entry_underlying": 6935.4,
+      "exit_underlying": 6934.12,
+      "underlying_move": 1.285,
+      "entry_premium": 10.833,
+      "exit_premium": 10.956,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 1,
+      "pnl": 11.0,
+      "hold_minutes": 6.0,
+      "atr": 1.4867
+    },
+    {
+      "date": "2026-01-27",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6955.0,
+      "right": "P",
+      "entry_underlying": 6964.3,
+      "exit_underlying": 6963.26,
+      "underlying_move": 1.035,
+      "entry_premium": 10.4304,
+      "exit_premium": 10.3843,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 1,
+      "pnl": -5.91,
+      "hold_minutes": 8.0,
+      "atr": 1.2867
+    },
+    {
+      "date": "2026-01-27",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6960.0,
+      "right": "C",
+      "entry_underlying": 6954.8,
+      "exit_underlying": 6957.37,
+      "underlying_move": 2.573,
+      "entry_premium": 11.267,
+      "exit_premium": 12.0102,
+      "exit_reason": "MR_PROFIT_TARGET",
+      "num_contracts": 1,
+      "pnl": 73.02,
+      "hold_minutes": 5.0,
+      "atr": 1.2867
+    },
+    {
+      "date": "2026-01-27",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6960.0,
+      "right": "C",
+      "entry_underlying": 6950.9,
+      "exit_underlying": 6952.5,
+      "underlying_move": 1.595,
+      "entry_premium": 8.1298,
+      "exit_premium": 8.2198,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 1,
+      "pnl": 7.7,
+      "hold_minutes": 10.0,
+      "atr": 1.34
+    },
+    {
+      "date": "2026-01-27",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6955.0,
+      "right": "P",
+      "entry_underlying": 6961.3,
+      "exit_underlying": 6959.35,
+      "underlying_move": 1.947,
+      "entry_premium": 6.9578,
+      "exit_premium": 7.4199,
+      "exit_reason": "MR_PROFIT_TARGET",
+      "num_contracts": 1,
+      "pnl": 44.91,
+      "hold_minutes": 4.0,
+      "atr": 0.9733
+    },
+    {
+      "date": "2026-01-28",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6955.0,
+      "right": "C",
+      "entry_underlying": 6946.3,
+      "exit_underlying": 6948.1,
+      "underlying_move": 1.805,
+      "entry_premium": 10.4874,
+      "exit_premium": 10.7785,
+      "exit_reason": "MR_TRAILING_STOP",
+      "num_contracts": 1,
+      "pnl": 27.8,
+      "hold_minutes": 7.0,
+      "atr": 2.1267
+    },
+    {
       "date": "2026-01-30",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6905.0,
+      "right": "C",
+      "entry_underlying": 6896.4,
+      "exit_underlying": 6887.44,
+      "underlying_move": -8.96,
+      "entry_premium": 13.4242,
+      "exit_premium": 9.5352,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -390.2,
+      "hold_minutes": 4.0,
+      "atr": 4.48
+    },
+    {
+      "date": "2026-01-30",
+      "tier": "mean_rev",
+      "direction": "CALL",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6890.0,
+      "right": "C",
+      "entry_underlying": 6881.2,
+      "exit_underlying": 6873.17,
+      "underlying_move": -8.027,
+      "entry_premium": 10.297,
+      "exit_premium": 7.0836,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -322.64,
+      "hold_minutes": 2.0,
+      "atr": 4.0133
+    },
+    {
+      "date": "2026-01-30",
+      "tier": "mean_rev",
+      "direction": "PUT",
+      "confirmations": [
+        "BB_EXTREME",
+        "RSI_EXTREME"
+      ],
+      "strike": 6900.0,
+      "right": "P",
+      "entry_underlying": 6905.6,
+      "exit_underlying": 6914.59,
+      "underlying_move": -8.987,
+      "entry_premium": 9.8892,
+      "exit_premium": 6.0356,
+      "exit_reason": "MR_STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -386.67,
+      "hold_minutes": 8.0,
+      "atr": 4.4933
+    },
+    {
+      "date": "2026-01-30",
+      "tier": "scalp",
       "direction": "CALL",
       "confirmations": [
         "VWAP",
@@ -1177,34 +3996,14 @@
       "entry_premium": 8.4197,
       "exit_premium": 6.5206,
       "exit_reason": "TIME_STOP",
-      "num_contracts": 2,
-      "pnl": -382.41,
+      "num_contracts": 1,
+      "pnl": -191.21,
       "hold_minutes": 30.0,
       "atr": 5.2733
     },
     {
-      "date": "2026-02-13",
-      "direction": "PUT",
-      "confirmations": [
-        "VWAP",
-        "EMA",
-        "VOLUME"
-      ],
-      "strike": 6815.0,
-      "right": "P",
-      "entry_underlying": 6824.0,
-      "exit_underlying": 6810.77,
-      "underlying_move": 13.23,
-      "entry_premium": 23.5164,
-      "exit_premium": 22.4132,
-      "exit_reason": "PROFIT_TARGET",
-      "num_contracts": 1,
-      "pnl": -111.62,
-      "hold_minutes": 27.0,
-      "atr": 3.78
-    },
-    {
       "date": "2026-02-27",
+      "tier": "scalp",
       "direction": "CALL",
       "confirmations": [
         "VWAP",
@@ -1213,61 +4012,20 @@
       ],
       "strike": 6855.0,
       "right": "C",
-      "entry_underlying": 6846.6,
-      "exit_underlying": 6839.3,
-      "underlying_move": -7.3,
-      "entry_premium": 16.7639,
-      "exit_premium": 12.9658,
-      "exit_reason": "STOP_LOSS",
-      "num_contracts": 2,
-      "pnl": -762.24,
-      "hold_minutes": 5.0,
-      "atr": 2.4333
-    },
-    {
-      "date": "2026-03-04",
-      "direction": "CALL",
-      "confirmations": [
-        "VWAP",
-        "EMA",
-        "VOLUME"
-      ],
-      "strike": 6830.0,
-      "right": "C",
-      "entry_underlying": 6823.2,
-      "exit_underlying": 6846.51,
-      "underlying_move": 23.31,
-      "entry_premium": 26.4436,
-      "exit_premium": 37.3238,
+      "entry_underlying": 6849.3,
+      "exit_underlying": 6858.84,
+      "underlying_move": 9.543,
+      "entry_premium": 10.6191,
+      "exit_premium": 13.4065,
       "exit_reason": "PROFIT_TARGET",
       "num_contracts": 1,
-      "pnl": 1086.72,
-      "hold_minutes": 19.0,
-      "atr": 6.66
+      "pnl": 277.45,
+      "hold_minutes": 11.0,
+      "atr": 2.7267
     },
     {
       "date": "2026-03-06",
-      "direction": "CALL",
-      "confirmations": [
-        "VWAP",
-        "EMA",
-        "VOLUME"
-      ],
-      "strike": 6730.0,
-      "right": "C",
-      "entry_underlying": 6723.9,
-      "exit_underlying": 6752.44,
-      "underlying_move": 28.537,
-      "entry_premium": 28.3127,
-      "exit_premium": 41.6683,
-      "exit_reason": "PROFIT_TARGET",
-      "num_contracts": 1,
-      "pnl": 1334.26,
-      "hold_minutes": 34.0,
-      "atr": 8.1533
-    },
-    {
-      "date": "2026-03-06",
+      "tier": "scalp",
       "direction": "PUT",
       "confirmations": [
         "VWAP",
@@ -1282,8 +4040,8 @@
       "entry_premium": 6.9624,
       "exit_premium": 1.4228,
       "exit_reason": "STOP_LOSS",
-      "num_contracts": 3,
-      "pnl": -1665.8,
+      "num_contracts": 1,
+      "pnl": -555.27,
       "hold_minutes": 13.0,
       "atr": 4.4267
     }

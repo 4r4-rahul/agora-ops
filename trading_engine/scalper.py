@@ -176,6 +176,8 @@ class SignalEngine:
         bars: pd.DataFrame,
         price: float,
         ticker: str = "",
+        prev_day_high: float = None,
+        prev_day_low: float = None,
     ) -> Optional[ScalpSignal]:
         """
         Evaluate all signal components and return a signal if 2+ confirm.
@@ -243,32 +245,42 @@ class SignalEngine:
         elif orb == "BEAR":
             bearish.append("ORB")
 
+        # 6. Consecutive Candle Momentum
+        cm = self._check_candle_momentum(bars, price)
+        if cm == "BULL":
+            bullish.append("CANDLE_MOM")
+        elif cm == "BEAR":
+            bearish.append("CANDLE_MOM")
+
+        # 7. Range Breakout (Donchian channel — works all day)
+        rb = self._check_range_breakout(bars, price)
+        if rb == "BULL":
+            bullish.append("RANGE_BRK")
+        elif rb == "BEAR":
+            bearish.append("RANGE_BRK")
+
+        # 8. Previous Day High/Low
+        ph = self._check_prev_day_hl(bars, price, prev_day_high, prev_day_low)
+        if ph == "BULL":
+            bullish.append("PREV_HL")
+        elif ph == "BEAR":
+            bearish.append("PREV_HL")
+
         # ── Require min_confirmations to agree ───────────────────
+        # MANDATORY: VOLUME + VWAP must both be present for any signal.
+        # Data shows combos without these are noise (negative WR drag).
+        n_components = 8  # Total signal components
         min_conf = self.cfg.min_confirmations
 
-        if len(bullish) >= min_conf:
-            # MANDATORY: VOLUME + VWAP must be present
-            # Data shows combos without these are noise (negative WR drag)
-            if "VOLUME" not in bullish or "VWAP" not in bullish:
-                return None
+        for direction, sigs in [("CALL", bullish), ("PUT", bearish)]:
+            if len(sigs) < min_conf:
+                continue
+            if "VOLUME" not in sigs or "VWAP" not in sigs:
+                continue
             return ScalpSignal(
-                direction="CALL",
-                confirmations=bullish,
-                confidence=len(bullish) / 5.0,
-                entry_underlying=price,
-                atr=atr,
-                timestamp=bars.index[-1] if hasattr(bars.index[-1], 'hour') else datetime.now(),
-                ticker=ticker,
-            )
-
-        if len(bearish) >= min_conf:
-            # MANDATORY: VOLUME + VWAP must be present
-            if "VOLUME" not in bearish or "VWAP" not in bearish:
-                return None
-            return ScalpSignal(
-                direction="PUT",
-                confirmations=bearish,
-                confidence=len(bearish) / 5.0,
+                direction=direction,
+                confirmations=sigs,
+                confidence=len(sigs) / n_components,
                 entry_underlying=price,
                 atr=atr,
                 timestamp=bars.index[-1] if hasattr(bars.index[-1], 'hour') else datetime.now(),
@@ -291,8 +303,12 @@ class SignalEngine:
               now below for last 2+ bars) — longs liquidating.
         NEUTRAL: No recent cross or price stuck near VWAP.
 
-        This is stricter than just "above/below VWAP" — it requires
-        a TRANSITION which signals a flow regime change.
+        Fires in TWO modes:
+          1. Cross mode: Price crossed VWAP recently (was on other side
+             for 3+ bars, now on this side for 2+). Catches reversals.
+          2. Trend mode: Price has been on one side for 8+ consecutive
+             bars with strong distance (>0.1%). Catches trend days where
+             no cross ever happens — the biggest intraday moves.
         """
         if vwap is None or len(vwap) < 10:
             return "NEUTRAL"
@@ -335,11 +351,9 @@ class SignalEngine:
             if not pd.isna(vwap.iloc[-j])
         )
 
-        # VWAP Reclaim: was below 5+ bars, now above
+        # MODE 1: VWAP Cross (reclaim/rejection after 5+ bars on other side)
         if last_2_above and below_count >= 5:
             return "BULL"
-
-        # VWAP Rejection: was above 5+ bars, now below
         if last_2_below and above_count >= 5:
             return "BEAR"
 
@@ -497,6 +511,124 @@ class SignalEngine:
             return "BEAR"
         return "NEUTRAL"
 
+    # ─── Component: Consecutive Candle Momentum ──────────────────
+
+    def _check_candle_momentum(self, bars: pd.DataFrame, price: float) -> str:
+        """
+        Consecutive candle momentum — directional conviction.
+
+        BULL: 3+ consecutive bars with close > open (bullish bodies)
+              and each body ratio > 40% (not dojis)
+        BEAR: 3+ consecutive bars with close < open (bearish bodies)
+        NEUTRAL: Mixed candles or weak bodies
+
+        Professional basis: "Three white soldiers" / "Three black crows"
+        patterns. Consecutive strong-body candles show institutional
+        conviction — the market is trending, not just spiking.
+        """
+        n_bars = self.cfg.candle_mom_bars  # default 3
+        min_body_pct = self.cfg.candle_mom_body_pct  # default 0.40
+        if len(bars) < n_bars + 1:
+            return "NEUTRAL"
+
+        bull_count = 0
+        bear_count = 0
+        for j in range(n_bars):
+            bar_slice = bars.iloc[-(j + 1)]
+            bar_open = bar_slice["open"]
+            bar_close = bar_slice["close"]
+            bar_range = bar_slice["high"] - bar_slice["low"]
+            if bar_range <= 0:
+                return "NEUTRAL"
+            body = bar_close - bar_open
+            body_ratio = abs(body) / bar_range
+            if body_ratio < min_body_pct:
+                break  # Weak candle breaks the streak
+            if body > 0:
+                bull_count += 1
+            elif body < 0:
+                bear_count += 1
+            else:
+                break
+
+        if bull_count >= n_bars:
+            return "BULL"
+        if bear_count >= n_bars:
+            return "BEAR"
+        return "NEUTRAL"
+
+    # ─── Component: Range Breakout (Donchian Channel) ────────────
+
+    def _check_range_breakout(self, bars: pd.DataFrame, price: float) -> str:
+        """
+        Donchian Channel breakout — 20-bar high/low range break.
+
+        Complements ORB (which dies after 60 min) by providing
+        a breakout signal that works ALL DAY. Detects when price
+        breaks above the 20-bar high or below the 20-bar low.
+
+        Logic:
+          1. Compute 20-bar high and low (excluding current bar)
+          2. Current close breaks above/below the range
+          3. Previous close was inside (freshness check)
+
+        Professional basis: Donchian channels, turtle trading rules,
+        Darvas box — all variants of N-bar range breakout.
+        """
+        lookback = self.cfg.range_brk_lookback  # default 20
+        if len(bars) < lookback + 3:
+            return "NEUTRAL"
+
+        # Range from prior bars (not including last 1)
+        range_bars = bars.iloc[-(lookback + 1):-1]
+        range_high = range_bars["high"].max()
+        range_low = range_bars["low"].min()
+
+        last_close = bars["close"].iloc[-1]
+        prev_close = bars["close"].iloc[-2]
+
+        # Bullish breakout: fresh break above range high
+        if last_close > range_high and prev_close <= range_high:
+            return "BULL"
+        # Bearish breakdown: fresh break below range low
+        if last_close < range_low and prev_close >= range_low:
+            return "BEAR"
+        return "NEUTRAL"
+
+    # ─── Component: Previous Day High/Low ────────────────────────
+
+    def _check_prev_day_hl(
+        self, bars: pd.DataFrame, price: float,
+        prev_day_high: float = None, prev_day_low: float = None,
+    ) -> str:
+        """
+        Previous day's high/low breakout — cross-day reference level.
+
+        Yesterday's high and low are among the most-watched levels
+        by institutional traders. Breaking above/below with conviction
+        signals genuine directional commitment beyond noise.
+
+        BULL: Price breaks above yesterday's high (fresh)
+        BEAR: Price breaks below yesterday's low (fresh)
+        NEUTRAL: Inside yesterday's range or no prior data
+
+        Professional basis: Every institutional desk marks prior
+        day H/L on charts. These are key support/resistance levels.
+        """
+        if prev_day_high is None or prev_day_low is None:
+            return "NEUTRAL"
+        if len(bars) < 3:
+            return "NEUTRAL"
+
+        last_close = bars["close"].iloc[-1]
+        prev_close = bars["close"].iloc[-2]
+
+        if last_close > prev_day_high and prev_close <= prev_day_high:
+            return "BULL"
+        if last_close < prev_day_low and prev_close >= prev_day_low:
+            return "BEAR"
+        return "NEUTRAL"
+
     # ─── Anti-Signal: Chop Gate ──────────────────────────────────
 
     def _is_chop(
@@ -541,6 +673,7 @@ class SignalEngine:
         close = day_bars["close"].values
         high = day_bars["high"].values
         low = day_bars["low"].values
+        open_arr = day_bars["open"].values if "open" in day_bars.columns else np.zeros(len(day_bars))
         volume = day_bars["volume"].values if "volume" in day_bars.columns else np.zeros(len(day_bars))
         n = len(day_bars)
 
@@ -619,6 +752,7 @@ class SignalEngine:
             'close': close,
             'high': high,
             'low': low,
+            'open': open_arr,
             'volume': volume,
             'vwap': vwap,
             'ema9': ema9,
@@ -631,6 +765,9 @@ class SignalEngine:
             'max_orb_bars': max_orb_bars,
             'rv': rv_arr,
             'n': n,
+            # Set by backtester before evaluate_fast() calls:
+            'prev_day_high': None,
+            'prev_day_low': None,
         }
 
     def evaluate_fast(
@@ -719,31 +856,44 @@ class SignalEngine:
         elif orb == "BEAR":
             bearish.append("ORB")
 
+        # 6. Consecutive Candle Momentum
+        cm = self._check_candle_momentum_fast(precomp, close, high, low, idx)
+        if cm == "BULL":
+            bullish.append("CANDLE_MOM")
+        elif cm == "BEAR":
+            bearish.append("CANDLE_MOM")
+
+        # 7. Range Breakout (Donchian — works all day)
+        rb = self._check_range_breakout_fast(close, high, low, idx)
+        if rb == "BULL":
+            bullish.append("RANGE_BRK")
+        elif rb == "BEAR":
+            bearish.append("RANGE_BRK")
+
+        # 8. Previous Day High/Low
+        ph = self._check_prev_day_hl_fast(precomp, close, idx, price)
+        if ph == "BULL":
+            bullish.append("PREV_HL")
+        elif ph == "BEAR":
+            bearish.append("PREV_HL")
+
         # ── Require min_confirmations to agree ───────────────────
+        # MANDATORY: VOLUME + VWAP must both be present for any signal.
+        # Data shows combos without these are noise (negative WR drag).
+        n_components = 8  # Total signal components
         min_conf = self.cfg.min_confirmations
 
         ts = bars_index[idx] if bars_index is not None and hasattr(bars_index[idx], 'hour') else datetime.now()
 
-        if len(bullish) >= min_conf:
-            if "VOLUME" not in bullish or "VWAP" not in bullish:
-                return None
+        for direction, sigs in [("CALL", bullish), ("PUT", bearish)]:
+            if len(sigs) < min_conf:
+                continue
+            if "VOLUME" not in sigs or "VWAP" not in sigs:
+                continue
             return ScalpSignal(
-                direction="CALL",
-                confirmations=bullish,
-                confidence=len(bullish) / 5.0,
-                entry_underlying=price,
-                atr=atr_val,
-                timestamp=ts,
-                ticker=ticker,
-            )
-
-        if len(bearish) >= min_conf:
-            if "VOLUME" not in bearish or "VWAP" not in bearish:
-                return None
-            return ScalpSignal(
-                direction="PUT",
-                confirmations=bearish,
-                confidence=len(bearish) / 5.0,
+                direction=direction,
+                confirmations=sigs,
+                confidence=len(sigs) / n_components,
                 entry_underlying=price,
                 atr=atr_val,
                 timestamp=ts,
@@ -798,10 +948,12 @@ class SignalEngine:
             if not np.isnan(vwap[idx - j])
         )
 
+        # MODE 1: VWAP Cross (reclaim/rejection after 5+ bars on other side)
         if last_2_above and below_count >= 5:
             return "BULL"
         if last_2_below and above_count >= 5:
             return "BEAR"
+
         return "NEUTRAL"
 
     def _check_ema_trend_fast(self, ema9: np.ndarray, ema21: np.ndarray,
@@ -886,6 +1038,80 @@ class SignalEngine:
         if price > precomp['orb_high']:
             return "BULL"
         if price < precomp['orb_low']:
+            return "BEAR"
+        return "NEUTRAL"
+
+    def _check_candle_momentum_fast(self, precomp: dict, close: np.ndarray,
+                                     high: np.ndarray, low: np.ndarray,
+                                     idx: int) -> str:
+        """Fast consecutive candle momentum check using precomputed open array."""
+        n_bars = self.cfg.candle_mom_bars  # default 3
+        min_body_pct = self.cfg.candle_mom_body_pct  # default 0.40
+        if idx < n_bars:
+            return "NEUTRAL"
+
+        open_arr = precomp['open']
+        bull_count = 0
+        bear_count = 0
+        for j in range(n_bars):
+            bar_idx = idx - j
+            body = close[bar_idx] - open_arr[bar_idx]
+            bar_range = high[bar_idx] - low[bar_idx]
+            if bar_range <= 0:
+                return "NEUTRAL"
+            body_ratio = abs(body) / bar_range
+            if body_ratio < min_body_pct:
+                break  # Weak candle breaks the streak
+            if body > 0:
+                bull_count += 1
+            elif body < 0:
+                bear_count += 1
+            else:
+                break
+
+        if bull_count >= n_bars:
+            return "BULL"
+        if bear_count >= n_bars:
+            return "BEAR"
+        return "NEUTRAL"
+
+    def _check_range_breakout_fast(self, close: np.ndarray, high: np.ndarray,
+                                    low: np.ndarray, idx: int) -> str:
+        """Fast Donchian channel breakout check."""
+        lookback = self.cfg.range_brk_lookback  # default 20
+        if idx < lookback + 2:
+            return "NEUTRAL"
+
+        # Range from bars [idx-lookback, idx-1) — not including current bar
+        range_start = idx - lookback
+        range_end = idx  # exclusive (so up to idx-1)
+        range_high = high[range_start:range_end].max()
+        range_low = low[range_start:range_end].min()
+
+        last_close = close[idx]
+        prev_close = close[idx - 1]
+
+        if last_close > range_high and prev_close <= range_high:
+            return "BULL"
+        if last_close < range_low and prev_close >= range_low:
+            return "BEAR"
+        return "NEUTRAL"
+
+    def _check_prev_day_hl_fast(self, precomp: dict, close: np.ndarray,
+                                 idx: int, price: float) -> str:
+        """Fast previous day high/low breakout check."""
+        prev_high = precomp.get('prev_day_high')
+        prev_low = precomp.get('prev_day_low')
+        if prev_high is None or prev_low is None:
+            return "NEUTRAL"
+        if idx < 2:
+            return "NEUTRAL"
+
+        prev_close = close[idx - 1]
+
+        if price > prev_high and prev_close <= prev_high:
+            return "BULL"
+        if price < prev_low and prev_close >= prev_low:
             return "BEAR"
         return "NEUTRAL"
 

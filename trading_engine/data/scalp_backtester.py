@@ -362,11 +362,19 @@ class ScalpBacktester:
         peak = balance
         equity = [{"date": str(days[0][0]), "balance": balance}]
 
+        prev_day_high = None
+        prev_day_low = None
+
         for day_date, day_bars in days:
             day_result = self._run_day(
                 day_date, day_bars, ticker, profile, premium_scale,
                 balance, bar_minutes, verbose,
+                prev_day_high=prev_day_high, prev_day_low=prev_day_low,
             )
+
+            # Track previous day high/low for next day's PREV_HL signal
+            prev_day_high = float(day_bars['high'].max())
+            prev_day_low = float(day_bars['low'].min())
 
             results.daily_results.append(day_result)
             results.trades.extend(day_result._trades)
@@ -413,7 +421,9 @@ class ScalpBacktester:
     def _run_day(self, day_date: date, day_bars: pd.DataFrame,
                  ticker: str, profile: TickerProfile,
                  premium_scale: float, balance: float,
-                 bar_minutes: int, verbose: bool) -> ScalpBacktestDay:
+                 bar_minutes: int, verbose: bool,
+                 prev_day_high: float = None,
+                 prev_day_low: float = None) -> ScalpBacktestDay:
         """Simulate one trading day with multi-strategy gamma scalp system.
 
         Strategy A (MOMENTUM SCALP): ATM options, breakout signals, morning + power hour.
@@ -474,6 +484,9 @@ class ScalpBacktester:
 
         # Pre-compute all indicators for the day (O(n) once, not O(n²))
         precomp = self._signal_engine.precompute_day_indicators(day_bars)
+        # Set previous day high/low for PREV_HL signal component
+        precomp['prev_day_high'] = prev_day_high
+        precomp['prev_day_low'] = prev_day_low
         mr_enabled = self.config.mean_reversion.enabled
         mr_precomp = self._mr_signal_engine.precompute_day_indicators(day_bars) if mr_enabled else None
         day_bars_index = day_bars.index
@@ -774,12 +787,25 @@ class ScalpBacktester:
                         if risk_per_contract > 0:
                             max_risk = self.scalp_cfg.max_risk_per_trade * self.price_scale
                             budget_pct = 0.30 if self.spx_mode else 0.05
+
+                            # Conviction sizing: deeper IV discount → more contracts + risk
+                            # When RV >> IV, options are deeply cheap → edge is larger → size up
+                            import math as _math2
+                            base_max_contracts = self.scalp_cfg.max_contracts
+                            if (not _math2.isnan(current_rv) and day_iv > 0
+                                    and self.scalp_cfg.rv_iv_premium_ratio > 0):
+                                rv_iv = current_rv / day_iv
+                                if rv_iv >= self.scalp_cfg.rv_iv_premium_ratio:
+                                    # Deeply discounted: 50% more contracts AND risk budget
+                                    base_max_contracts = int(base_max_contracts * 1.5)
+                                    max_risk = max_risk * 1.5
+
                             max_budget_contracts = int(balance * budget_pct / (entry_premium * 100)) \
                                 if entry_premium > 0 else 0
 
                             max_contracts = min(
                                 int(max_risk / risk_per_contract),
-                                self.scalp_cfg.max_contracts,
+                                base_max_contracts,
                                 max(1, max_budget_contracts),
                             )
                             if entry_premium * 100 <= balance * 0.50:
