@@ -213,6 +213,36 @@ class ScalpConfig:
     ema_slope_min_pct: float = 0.0001   # Min EMA slope per bar (0.01%)
     vwap_distance_min_pct: float = 0.0005  # Min 0.05% from VWAP for signal
 
+    # ── Runner Tier (OTM Power-Hour Plays) ──────────────────────
+    # The "vacation fund": cheap OTM options that ride big moves.
+    # Enters ONLY in power hour when momentum is confirmed.
+    # Let winners run with trailing stop, no time stop.
+    runner_enabled: bool = True             # Enable runner tier
+    runner_max_per_day: int = 1             # Max 1 runner/day
+    runner_budget_pct: float = 0.02         # 2% of account per runner ($200 on $10K)
+    runner_max_premium: float = 2.00        # Max $2.00/contract (SPY scale, ×10 for SPX)
+    runner_min_premium: float = 0.10        # Min $0.10 viable premium
+    runner_max_contracts: int = 5           # Up to 5 cheap contracts
+
+    # Strike selection: OTM for leverage
+    runner_otm_pct: float = 0.005           # 0.5% OTM ($3.40 SPY / $34 SPX)
+    runner_target_delta_min: float = 0.15   # Cheap but not lottery
+    runner_target_delta_max: float = 0.35   # Upper bound
+
+    # Entry gates (stricter than scalp)
+    runner_min_confirmations: int = 3       # Same signal quality as scalp
+    runner_window_start: int = 270          # Power hour only: 2:00 PM ET
+    runner_window_end: int = 330            # Until 3:00 PM ET
+    runner_min_atr_mult: float = 1.3        # ATR must be >1.3× day median (momentum day)
+    runner_require_winning_scalp: bool = False  # If True, need a winning scalp first
+
+    # Exits: let winners run
+    runner_stop_atr_mult: float = 5.0       # Wide stop: 5×ATR (give it room)
+    runner_trail_activation_atr: float = 3.0  # Start trailing at 3×ATR favorable
+    runner_trail_distance_atr: float = 2.0  # Trail 2×ATR from best
+    runner_max_hold_minutes: int = 120      # Up to 2 hours (rest of power hour + close)
+    runner_eod_exit_minutes: int = 5        # Close 5 min before close (ride to end)
+
 
 @dataclass
 class RegimeParams:

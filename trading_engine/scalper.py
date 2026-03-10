@@ -698,6 +698,96 @@ class ScalpExitEngine:
 
 
 # ─────────────────────────────────────────────────────────────────
+# Runner Exit Engine — Let Winners Ride
+# ─────────────────────────────────────────────────────────────────
+
+class RunnerExitEngine:
+    """
+    Exit engine for OTM "runner" positions — fundamentally different
+    from scalp exits.
+
+    Philosophy:
+      • Scalp exits: tight stops, quick targets, time discipline
+      • Runner exits: wide stops, NO targets, let winners run
+
+    The runner is a cheap OTM option ($0.50-$2.00) bought in power hour.
+    If SPX makes a big directional move, this 90x's. If not, we lose
+    the premium — which is small by design.
+
+    Exit hierarchy:
+      1. Wide stop: 5×ATR adverse (give it room to breathe)
+      2. Trailing stop: activate at 3×ATR favorable, trail 2×ATR
+         (captures big moves while letting them develop)
+      3. NO time stop (this is the key difference — runners need time)
+      4. Max hold: 120 min (practical limit)
+      5. EOD: close 5 min before market close (ride to the end)
+    """
+
+    def __init__(self, config: ScalpConfig):
+        self.cfg = config
+
+    def check_exit(
+        self,
+        pos,  # SimScalpPosition or ScalpPosition
+        bar_high: float,
+        bar_low: float,
+        bar_close: float,
+        current_time: datetime,
+        minutes_to_close: float,
+    ) -> Optional[tuple]:
+        """Check runner exit conditions. Returns (reason, price) or None."""
+        entry = pos.entry_underlying
+        stop = pos.stop_price
+        atr = pos.atr_at_entry
+
+        # ── Update best favorable underlying ─────────────────────
+        if pos.direction == "CALL":
+            pos.best_favorable_underlying = max(pos.best_favorable_underlying, bar_high)
+        else:
+            pos.best_favorable_underlying = min(pos.best_favorable_underlying, bar_low)
+
+        # ── 1. Wide Stop ─────────────────────────────────────────
+        if pos.direction == "CALL":
+            stop_hit = bar_low <= stop
+        else:
+            stop_hit = bar_high >= stop
+
+        if stop_hit:
+            return ("RUNNER_STOP", stop)
+
+        # ── 2. Trailing Stop (wider than scalp) ──────────────────
+        trail_activation = atr * self.cfg.runner_trail_activation_atr
+        trail_dist = atr * self.cfg.runner_trail_distance_atr
+
+        if pos.direction == "CALL":
+            favorable_move = pos.best_favorable_underlying - entry
+            if favorable_move >= trail_activation:
+                trail_level = pos.best_favorable_underlying - trail_dist
+                if bar_low <= trail_level:
+                    return ("RUNNER_TRAIL", trail_level)
+        else:
+            favorable_move = entry - pos.best_favorable_underlying
+            if favorable_move >= trail_activation:
+                trail_level = pos.best_favorable_underlying + trail_dist
+                if bar_high >= trail_level:
+                    return ("RUNNER_TRAIL", trail_level)
+
+        # ── 3. Max Hold ──────────────────────────────────────────
+        hold_seconds = (current_time - pos.entry_time).total_seconds()
+        hold_minutes = hold_seconds / 60
+
+        if hold_minutes >= self.cfg.runner_max_hold_minutes:
+            return ("RUNNER_MAX_HOLD", bar_close)
+
+        # ── 4. EOD Close (ride nearly to the bell) ───────────────
+        if minutes_to_close <= self.cfg.runner_eod_exit_minutes:
+            return ("RUNNER_EOD", bar_close)
+
+        # NO time stop — runners need time to develop
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────
 # Scalp Scanner — Live Trading Orchestrator
 # ─────────────────────────────────────────────────────────────────
 

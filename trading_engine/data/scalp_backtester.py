@@ -41,7 +41,7 @@ from ..config import EngineConfig, ScalpConfig, get_ticker_profile, TickerProfil
 from ..black_scholes import (
     bs_call_price, bs_put_price, bs_delta, bs_gamma, bs_theta, bs_vega,
 )
-from ..scalper import SignalEngine, ScalpExitEngine, ScalpSignal
+from ..scalper import SignalEngine, ScalpExitEngine, RunnerExitEngine, ScalpSignal
 from ..formatters import header, sub_header, kv, pnl, bar, C
 
 
@@ -60,6 +60,7 @@ class SimScalpPosition:
     expiry_date: date = field(default_factory=date.today)
     confirmations: List[str] = field(default_factory=list)
     confidence: float = 0.0
+    tier: str = "scalp"       # "scalp" or "runner"
 
     # Entry
     entry_time: datetime = field(default_factory=datetime.now)
@@ -147,6 +148,16 @@ class ScalpBacktestResults:
 
     # Confirmation breakdown
     confirmation_stats: Dict[str, Dict] = field(default_factory=dict)
+
+    # Runner tier stats
+    runner_trades: int = 0
+    runner_wins: int = 0
+    runner_pnl: float = 0.0
+    runner_biggest_win: float = 0.0
+    runner_avg_hold: float = 0.0
+    scalp_trades: int = 0
+    scalp_wins: int = 0
+    scalp_pnl: float = 0.0
 
     # Daily detail
     daily_results: List[ScalpBacktestDay] = field(default_factory=list)
@@ -262,6 +273,7 @@ class ScalpBacktester:
         # Will be created per-run with correct bar_minutes
         self._signal_engine = None
         self._exit_engine = ScalpExitEngine(self.scalp_cfg)
+        self._runner_exit_engine = RunnerExitEngine(self.scalp_cfg)
 
         # Slippage model — ATM options have tighter spreads than OTM
         # SPX 0DTE ATM: massive liquidity, ~$0.50 wide on $20 = 1.25% each way
@@ -380,16 +392,27 @@ class ScalpBacktester:
                  ticker: str, profile: TickerProfile,
                  premium_scale: float, balance: float,
                  bar_minutes: int, verbose: bool) -> ScalpBacktestDay:
-        """Simulate one trading day with the gamma scalp strategy."""
+        """Simulate one trading day with dual-tier gamma scalp strategy.
+
+        Tier A (SCALP): ATM options, tight exits, quick scalps.
+        Tier B (RUNNER): OTM options, wide exits, let winners ride.
+        Both can be open simultaneously.
+        """
         day_result = ScalpBacktestDay(date=day_date)
         day_result._trades = []
 
-        # State for this day
-        open_position: Optional[SimScalpPosition] = None
+        # ── Scalp tier state ─────────────────────────────────────
+        open_scalp: Optional[SimScalpPosition] = None
         cooldown_remaining = 0
         stopped_directions: set = set()
-        trades_today = 0
+        scalp_trades_today = 0
         daily_pnl = 0.0
+
+        # ── Runner tier state ────────────────────────────────────
+        open_runner: Optional[SimScalpPosition] = None
+        runner_trades_today = 0
+        scalp_won_today = False          # Track if a scalp hit profit target
+        scalp_win_direction = None       # Direction of winning scalp
 
         # Estimate IV from first 30 bars
         day_iv = self.pricer.estimate_iv(day_bars.head(30),
@@ -408,6 +431,10 @@ class ScalpBacktester:
         rolling_atr = tr.rolling(atr_period, min_periods=3).mean()
 
         day_result.atr_at_open = rolling_atr.iloc[min(30, len(rolling_atr) - 1)]
+
+        # Compute daily median ATR for runner gate
+        valid_atrs = rolling_atr.dropna()
+        daily_median_atr = valid_atrs.median() if len(valid_atrs) > 10 else 0.30
 
         # Minimum bars before scanning
         min_scan_bar = max(30, 30 // bar_minutes)
@@ -447,10 +474,10 @@ class ScalpBacktester:
 
             current_atr = rolling_atr.iloc[i] if not pd.isna(rolling_atr.iloc[i]) else 0.30
 
-            # ── 1. Update open position ──────────────────────────
-            if open_position and open_position.is_open:
+            # ── 1a. Update open SCALP position ───────────────────
+            if open_scalp and open_scalp.is_open:
                 result = self._exit_engine.check_exit(
-                    open_position, bar_high, bar_low, current_price,
+                    open_scalp, bar_high, bar_low, current_price,
                     current_time, minutes_to_close,
                 )
 
@@ -459,72 +486,120 @@ class ScalpBacktester:
 
                     # Price the option at exit using BS
                     exit_premium = self.pricer.price_option(
-                        exit_underlying, open_position.strike, T,
-                        open_position.entry_iv, open_position.right,
+                        exit_underlying, open_scalp.strike, T,
+                        open_scalp.entry_iv, open_scalp.right,
                     )
                     exit_premium = max(0, exit_premium * (1 - self.exit_slippage_pct))
 
-                    commission = self.commission_per_contract * open_position.num_contracts * 2
-                    pnl_amount = (exit_premium - open_position.entry_premium) * \
-                                 open_position.num_contracts * 100 - commission
+                    commission = self.commission_per_contract * open_scalp.num_contracts * 2
+                    pnl_amount = (exit_premium - open_scalp.entry_premium) * \
+                                 open_scalp.num_contracts * 100 - commission
 
                     # Fill exit fields
-                    open_position.is_open = False
-                    open_position.exit_time = current_time
-                    open_position.exit_underlying = exit_underlying
-                    open_position.exit_premium = exit_premium
-                    open_position.exit_reason = exit_reason
-                    open_position.total_pnl = round(pnl_amount, 2)
-                    open_position.hold_minutes = round(
-                        (current_time - open_position.entry_time).total_seconds() / 60, 1
+                    open_scalp.is_open = False
+                    open_scalp.exit_time = current_time
+                    open_scalp.exit_underlying = exit_underlying
+                    open_scalp.exit_premium = exit_premium
+                    open_scalp.exit_reason = exit_reason
+                    open_scalp.total_pnl = round(pnl_amount, 2)
+                    open_scalp.hold_minutes = round(
+                        (current_time - open_scalp.entry_time).total_seconds() / 60, 1
                     )
 
                     daily_pnl += pnl_amount
 
                     if exit_reason == "STOP_LOSS":
-                        stopped_directions.add(open_position.direction)
+                        stopped_directions.add(open_scalp.direction)
+
+                    # Track winning scalps for runner piggyback
+                    if exit_reason == "PROFIT_TARGET" and pnl_amount > 5:
+                        scalp_won_today = True
+                        scalp_win_direction = open_scalp.direction
 
                     cooldown_remaining = self.scalp_cfg.cooldown_bars
                     day_result.trades_closed += 1
-                    if pnl_amount > 5:  # $5 threshold for "win" (above commission)
+                    if pnl_amount > 5:
                         day_result.winning_trades += 1
                     elif pnl_amount < -5:
                         day_result.losing_trades += 1
 
                     if verbose:
-                        mult = exit_premium / open_position.entry_premium \
-                            if open_position.entry_premium > 0 else 0
-                        print(f"    [{day_date}] EXIT  {open_position.direction} "
-                              f"{open_position.strike}{open_position.right} "
+                        mult = exit_premium / open_scalp.entry_premium \
+                            if open_scalp.entry_premium > 0 else 0
+                        print(f"    [{day_date}] SCALP EXIT  {open_scalp.direction} "
+                              f"{open_scalp.strike}{open_scalp.right} "
                               f"→ {exit_reason} | {mult:.2f}x | "
                               f"P&L: ${pnl_amount:+.2f} | "
-                              f"hold: {open_position.hold_minutes:.0f}m | "
-                              f"Δunderlying: ${exit_underlying - open_position.entry_underlying:+.2f}")
+                              f"hold: {open_scalp.hold_minutes:.0f}m | "
+                              f"Δunderlying: ${exit_underlying - open_scalp.entry_underlying:+.2f}")
 
-                    open_position = None
+                    open_scalp = None
+
+            # ── 1b. Update open RUNNER position ──────────────────
+            if open_runner and open_runner.is_open:
+                result = self._runner_exit_engine.check_exit(
+                    open_runner, bar_high, bar_low, current_price,
+                    current_time, minutes_to_close,
+                )
+
+                if result:
+                    exit_reason, exit_underlying = result
+
+                    exit_premium = self.pricer.price_option(
+                        exit_underlying, open_runner.strike, T,
+                        open_runner.entry_iv, open_runner.right,
+                    )
+                    exit_premium = max(0, exit_premium * (1 - self.exit_slippage_pct))
+
+                    # OTM slippage is wider — 5% of mid
+                    otm_slippage = 0.05 if self.spx_mode else 0.08
+                    exit_premium = max(0, exit_premium * (1 - otm_slippage))
+
+                    commission = self.commission_per_contract * open_runner.num_contracts * 2
+                    pnl_amount = (exit_premium - open_runner.entry_premium) * \
+                                 open_runner.num_contracts * 100 - commission
+
+                    open_runner.is_open = False
+                    open_runner.exit_time = current_time
+                    open_runner.exit_underlying = exit_underlying
+                    open_runner.exit_premium = exit_premium
+                    open_runner.exit_reason = exit_reason
+                    open_runner.total_pnl = round(pnl_amount, 2)
+                    open_runner.hold_minutes = round(
+                        (current_time - open_runner.entry_time).total_seconds() / 60, 1
+                    )
+
+                    daily_pnl += pnl_amount
+                    day_result.trades_closed += 1
+                    if pnl_amount > 5:
+                        day_result.winning_trades += 1
+                    elif pnl_amount < -5:
+                        day_result.losing_trades += 1
+
+                    if verbose:
+                        mult = exit_premium / open_runner.entry_premium \
+                            if open_runner.entry_premium > 0 else 0
+                        print(f"    [{day_date}] 🏃 RUNNER EXIT  {open_runner.direction} "
+                              f"{open_runner.strike}{open_runner.right} "
+                              f"→ {exit_reason} | {mult:.2f}x | "
+                              f"P&L: ${pnl_amount:+.2f} | "
+                              f"hold: {open_runner.hold_minutes:.0f}m | "
+                              f"Δunderlying: ${exit_underlying - open_runner.entry_underlying:+.2f}")
+
+                    open_runner = None
 
             # ── 2. Scan for new signals ──────────────────────────
             if cooldown_remaining > 0:
                 cooldown_remaining -= 1
-                continue
 
-            if open_position is not None:
-                continue
-
-            if trades_today >= self.scalp_cfg.max_trades_per_day:
+            # Need at least 30 min to close for new entries
+            if minutes_to_close <= 30:
                 continue
 
             if daily_pnl <= -self.scalp_cfg.daily_loss_limit * self.price_scale:
                 continue
 
-            if minutes_to_close <= 30:
-                continue
-
-            # Check time window
-            if not self._in_time_window(minutes_since_open):
-                continue
-
-            # Evaluate signal engine
+            # Evaluate signal engine (shared between scalp + runner)
             bars_so_far = day_bars.iloc[:i + 1].copy()
             signal = self._signal_engine.evaluate(bars_so_far, current_price, ticker)
 
@@ -532,143 +607,228 @@ class ScalpBacktester:
                 prev_signal_direction = None
                 continue
 
-            # Check direction lock
-            if signal.direction in stopped_directions:
-                continue
-
-            # Signal is valid — check if it's "new" (direction changed)
-            if signal.direction == prev_signal_direction:
-                # Same signal persisting — only allow if we don't have cooldown
-                # (cooldown was already checked above, so this is a fresh scan)
-                pass
-
             prev_signal_direction = signal.direction
-            day_result.signals_found += 1
 
-            # ── 3. Enter position ────────────────────────────────
-            # Compute ATM strike
-            otm_distance = current_price * self.scalp_cfg.max_otm_pct
-            if signal.direction == "CALL":
-                strike = self._round_strike(current_price + otm_distance, profile)
-                right = "C"
-            else:
-                strike = self._round_strike(current_price - otm_distance, profile)
-                right = "P"
-
-            # Price the option
-            option_price = self.pricer.price_option(
-                current_price, strike, T, day_iv, right,
+            # ── 2a. SCALP entry ──────────────────────────────────
+            can_enter_scalp = (
+                open_scalp is None
+                and cooldown_remaining <= 0
+                and scalp_trades_today < self.scalp_cfg.max_trades_per_day
+                and signal.direction not in stopped_directions
+                and self._in_time_window(minutes_since_open)
             )
-            entry_premium = option_price * (1 + self.entry_slippage_pct)
 
-            # Premium filters
-            min_prem = self.scalp_cfg.min_premium * premium_scale
-            max_prem = self.scalp_cfg.max_premium * premium_scale
+            if can_enter_scalp:
+                day_result.signals_found += 1
 
-            if entry_premium < min_prem or entry_premium > max_prem:
+                # Compute ATM strike
+                otm_distance = current_price * self.scalp_cfg.max_otm_pct
+                if signal.direction == "CALL":
+                    strike = self._round_strike(current_price + otm_distance, profile)
+                    right = "C"
+                else:
+                    strike = self._round_strike(current_price - otm_distance, profile)
+                    right = "P"
+
+                # Price the option
+                option_price = self.pricer.price_option(
+                    current_price, strike, T, day_iv, right,
+                )
+                entry_premium = option_price * (1 + self.entry_slippage_pct)
+
+                # Premium filters
+                min_prem = self.scalp_cfg.min_premium * premium_scale
+                max_prem = self.scalp_cfg.max_premium * premium_scale
+
+                if min_prem <= entry_premium <= max_prem:
+                    # Position sizing based on risk
+                    stop_dist = current_atr * self.scalp_cfg.stop_atr_mult
+                    risk_per_contract = 0.50 * stop_dist * 100
+                    if risk_per_contract > 0:
+                        max_risk = self.scalp_cfg.max_risk_per_trade * self.price_scale
+                        budget_pct = 0.30 if self.spx_mode else 0.05
+                        max_budget_contracts = int(balance * budget_pct / (entry_premium * 100)) \
+                            if entry_premium > 0 else 0
+
+                        max_contracts = min(
+                            int(max_risk / risk_per_contract),
+                            self.scalp_cfg.max_contracts,
+                            max(1, max_budget_contracts),
+                        )
+                        if entry_premium * 100 <= balance * 0.50:
+                            num_contracts = max(1, max_contracts) if max_contracts >= 1 else 0
+                            if num_contracts > 0:
+                                # Compute stop and target levels
+                                target_dist = current_atr * self.scalp_cfg.profit_target_atr_mult
+                                if signal.direction == "CALL":
+                                    stop_price = current_price - stop_dist
+                                    target_price = current_price + target_dist
+                                else:
+                                    stop_price = current_price + stop_dist
+                                    target_price = current_price - target_dist
+
+                                pos = SimScalpPosition(
+                                    ticker=ticker, strike=strike, right=right,
+                                    direction=signal.direction, expiry_date=day_date,
+                                    confirmations=signal.confirmations.copy(),
+                                    confidence=signal.confidence, tier="scalp",
+                                    entry_time=current_time, entry_underlying=current_price,
+                                    entry_premium=entry_premium, entry_iv=day_iv,
+                                    num_contracts=num_contracts, atr_at_entry=current_atr,
+                                    stop_price=stop_price, target_price=target_price,
+                                    best_favorable_underlying=current_price,
+                                )
+
+                                open_scalp = pos
+                                scalp_trades_today += 1
+                                day_result.trades_entered += 1
+                                day_result._trades.append(pos)
+
+                                if verbose:
+                                    print(f"    [{day_date}] SCALP ENTER {signal.direction} "
+                                          f"{ticker} {strike}{right} "
+                                          f"@ ${entry_premium:.2f} x{num_contracts} "
+                                          f"({', '.join(signal.confirmations)}) "
+                                          f"ATR=${current_atr:.3f} "
+                                          f"stop=${stop_price:.2f} target=${target_price:.2f}")
+
+            # ── 2b. RUNNER entry ─────────────────────────────────
+            cfg = self.scalp_cfg
+            if not cfg.runner_enabled:
                 continue
 
-            # Position sizing based on risk
-            stop_dist = current_atr * self.scalp_cfg.stop_atr_mult
-            risk_per_contract = 0.50 * stop_dist * 100  # delta ~0.50
-            if risk_per_contract <= 0:
-                continue
-
-            # Scale max risk for SPX (10× notional, 10× risk per contract)
-            max_risk = self.scalp_cfg.max_risk_per_trade * self.price_scale
-
-            # Budget check: SPX 1 contract = ~$2,500, so for small accounts
-            # allow up to 30% per trade (standard for 0DTE scalpers).
-            # SPY: 5% per trade ($250/contract). SPX: 30% per trade ($2,500/contract).
-            budget_pct = 0.30 if self.spx_mode else 0.05
-            max_budget_contracts = int(balance * budget_pct / (entry_premium * 100)) \
-                if entry_premium > 0 else 0
-
-            max_contracts = min(
-                int(max_risk / risk_per_contract),
-                self.scalp_cfg.max_contracts,
-                max(1, max_budget_contracts),  # Always allow at least 1 if affordable
+            in_runner_window = (
+                cfg.runner_window_start <= minutes_since_open <= cfg.runner_window_end
             )
-            # Final check: can we actually afford 1 contract?
-            if entry_premium * 100 > balance * 0.50:
-                continue  # Don't risk more than 50% on a single trade
-            num_contracts = max(1, max_contracts) if max_contracts >= 1 else 0
-            if num_contracts <= 0:
+            can_enter_runner = (
+                open_runner is None
+                and in_runner_window
+                and runner_trades_today < cfg.runner_max_per_day
+                and len(signal.confirmations) >= cfg.runner_min_confirmations
+            )
+
+            if not can_enter_runner:
                 continue
 
-            # Compute stop and target levels
-            target_dist = current_atr * self.scalp_cfg.profit_target_atr_mult
-            if signal.direction == "CALL":
-                stop_price = current_price - stop_dist
-                target_price = current_price + target_dist
-            else:
-                stop_price = current_price + stop_dist
-                target_price = current_price - target_dist
+            # Runner gate: ATR must be elevated (momentum day)
+            atr_ratio = current_atr / daily_median_atr if daily_median_atr > 0 else 0
+            atr_gate_passed = atr_ratio >= cfg.runner_min_atr_mult
 
-            # Create position
-            pos = SimScalpPosition(
-                ticker=ticker,
-                strike=strike,
-                right=right,
-                direction=signal.direction,
-                expiry_date=day_date,
+            # Or: a scalp just won in this direction (piggyback)
+            piggyback = (
+                cfg.runner_require_winning_scalp
+                and scalp_won_today
+                and scalp_win_direction == signal.direction
+            )
+
+            if not atr_gate_passed and not piggyback:
+                if cfg.runner_require_winning_scalp and not piggyback:
+                    continue
+                if not atr_gate_passed:
+                    continue
+
+            # Compute OTM strike
+            otm_distance = current_price * cfg.runner_otm_pct
+            if signal.direction == "CALL":
+                runner_strike = self._round_strike(current_price + otm_distance, profile)
+                runner_right = "C"
+            else:
+                runner_strike = self._round_strike(current_price - otm_distance, profile)
+                runner_right = "P"
+
+            # Price the OTM option
+            runner_option_price = self.pricer.price_option(
+                current_price, runner_strike, T, day_iv, runner_right,
+            )
+            # OTM entry slippage is wider
+            otm_entry_slippage = 0.05 if self.spx_mode else 0.08
+            runner_entry_premium = runner_option_price * (1 + otm_entry_slippage)
+
+            # Premium filters for runner (cheaper options)
+            runner_min_prem = cfg.runner_min_premium * premium_scale
+            runner_max_prem = cfg.runner_max_premium * premium_scale
+
+            if runner_entry_premium < runner_min_prem or runner_entry_premium > runner_max_prem:
+                continue
+
+            # Runner position sizing: budget-based (small, disposable)
+            runner_budget = balance * cfg.runner_budget_pct
+            runner_num = min(
+                int(runner_budget / (runner_entry_premium * 100)) if runner_entry_premium > 0 else 0,
+                cfg.runner_max_contracts,
+            )
+            runner_num = max(1, runner_num) if runner_num >= 1 else 0
+
+            if runner_num <= 0 or runner_entry_premium * 100 * runner_num > balance * 0.10:
+                continue
+
+            # Runner stop: wide (5×ATR)
+            runner_stop_dist = current_atr * cfg.runner_stop_atr_mult
+            if signal.direction == "CALL":
+                runner_stop_price = current_price - runner_stop_dist
+                runner_target_price = 0  # No fixed target — let it run
+            else:
+                runner_stop_price = current_price + runner_stop_dist
+                runner_target_price = 0
+
+            runner_pos = SimScalpPosition(
+                ticker=ticker, strike=runner_strike, right=runner_right,
+                direction=signal.direction, expiry_date=day_date,
                 confirmations=signal.confirmations.copy(),
-                confidence=signal.confidence,
-                entry_time=current_time,
-                entry_underlying=current_price,
-                entry_premium=entry_premium,
-                entry_iv=day_iv,
-                num_contracts=num_contracts,
-                atr_at_entry=current_atr,
-                stop_price=stop_price,
-                target_price=target_price,
+                confidence=signal.confidence, tier="runner",
+                entry_time=current_time, entry_underlying=current_price,
+                entry_premium=runner_entry_premium, entry_iv=day_iv,
+                num_contracts=runner_num, atr_at_entry=current_atr,
+                stop_price=runner_stop_price, target_price=runner_target_price,
                 best_favorable_underlying=current_price,
             )
 
-            open_position = pos
-            trades_today += 1
+            open_runner = runner_pos
+            runner_trades_today += 1
             day_result.trades_entered += 1
-            day_result._trades.append(pos)
+            day_result._trades.append(runner_pos)
 
             if verbose:
-                print(f"    [{day_date}] ENTER {signal.direction} "
-                      f"{ticker} {strike}{right} "
-                      f"@ ${entry_premium:.2f} x{num_contracts} "
+                print(f"    [{day_date}] 🏃 RUNNER ENTER {signal.direction} "
+                      f"{ticker} {runner_strike}{runner_right} "
+                      f"@ ${runner_entry_premium:.2f} x{runner_num} "
                       f"({', '.join(signal.confirmations)}) "
-                      f"ATR=${current_atr:.3f} "
-                      f"stop=${stop_price:.2f} target=${target_price:.2f}")
+                      f"ATR=${current_atr:.3f} (ATR ratio: {atr_ratio:.2f}x) "
+                      f"stop=${runner_stop_price:.2f}")
 
-        # ── End of day: force-close open positions ───────────────
-        if open_position and open_position.is_open:
-            last_price = float(day_bars["close"].iloc[-1])
-            last_time = day_bars.index[-1]
-            T_final = self.pricer.time_to_expiry(last_time)
+        # ── End of day: force-close ALL open positions ───────────
+        for pos_to_close in [open_scalp, open_runner]:
+            if pos_to_close and pos_to_close.is_open:
+                last_price = float(day_bars["close"].iloc[-1])
+                last_time = day_bars.index[-1]
+                T_final = self.pricer.time_to_expiry(last_time)
 
-            exit_premium = self.pricer.price_option(
-                last_price, open_position.strike,
-                max(T_final, 1e-8), open_position.entry_iv, open_position.right,
-            )
-            exit_premium = max(0, exit_premium * (1 - self.exit_slippage_pct))
-            commission = self.commission_per_contract * open_position.num_contracts * 2
-            pnl_amount = (exit_premium - open_position.entry_premium) * \
-                         open_position.num_contracts * 100 - commission
+                exit_premium = self.pricer.price_option(
+                    last_price, pos_to_close.strike,
+                    max(T_final, 1e-8), pos_to_close.entry_iv, pos_to_close.right,
+                )
+                slippage = self.exit_slippage_pct if pos_to_close.tier == "scalp" else 0.05
+                exit_premium = max(0, exit_premium * (1 - slippage))
+                commission = self.commission_per_contract * pos_to_close.num_contracts * 2
+                pnl_amount = (exit_premium - pos_to_close.entry_premium) * \
+                             pos_to_close.num_contracts * 100 - commission
 
-            open_position.is_open = False
-            open_position.exit_time = last_time
-            open_position.exit_underlying = last_price
-            open_position.exit_premium = exit_premium
-            open_position.exit_reason = "EOD_CLOSE"
-            open_position.total_pnl = round(pnl_amount, 2)
-            open_position.hold_minutes = round(
-                (last_time - open_position.entry_time).total_seconds() / 60, 1
-            )
+                pos_to_close.is_open = False
+                pos_to_close.exit_time = last_time
+                pos_to_close.exit_underlying = last_price
+                pos_to_close.exit_premium = exit_premium
+                pos_to_close.exit_reason = "EOD_CLOSE"
+                pos_to_close.total_pnl = round(pnl_amount, 2)
+                pos_to_close.hold_minutes = round(
+                    (last_time - pos_to_close.entry_time).total_seconds() / 60, 1
+                )
 
-            daily_pnl += pnl_amount
-            day_result.trades_closed += 1
-            if pnl_amount > 5:
-                day_result.winning_trades += 1
-            elif pnl_amount < -5:
-                day_result.losing_trades += 1
+                daily_pnl += pnl_amount
+                day_result.trades_closed += 1
+                if pnl_amount > 5:
+                    day_result.winning_trades += 1
+                elif pnl_amount < -5:
+                    day_result.losing_trades += 1
 
         day_result.day_pnl = round(daily_pnl, 2)
         return day_result
@@ -788,6 +948,24 @@ class ScalpBacktester:
 
         results.confirmation_stats = conf_stats
 
+        # ── Tier-specific stats ──────────────────────────────────
+        scalp_trades = [t for t in trades if t.tier == "scalp"]
+        runner_trades = [t for t in trades if t.tier == "runner"]
+
+        results.scalp_trades = len(scalp_trades)
+        results.scalp_wins = sum(1 for t in scalp_trades if t.total_pnl > 5)
+        results.scalp_pnl = round(sum(t.total_pnl for t in scalp_trades), 2)
+
+        results.runner_trades = len(runner_trades)
+        results.runner_wins = sum(1 for t in runner_trades if t.total_pnl > 5)
+        results.runner_pnl = round(sum(t.total_pnl for t in runner_trades), 2)
+        if runner_trades:
+            results.runner_biggest_win = round(
+                max(t.total_pnl for t in runner_trades), 2
+            )
+            runner_holds = [t.hold_minutes for t in runner_trades if t.hold_minutes > 0]
+            results.runner_avg_hold = round(np.mean(runner_holds), 1) if runner_holds else 0
+
     # ─────────────────────────────────────────────────────────────
     # Reporting
     # ─────────────────────────────────────────────────────────────
@@ -806,12 +984,18 @@ class ScalpBacktester:
 
         # Strategy parameters
         cfg = self.scalp_cfg
-        print(f"\n  {C.DIM}Strategy: ATM scalp | "
+        print(f"\n  {C.DIM}Strategy: ATM scalp + OTM runner | "
               f"stop={cfg.stop_atr_mult}×ATR | "
               f"target={cfg.profit_target_atr_mult}×ATR | "
               f"min_conf={cfg.min_confirmations} | "
               f"time_stop={cfg.time_stop_minutes}m | "
               f"max_hold={cfg.max_hold_minutes}m{C.RESET}")
+        if cfg.runner_enabled:
+            print(f"  {C.DIM}Runner: OTM {cfg.runner_otm_pct*100:.1f}% | "
+                  f"stop={cfg.runner_stop_atr_mult}×ATR | "
+                  f"trail={cfg.runner_trail_activation_atr}×ATR→{cfg.runner_trail_distance_atr}×ATR | "
+                  f"ATR gate={cfg.runner_min_atr_mult}x median | "
+                  f"window={cfg.runner_window_start}-{cfg.runner_window_end}m{C.RESET}")
 
         # P&L Summary
         print(f"\n  {'─' * 55}")
@@ -843,6 +1027,37 @@ class ScalpBacktester:
         print(f"  Avg Return:      {results.avg_return_pct:+.1f}% per trade")
         print(f"  Avg Hold:        {results.avg_hold_minutes:.1f} min")
         print(f"  Avg Δ Underlying: ${results.avg_underlying_move_at_exit:+.3f}")
+
+        # ── Dual-Tier Breakdown ──────────────────────────────────
+        if results.runner_trades > 0 or results.scalp_trades > 0:
+            print(f"\n  {'─' * 55}")
+            print(f"  {C.BOLD}DUAL-TIER BREAKDOWN{C.RESET}")
+            print(f"  {'─' * 55}")
+            print(f"  {'Tier':<12} {'Trades':>6} {'Wins':>5} {'WR':>6} {'P&L':>12} {'Biggest':>10}")
+            print(f"  {'─' * 55}")
+
+            if results.scalp_trades > 0:
+                s_wr = results.scalp_wins / results.scalp_trades * 100
+                sc = C.GREEN if results.scalp_pnl >= 0 else C.RED
+                # Find biggest scalp win
+                scalp_biggest = max(
+                    (t.total_pnl for t in results.trades if t.tier == "scalp"),
+                    default=0
+                )
+                print(f"  {'⚡ Scalp':<12} {results.scalp_trades:>6} "
+                      f"{results.scalp_wins:>5} {s_wr:>5.1f}% "
+                      f"{sc}${results.scalp_pnl:>+11,.2f}{C.RESET} "
+                      f"${scalp_biggest:>+9,.2f}")
+
+            if results.runner_trades > 0:
+                r_wr = results.runner_wins / results.runner_trades * 100
+                rc = C.GREEN if results.runner_pnl >= 0 else C.RED
+                print(f"  {'🏃 Runner':<12} {results.runner_trades:>6} "
+                      f"{results.runner_wins:>5} {r_wr:>5.1f}% "
+                      f"{rc}${results.runner_pnl:>+11,.2f}{C.RESET} "
+                      f"${results.runner_biggest_win:>+9,.2f}")
+
+                print(f"\n  Runner avg hold: {results.runner_avg_hold:.1f} min")
 
         # Exit Reason Breakdown
         if results.exit_stats:
@@ -942,6 +1157,11 @@ class ScalpBacktester:
                 "starting_balance": results.starting_balance,
                 "ending_balance": results.ending_balance,
                 "max_drawdown_pct": round(results.max_drawdown_pct * 100, 1),
+                "scalp_trades": results.scalp_trades,
+                "scalp_pnl": results.scalp_pnl,
+                "runner_trades": results.runner_trades,
+                "runner_pnl": results.runner_pnl,
+                "runner_biggest_win": results.runner_biggest_win,
             },
             "exit_stats": results.exit_stats,
             "confirmation_stats": results.confirmation_stats,
@@ -949,6 +1169,7 @@ class ScalpBacktester:
             "trades": [
                 {
                     "date": str(t.expiry_date),
+                    "tier": t.tier,
                     "direction": t.direction,
                     "confirmations": t.confirmations,
                     "strike": t.strike,

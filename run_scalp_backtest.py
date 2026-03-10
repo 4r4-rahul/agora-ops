@@ -202,6 +202,12 @@ def main():
                         help="Max hold time in minutes (default: 45)")
     parser.add_argument("--midday", action="store_true",
                         help="Enable midday trading window (10:30-2:00)")
+    parser.add_argument("--no-runner", action="store_true",
+                        help="Disable runner tier (scalp-only mode)")
+    parser.add_argument("--runner-otm", type=float, default=None,
+                        help="Runner OTM distance %% (default: 0.5%%)")
+    parser.add_argument("--runner-atr-gate", type=float, default=None,
+                        help="Runner ATR gate multiplier (default: 1.3x median)")
 
     # Modes
     parser.add_argument("--verbose", "-v", action="store_true",
@@ -237,6 +243,12 @@ def main():
         config.scalp.max_hold_minutes = args.max_hold
     if args.midday:
         config.scalp.enable_midday = True
+    if args.no_runner:
+        config.scalp.runner_enabled = False
+    if args.runner_otm is not None:
+        config.scalp.runner_otm_pct = args.runner_otm / 100.0
+    if args.runner_atr_gate is not None:
+        config.scalp.runner_min_atr_mult = args.runner_atr_gate
 
     # Print config
     cfg = config.scalp
@@ -252,6 +264,15 @@ def main():
           f"{cfg.window_2_start}-{cfg.window_2_end}m (midday: {mid_str})")
     print(f"    Max trades:    {cfg.max_trades_per_day}/day")
     print(f"    Re-entry lock: {'YES' if cfg.no_reentry_same_direction else 'NO'}")
+    runner_str = "ON" if cfg.runner_enabled else "OFF"
+    print(f"    Runner tier:   {runner_str}")
+    if cfg.runner_enabled:
+        print(f"      OTM:         {cfg.runner_otm_pct*100:.1f}%")
+        print(f"      ATR gate:    {cfg.runner_min_atr_mult}× daily median")
+        print(f"      Stop:        {cfg.runner_stop_atr_mult}×ATR")
+        print(f"      Trail:       {cfg.runner_trail_activation_atr}×ATR → {cfg.runner_trail_distance_atr}×ATR")
+        print(f"      Window:      {cfg.runner_window_start}-{cfg.runner_window_end}m (power hour)")
+        print(f"      Max/day:     {cfg.runner_max_per_day}")
 
     run_single(config, args.ticker, args.interval, args.verbose, args.save,
                spx_mode=args.spx)
