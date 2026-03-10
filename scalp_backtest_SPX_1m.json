@@ -1,0 +1,1291 @@
+{
+  "strategy": "gamma_scalp",
+  "spx_mode": true,
+  "price_scale": 10.0,
+  "period": "2025-09-02 to 2026-03-06",
+  "ticker": "SPX",
+  "interval": "1m",
+  "config": {
+    "stop_atr_mult": 3.0,
+    "profit_target_atr_mult": 3.5,
+    "trailing_activation_atr": 3.5,
+    "trailing_distance_atr": 1.5,
+    "time_stop_minutes": 30,
+    "max_hold_minutes": 60,
+    "min_confirmations": 3,
+    "windows": "20-60, 270-360"
+  },
+  "results": {
+    "total_trades": 33,
+    "win_rate": 45.5,
+    "total_pnl": 3612.71,
+    "profit_factor": 1.3,
+    "avg_return_pct": 6.8,
+    "avg_hold_minutes": 20.4,
+    "starting_balance": 10000.0,
+    "ending_balance": 13612.71,
+    "max_drawdown_pct": 25.8
+  },
+  "exit_stats": {
+    "STOP_LOSS": {
+      "count": 10,
+      "wins": 0,
+      "losses": 10,
+      "pnl": -8917.91,
+      "avg_hold_min": 13.7,
+      "win_rate": 0.0
+    },
+    "PROFIT_TARGET": {
+      "count": 16,
+      "wins": 15,
+      "losses": 1,
+      "pnl": 15384.8,
+      "avg_hold_min": 19.1,
+      "win_rate": 93.8
+    },
+    "TIME_STOP": {
+      "count": 7,
+      "wins": 0,
+      "losses": 7,
+      "pnl": -2854.18,
+      "avg_hold_min": 32.7,
+      "win_rate": 0.0
+    }
+  },
+  "confirmation_stats": {
+    "EMA+ORB+VOLUME+VWAP": {
+      "count": 5,
+      "wins": 1,
+      "pnl": -1702.15,
+      "win_rate": 20.0
+    },
+    "EMA+VOLUME+VWAP": {
+      "count": 28,
+      "wins": 14,
+      "pnl": 5314.86,
+      "win_rate": 50.0
+    }
+  },
+  "equity_curve": [
+    {
+      "date": "2025-09-02",
+      "balance": 10000.0
+    },
+    {
+      "date": "2025-09-02",
+      "balance": 10000.0
+    },
+    {
+      "date": "2025-09-03",
+      "balance": 10000.0
+    },
+    {
+      "date": "2025-09-04",
+      "balance": 9567.15
+    },
+    {
+      "date": "2025-09-05",
+      "balance": 9567.15
+    },
+    {
+      "date": "2025-09-08",
+      "balance": 9857.89
+    },
+    {
+      "date": "2025-09-09",
+      "balance": 9857.89
+    },
+    {
+      "date": "2025-09-10",
+      "balance": 9857.89
+    },
+    {
+      "date": "2025-09-11",
+      "balance": 9857.89
+    },
+    {
+      "date": "2025-09-12",
+      "balance": 9857.89
+    },
+    {
+      "date": "2025-09-15",
+      "balance": 9857.89
+    },
+    {
+      "date": "2025-09-16",
+      "balance": 9857.89
+    },
+    {
+      "date": "2025-09-17",
+      "balance": 10960.81
+    },
+    {
+      "date": "2025-09-18",
+      "balance": 10960.81
+    },
+    {
+      "date": "2025-09-19",
+      "balance": 10960.81
+    },
+    {
+      "date": "2025-09-22",
+      "balance": 10960.81
+    },
+    {
+      "date": "2025-09-23",
+      "balance": 10960.81
+    },
+    {
+      "date": "2025-09-24",
+      "balance": 10960.81
+    },
+    {
+      "date": "2025-09-25",
+      "balance": 9945.26
+    },
+    {
+      "date": "2025-09-26",
+      "balance": 9945.26
+    },
+    {
+      "date": "2025-09-29",
+      "balance": 9945.26
+    },
+    {
+      "date": "2025-09-30",
+      "balance": 9945.26
+    },
+    {
+      "date": "2025-10-01",
+      "balance": 9945.26
+    },
+    {
+      "date": "2025-10-02",
+      "balance": 9945.26
+    },
+    {
+      "date": "2025-10-03",
+      "balance": 9116.35
+    },
+    {
+      "date": "2025-10-06",
+      "balance": 9116.35
+    },
+    {
+      "date": "2025-10-07",
+      "balance": 9116.35
+    },
+    {
+      "date": "2025-10-08",
+      "balance": 9116.35
+    },
+    {
+      "date": "2025-10-09",
+      "balance": 9116.35
+    },
+    {
+      "date": "2025-10-10",
+      "balance": 9116.35
+    },
+    {
+      "date": "2025-10-13",
+      "balance": 9116.35
+    },
+    {
+      "date": "2025-10-14",
+      "balance": 9116.35
+    },
+    {
+      "date": "2025-10-15",
+      "balance": 8130.86
+    },
+    {
+      "date": "2025-10-16",
+      "balance": 8130.86
+    },
+    {
+      "date": "2025-10-17",
+      "balance": 8130.86
+    },
+    {
+      "date": "2025-10-20",
+      "balance": 8130.86
+    },
+    {
+      "date": "2025-10-21",
+      "balance": 8130.86
+    },
+    {
+      "date": "2025-10-22",
+      "balance": 8962.29
+    },
+    {
+      "date": "2025-10-23",
+      "balance": 8962.29
+    },
+    {
+      "date": "2025-10-24",
+      "balance": 8962.29
+    },
+    {
+      "date": "2025-10-27",
+      "balance": 8962.29
+    },
+    {
+      "date": "2025-10-28",
+      "balance": 8962.29
+    },
+    {
+      "date": "2025-10-29",
+      "balance": 8962.29
+    },
+    {
+      "date": "2025-10-30",
+      "balance": 9519.03
+    },
+    {
+      "date": "2025-10-31",
+      "balance": 9519.03
+    },
+    {
+      "date": "2025-11-03",
+      "balance": 9519.03
+    },
+    {
+      "date": "2025-11-04",
+      "balance": 9519.03
+    },
+    {
+      "date": "2025-11-05",
+      "balance": 9519.03
+    },
+    {
+      "date": "2025-11-06",
+      "balance": 8826.87
+    },
+    {
+      "date": "2025-11-07",
+      "balance": 8826.87
+    },
+    {
+      "date": "2025-11-10",
+      "balance": 8826.87
+    },
+    {
+      "date": "2025-11-11",
+      "balance": 8826.87
+    },
+    {
+      "date": "2025-11-12",
+      "balance": 8826.87
+    },
+    {
+      "date": "2025-11-13",
+      "balance": 8826.87
+    },
+    {
+      "date": "2025-11-14",
+      "balance": 8826.87
+    },
+    {
+      "date": "2025-11-17",
+      "balance": 8826.87
+    },
+    {
+      "date": "2025-11-18",
+      "balance": 8826.87
+    },
+    {
+      "date": "2025-11-19",
+      "balance": 10353.98
+    },
+    {
+      "date": "2025-11-20",
+      "balance": 10353.98
+    },
+    {
+      "date": "2025-11-21",
+      "balance": 10353.98
+    },
+    {
+      "date": "2025-11-24",
+      "balance": 10353.98
+    },
+    {
+      "date": "2025-11-25",
+      "balance": 10353.98
+    },
+    {
+      "date": "2025-11-26",
+      "balance": 10353.98
+    },
+    {
+      "date": "2025-11-28",
+      "balance": 10353.98
+    },
+    {
+      "date": "2025-12-01",
+      "balance": 11296.94
+    },
+    {
+      "date": "2025-12-02",
+      "balance": 9885.92
+    },
+    {
+      "date": "2025-12-03",
+      "balance": 9885.92
+    },
+    {
+      "date": "2025-12-04",
+      "balance": 9885.92
+    },
+    {
+      "date": "2025-12-05",
+      "balance": 9885.92
+    },
+    {
+      "date": "2025-12-08",
+      "balance": 9885.92
+    },
+    {
+      "date": "2025-12-09",
+      "balance": 9885.92
+    },
+    {
+      "date": "2025-12-10",
+      "balance": 11989.13
+    },
+    {
+      "date": "2025-12-11",
+      "balance": 11989.13
+    },
+    {
+      "date": "2025-12-12",
+      "balance": 11989.13
+    },
+    {
+      "date": "2025-12-15",
+      "balance": 11989.13
+    },
+    {
+      "date": "2025-12-16",
+      "balance": 11989.13
+    },
+    {
+      "date": "2025-12-17",
+      "balance": 11989.13
+    },
+    {
+      "date": "2025-12-18",
+      "balance": 13272.65
+    },
+    {
+      "date": "2025-12-19",
+      "balance": 13272.65
+    },
+    {
+      "date": "2025-12-22",
+      "balance": 13272.65
+    },
+    {
+      "date": "2025-12-23",
+      "balance": 12304.1
+    },
+    {
+      "date": "2025-12-24",
+      "balance": 12304.1
+    },
+    {
+      "date": "2025-12-26",
+      "balance": 12304.1
+    },
+    {
+      "date": "2025-12-29",
+      "balance": 12304.1
+    },
+    {
+      "date": "2025-12-30",
+      "balance": 12050.05
+    },
+    {
+      "date": "2025-12-31",
+      "balance": 12050.05
+    },
+    {
+      "date": "2026-01-02",
+      "balance": 12621.95
+    },
+    {
+      "date": "2026-01-05",
+      "balance": 12004.98
+    },
+    {
+      "date": "2026-01-06",
+      "balance": 12004.98
+    },
+    {
+      "date": "2026-01-07",
+      "balance": 11518.35
+    },
+    {
+      "date": "2026-01-08",
+      "balance": 11518.35
+    },
+    {
+      "date": "2026-01-09",
+      "balance": 10762.8
+    },
+    {
+      "date": "2026-01-12",
+      "balance": 10762.8
+    },
+    {
+      "date": "2026-01-13",
+      "balance": 10762.8
+    },
+    {
+      "date": "2026-01-14",
+      "balance": 11993.47
+    },
+    {
+      "date": "2026-01-15",
+      "balance": 11993.47
+    },
+    {
+      "date": "2026-01-16",
+      "balance": 11993.47
+    },
+    {
+      "date": "2026-01-20",
+      "balance": 11993.47
+    },
+    {
+      "date": "2026-01-21",
+      "balance": 14420.44
+    },
+    {
+      "date": "2026-01-22",
+      "balance": 14627.71
+    },
+    {
+      "date": "2026-01-23",
+      "balance": 14113.8
+    },
+    {
+      "date": "2026-01-26",
+      "balance": 14113.8
+    },
+    {
+      "date": "2026-01-27",
+      "balance": 14113.8
+    },
+    {
+      "date": "2026-01-28",
+      "balance": 14113.8
+    },
+    {
+      "date": "2026-01-29",
+      "balance": 14113.8
+    },
+    {
+      "date": "2026-01-30",
+      "balance": 13731.39
+    },
+    {
+      "date": "2026-02-02",
+      "balance": 13731.39
+    },
+    {
+      "date": "2026-02-03",
+      "balance": 13731.39
+    },
+    {
+      "date": "2026-02-04",
+      "balance": 13731.39
+    },
+    {
+      "date": "2026-02-05",
+      "balance": 13731.39
+    },
+    {
+      "date": "2026-02-06",
+      "balance": 13731.39
+    },
+    {
+      "date": "2026-02-09",
+      "balance": 13731.39
+    },
+    {
+      "date": "2026-02-10",
+      "balance": 13731.39
+    },
+    {
+      "date": "2026-02-11",
+      "balance": 13731.39
+    },
+    {
+      "date": "2026-02-12",
+      "balance": 13731.39
+    },
+    {
+      "date": "2026-02-13",
+      "balance": 13619.77
+    },
+    {
+      "date": "2026-02-17",
+      "balance": 13619.77
+    },
+    {
+      "date": "2026-02-18",
+      "balance": 13619.77
+    },
+    {
+      "date": "2026-02-19",
+      "balance": 13619.77
+    },
+    {
+      "date": "2026-02-20",
+      "balance": 13619.77
+    },
+    {
+      "date": "2026-02-23",
+      "balance": 13619.77
+    },
+    {
+      "date": "2026-02-24",
+      "balance": 13619.77
+    },
+    {
+      "date": "2026-02-25",
+      "balance": 13619.77
+    },
+    {
+      "date": "2026-02-26",
+      "balance": 13619.77
+    },
+    {
+      "date": "2026-02-27",
+      "balance": 12857.53
+    },
+    {
+      "date": "2026-03-02",
+      "balance": 12857.53
+    },
+    {
+      "date": "2026-03-03",
+      "balance": 12857.53
+    },
+    {
+      "date": "2026-03-04",
+      "balance": 13944.25
+    },
+    {
+      "date": "2026-03-05",
+      "balance": 13944.25
+    },
+    {
+      "date": "2026-03-06",
+      "balance": 13612.71
+    }
+  ],
+  "trades": [
+    {
+      "date": "2025-09-04",
+      "direction": "PUT",
+      "confirmations": [
+        "VWAP",
+        "EMA",
+        "VOLUME",
+        "ORB"
+      ],
+      "strike": 6435.0,
+      "right": "P",
+      "entry_underlying": 6440.4,
+      "exit_underlying": 6449.04,
+      "underlying_move": -8.64,
+      "entry_premium": 15.4762,
+      "exit_premium": 11.1606,
+      "exit_reason": "STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -432.85,
+      "hold_minutes": 20.0,
+      "atr": 2.88
+    },
+    {
+      "date": "2025-09-08",
+      "direction": "CALL",
+      "confirmations": [
+        "VWAP",
+        "EMA",
+        "VOLUME"
+      ],
+      "strike": 6495.0,
+      "right": "C",
+      "entry_underlying": 6487.7,
+      "exit_underlying": 6496.17,
+      "underlying_move": 8.47,
+      "entry_premium": 14.5498,
+      "exit_premium": 17.4703,
+      "exit_reason": "PROFIT_TARGET",
+      "num_contracts": 1,
+      "pnl": 290.74,
+      "hold_minutes": 27.0,
+      "atr": 2.42
+    },
+    {
+      "date": "2025-09-17",
+      "direction": "CALL",
+      "confirmations": [
+        "VWAP",
+        "EMA",
+        "VOLUME"
+      ],
+      "strike": 6610.0,
+      "right": "C",
+      "entry_underlying": 6602.9,
+      "exit_underlying": 6611.63,
+      "underlying_move": 8.727,
+      "entry_premium": 6.3081,
+      "exit_premium": 9.9975,
+      "exit_reason": "PROFIT_TARGET",
+      "num_contracts": 3,
+      "pnl": 1102.92,
+      "hold_minutes": 3.0,
+      "atr": 2.4933
+    },
+    {
+      "date": "2025-09-25",
+      "direction": "CALL",
+      "confirmations": [
+        "VWAP",
+        "EMA",
+        "VOLUME"
+      ],
+      "strike": 6585.0,
+      "right": "C",
+      "entry_underlying": 6580.5,
+      "exit_underlying": 6572.8,
+      "underlying_move": -7.7,
+      "entry_premium": 8.3739,
+      "exit_premium": 5.0017,
+      "exit_reason": "STOP_LOSS",
+      "num_contracts": 3,
+      "pnl": -1015.55,
+      "hold_minutes": 5.0,
+      "atr": 2.5667
+    },
+    {
+      "date": "2025-10-03",
+      "direction": "PUT",
+      "confirmations": [
+        "VWAP",
+        "EMA",
+        "VOLUME"
+      ],
+      "strike": 6695.0,
+      "right": "P",
+      "entry_underlying": 6701.5,
+      "exit_underlying": 6710.54,
+      "underlying_move": -9.04,
+      "entry_premium": 12.7485,
+      "exit_premium": 8.6169,
+      "exit_reason": "STOP_LOSS",
+      "num_contracts": 2,
+      "pnl": -828.91,
+      "hold_minutes": 21.0,
+      "atr": 3.0133
+    },
+    {
+      "date": "2025-10-15",
+      "direction": "CALL",
+      "confirmations": [
+        "VWAP",
+        "EMA",
+        "VOLUME"
+      ],
+      "strike": 6665.0,
+      "right": "C",
+      "entry_underlying": 6657.7,
+      "exit_underlying": 6651.26,
+      "underlying_move": -6.44,
+      "entry_premium": 8.399,
+      "exit_premium": 5.127,
+      "exit_reason": "STOP_LOSS",
+      "num_contracts": 3,
+      "pnl": -985.49,
+      "hold_minutes": 9.0,
+      "atr": 2.1467
+    },
+    {
+      "date": "2025-10-22",
+      "direction": "PUT",
+      "confirmations": [
+        "VWAP",
+        "EMA",
+        "VOLUME"
+      ],
+      "strike": 6700.0,
+      "right": "P",
+      "entry_underlying": 6708.5,
+      "exit_underlying": 6698.02,
+      "underlying_move": 10.477,
+      "entry_premium": 11.6669,
+      "exit_premium": 15.837,
+      "exit_reason": "PROFIT_TARGET",
+      "num_contracts": 2,
+      "pnl": 831.43,
+      "hold_minutes": 12.0,
+      "atr": 2.9933
+    },
+    {
+      "date": "2025-10-30",
+      "direction": "PUT",
+      "confirmations": [
+        "VWAP",
+        "EMA",
+        "VOLUME"
+      ],
+      "strike": 6830.0,
+      "right": "P",
+      "entry_underlying": 6834.9,
+      "exit_underlying": 6827.2,
+      "underlying_move": 7.7,
+      "entry_premium": 12.505,
+      "exit_premium": 15.3017,
+      "exit_reason": "PROFIT_TARGET",
+      "num_contracts": 2,
+      "pnl": 556.74,
+      "hold_minutes": 9.0,
+      "atr": 2.2
+    },
+    {
+      "date": "2025-11-06",
+      "direction": "CALL",
+      "confirmations": [
+        "VWAP",
+        "EMA",
+        "VOLUME"
+      ],
+      "strike": 6735.0,
+      "right": "C",
+      "entry_underlying": 6727.6,
+      "exit_underlying": 6725.8,
+      "underlying_move": -1.8,
+      "entry_premium": 11.4986,
+      "exit_premium": 8.0509,
+      "exit_reason": "TIME_STOP",
+      "num_contracts": 2,
+      "pnl": -692.16,
+      "hold_minutes": 36.0,
+      "atr": 3.8133
+    },
+    {
+      "date": "2025-11-19",
+      "direction": "CALL",
+      "confirmations": [
+        "VWAP",
+        "EMA",
+        "VOLUME"
+      ],
+      "strike": 6640.0,
+      "right": "C",
+      "entry_underlying": 6631.9,
+      "exit_underlying": 6643.96,
+      "underlying_move": 12.063,
+      "entry_premium": 3.3541,
+      "exit_premium": 8.4575,
+      "exit_reason": "PROFIT_TARGET",
+      "num_contracts": 3,
+      "pnl": 1527.11,
+      "hold_minutes": 3.0,
+      "atr": 3.4467
+    },
+    {
+      "date": "2025-12-01",
+      "direction": "PUT",
+      "confirmations": [
+        "VWAP",
+        "EMA",
+        "VOLUME"
+      ],
+      "strike": 6800.0,
+      "right": "P",
+      "entry_underlying": 6807.5,
+      "exit_underlying": 6798.96,
+      "underlying_move": 8.54,
+      "entry_premium": 7.0272,
+      "exit_premium": 10.1834,
+      "exit_reason": "PROFIT_TARGET",
+      "num_contracts": 3,
+      "pnl": 942.96,
+      "hold_minutes": 8.0,
+      "atr": 2.44
+    },
+    {
+      "date": "2025-12-02",
+      "direction": "PUT",
+      "confirmations": [
+        "VWAP",
+        "EMA",
+        "VOLUME",
+        "ORB"
+      ],
+      "strike": 6810.0,
+      "right": "P",
+      "entry_underlying": 6815.8,
+      "exit_underlying": 6826.0,
+      "underlying_move": -10.2,
+      "entry_premium": 12.7484,
+      "exit_premium": 8.3314,
+      "exit_reason": "STOP_LOSS",
+      "num_contracts": 2,
+      "pnl": -886.0,
+      "hold_minutes": 13.0,
+      "atr": 3.4
+    },
+    {
+      "date": "2025-12-02",
+      "direction": "CALL",
+      "confirmations": [
+        "VWAP",
+        "EMA",
+        "VOLUME"
+      ],
+      "strike": 6830.0,
+      "right": "C",
+      "entry_underlying": 6824.9,
+      "exit_underlying": 6825.2,
+      "underlying_move": 0.3,
+      "entry_premium": 5.0992,
+      "exit_premium": 3.3622,
+      "exit_reason": "TIME_STOP",
+      "num_contracts": 3,
+      "pnl": -525.02,
+      "hold_minutes": 30.0,
+      "atr": 2.5733
+    },
+    {
+      "date": "2025-12-10",
+      "direction": "CALL",
+      "confirmations": [
+        "VWAP",
+        "EMA",
+        "VOLUME"
+      ],
+      "strike": 6845.0,
+      "right": "C",
+      "entry_underlying": 6840.5,
+      "exit_underlying": 6854.43,
+      "underlying_move": 13.93,
+      "entry_premium": 8.434,
+      "exit_premium": 15.4577,
+      "exit_reason": "PROFIT_TARGET",
+      "num_contracts": 3,
+      "pnl": 2103.21,
+      "hold_minutes": 6.0,
+      "atr": 3.98
+    },
+    {
+      "date": "2025-12-18",
+      "direction": "CALL",
+      "confirmations": [
+        "VWAP",
+        "EMA",
+        "VOLUME",
+        "ORB"
+      ],
+      "strike": 6795.0,
+      "right": "C",
+      "entry_underlying": 6789.9,
+      "exit_underlying": 6806.23,
+      "underlying_move": 16.333,
+      "entry_premium": 22.2749,
+      "exit_premium": 28.5509,
+      "exit_reason": "PROFIT_TARGET",
+      "num_contracts": 1,
+      "pnl": 626.3,
+      "hold_minutes": 45.0,
+      "atr": 4.6667
+    },
+    {
+      "date": "2025-12-18",
+      "direction": "PUT",
+      "confirmations": [
+        "VWAP",
+        "EMA",
+        "VOLUME"
+      ],
+      "strike": 6770.0,
+      "right": "P",
+      "entry_underlying": 6774.5,
+      "exit_underlying": 6763.04,
+      "underlying_move": 11.457,
+      "entry_premium": 12.0797,
+      "exit_premium": 15.3788,
+      "exit_reason": "PROFIT_TARGET",
+      "num_contracts": 2,
+      "pnl": 657.22,
+      "hold_minutes": 35.0,
+      "atr": 3.2733
+    },
+    {
+      "date": "2025-12-23",
+      "direction": "PUT",
+      "confirmations": [
+        "VWAP",
+        "EMA",
+        "VOLUME"
+      ],
+      "strike": 6840.0,
+      "right": "P",
+      "entry_underlying": 6845.8,
+      "exit_underlying": 6856.12,
+      "underlying_move": -10.32,
+      "entry_premium": 13.3891,
+      "exit_premium": 8.5594,
+      "exit_reason": "STOP_LOSS",
+      "num_contracts": 2,
+      "pnl": -968.55,
+      "hold_minutes": 29.0,
+      "atr": 3.44
+    },
+    {
+      "date": "2025-12-30",
+      "direction": "PUT",
+      "confirmations": [
+        "VWAP",
+        "EMA",
+        "VOLUME",
+        "ORB"
+      ],
+      "strike": 6865.0,
+      "right": "P",
+      "entry_underlying": 6870.3,
+      "exit_underlying": 6870.6,
+      "underlying_move": -0.3,
+      "entry_premium": 13.4485,
+      "exit_premium": 12.1912,
+      "exit_reason": "TIME_STOP",
+      "num_contracts": 2,
+      "pnl": -254.05,
+      "hold_minutes": 36.0,
+      "atr": 2.1733
+    },
+    {
+      "date": "2026-01-02",
+      "direction": "PUT",
+      "confirmations": [
+        "VWAP",
+        "EMA",
+        "VOLUME"
+      ],
+      "strike": 6840.0,
+      "right": "P",
+      "entry_underlying": 6845.5,
+      "exit_underlying": 6832.25,
+      "underlying_move": 13.253,
+      "entry_premium": 22.3531,
+      "exit_premium": 28.0851,
+      "exit_reason": "PROFIT_TARGET",
+      "num_contracts": 1,
+      "pnl": 571.9,
+      "hold_minutes": 7.0,
+      "atr": 3.7867
+    },
+    {
+      "date": "2026-01-05",
+      "direction": "PUT",
+      "confirmations": [
+        "VWAP",
+        "EMA",
+        "VOLUME"
+      ],
+      "strike": 6870.0,
+      "right": "P",
+      "entry_underlying": 6874.4,
+      "exit_underlying": 6879.1,
+      "underlying_move": -4.7,
+      "entry_premium": 5.8518,
+      "exit_premium": 3.8083,
+      "exit_reason": "STOP_LOSS",
+      "num_contracts": 3,
+      "pnl": -616.97,
+      "hold_minutes": 5.0,
+      "atr": 1.5667
+    },
+    {
+      "date": "2026-01-07",
+      "direction": "PUT",
+      "confirmations": [
+        "VWAP",
+        "EMA",
+        "VOLUME"
+      ],
+      "strike": 6910.0,
+      "right": "P",
+      "entry_underlying": 6918.8,
+      "exit_underlying": 6918.0,
+      "underlying_move": 0.8,
+      "entry_premium": 12.302,
+      "exit_premium": 11.5176,
+      "exit_reason": "TIME_STOP",
+      "num_contracts": 2,
+      "pnl": -159.49,
+      "hold_minutes": 37.0,
+      "atr": 2.92
+    },
+    {
+      "date": "2026-01-07",
+      "direction": "PUT",
+      "confirmations": [
+        "VWAP",
+        "EMA",
+        "VOLUME"
+      ],
+      "strike": 6915.0,
+      "right": "P",
+      "entry_underlying": 6919.6,
+      "exit_underlying": 6918.7,
+      "underlying_move": 0.9,
+      "entry_premium": 7.0553,
+      "exit_premium": 5.9778,
+      "exit_reason": "TIME_STOP",
+      "num_contracts": 3,
+      "pnl": -327.14,
+      "hold_minutes": 30.0,
+      "atr": 1.92
+    },
+    {
+      "date": "2026-01-09",
+      "direction": "PUT",
+      "confirmations": [
+        "VWAP",
+        "EMA",
+        "VOLUME",
+        "ORB"
+      ],
+      "strike": 6895.0,
+      "right": "P",
+      "entry_underlying": 6903.6,
+      "exit_underlying": 6920.96,
+      "underlying_move": -17.36,
+      "entry_premium": 20.1803,
+      "exit_premium": 12.6379,
+      "exit_reason": "STOP_LOSS",
+      "num_contracts": 1,
+      "pnl": -755.55,
+      "hold_minutes": 17.0,
+      "atr": 5.7867
+    },
+    {
+      "date": "2026-01-14",
+      "direction": "CALL",
+      "confirmations": [
+        "VWAP",
+        "EMA",
+        "VOLUME"
+      ],
+      "strike": 6895.0,
+      "right": "C",
+      "entry_underlying": 6890.3,
+      "exit_underlying": 6903.88,
+      "underlying_move": 13.58,
+      "entry_premium": 7.47,
+      "exit_premium": 11.5852,
+      "exit_reason": "PROFIT_TARGET",
+      "num_contracts": 3,
+      "pnl": 1230.67,
+      "hold_minutes": 31.0,
+      "atr": 3.88
+    },
+    {
+      "date": "2026-01-21",
+      "direction": "CALL",
+      "confirmations": [
+        "VWAP",
+        "EMA",
+        "VOLUME"
+      ],
+      "strike": 6845.0,
+      "right": "C",
+      "entry_underlying": 6839.9,
+      "exit_underlying": 6862.7,
+      "underlying_move": 22.797,
+      "entry_premium": 11.1417,
+      "exit_premium": 23.2895,
+      "exit_reason": "PROFIT_TARGET",
+      "num_contracts": 2,
+      "pnl": 2426.97,
+      "hold_minutes": 9.0,
+      "atr": 6.5133
+    },
+    {
+      "date": "2026-01-22",
+      "direction": "PUT",
+      "confirmations": [
+        "VWAP",
+        "EMA",
+        "VOLUME"
+      ],
+      "strike": 6885.0,
+      "right": "P",
+      "entry_underlying": 6890.6,
+      "exit_underlying": 6883.25,
+      "underlying_move": 7.35,
+      "entry_premium": 6.4696,
+      "exit_premium": 7.1735,
+      "exit_reason": "PROFIT_TARGET",
+      "num_contracts": 3,
+      "pnl": 207.27,
+      "hold_minutes": 31.0,
+      "atr": 2.1
+    },
+    {
+      "date": "2026-01-23",
+      "direction": "CALL",
+      "confirmations": [
+        "VWAP",
+        "EMA",
+        "VOLUME"
+      ],
+      "strike": 6905.0,
+      "right": "C",
+      "entry_underlying": 6895.9,
+      "exit_underlying": 6894.9,
+      "underlying_move": -1.0,
+      "entry_premium": 5.7172,
+      "exit_premium": 4.0172,
+      "exit_reason": "TIME_STOP",
+      "num_contracts": 3,
+      "pnl": -513.91,
+      "hold_minutes": 30.0,
+      "atr": 2.04
+    },
+    {
+      "date": "2026-01-30",
+      "direction": "CALL",
+      "confirmations": [
+        "VWAP",
+        "EMA",
+        "VOLUME"
+      ],
+      "strike": 6925.0,
+      "right": "C",
+      "entry_underlying": 6916.4,
+      "exit_underlying": 6916.1,
+      "underlying_move": -0.3,
+      "entry_premium": 8.4197,
+      "exit_premium": 6.5206,
+      "exit_reason": "TIME_STOP",
+      "num_contracts": 2,
+      "pnl": -382.41,
+      "hold_minutes": 30.0,
+      "atr": 5.2733
+    },
+    {
+      "date": "2026-02-13",
+      "direction": "PUT",
+      "confirmations": [
+        "VWAP",
+        "EMA",
+        "VOLUME"
+      ],
+      "strike": 6815.0,
+      "right": "P",
+      "entry_underlying": 6824.0,
+      "exit_underlying": 6810.77,
+      "underlying_move": 13.23,
+      "entry_premium": 23.5164,
+      "exit_premium": 22.4132,
+      "exit_reason": "PROFIT_TARGET",
+      "num_contracts": 1,
+      "pnl": -111.62,
+      "hold_minutes": 27.0,
+      "atr": 3.78
+    },
+    {
+      "date": "2026-02-27",
+      "direction": "CALL",
+      "confirmations": [
+        "VWAP",
+        "EMA",
+        "VOLUME"
+      ],
+      "strike": 6855.0,
+      "right": "C",
+      "entry_underlying": 6846.6,
+      "exit_underlying": 6839.3,
+      "underlying_move": -7.3,
+      "entry_premium": 16.7639,
+      "exit_premium": 12.9658,
+      "exit_reason": "STOP_LOSS",
+      "num_contracts": 2,
+      "pnl": -762.24,
+      "hold_minutes": 5.0,
+      "atr": 2.4333
+    },
+    {
+      "date": "2026-03-04",
+      "direction": "CALL",
+      "confirmations": [
+        "VWAP",
+        "EMA",
+        "VOLUME"
+      ],
+      "strike": 6830.0,
+      "right": "C",
+      "entry_underlying": 6823.2,
+      "exit_underlying": 6846.51,
+      "underlying_move": 23.31,
+      "entry_premium": 26.4436,
+      "exit_premium": 37.3238,
+      "exit_reason": "PROFIT_TARGET",
+      "num_contracts": 1,
+      "pnl": 1086.72,
+      "hold_minutes": 19.0,
+      "atr": 6.66
+    },
+    {
+      "date": "2026-03-06",
+      "direction": "CALL",
+      "confirmations": [
+        "VWAP",
+        "EMA",
+        "VOLUME"
+      ],
+      "strike": 6730.0,
+      "right": "C",
+      "entry_underlying": 6723.9,
+      "exit_underlying": 6752.44,
+      "underlying_move": 28.537,
+      "entry_premium": 28.3127,
+      "exit_premium": 41.6683,
+      "exit_reason": "PROFIT_TARGET",
+      "num_contracts": 1,
+      "pnl": 1334.26,
+      "hold_minutes": 34.0,
+      "atr": 8.1533
+    },
+    {
+      "date": "2026-03-06",
+      "direction": "PUT",
+      "confirmations": [
+        "VWAP",
+        "EMA",
+        "VOLUME"
+      ],
+      "strike": 6715.0,
+      "right": "P",
+      "entry_underlying": 6720.0,
+      "exit_underlying": 6733.28,
+      "underlying_move": -13.28,
+      "entry_premium": 6.9624,
+      "exit_premium": 1.4228,
+      "exit_reason": "STOP_LOSS",
+      "num_contracts": 3,
+      "pnl": -1665.8,
+      "hold_minutes": 13.0,
+      "atr": 4.4267
+    }
+  ]
+}
