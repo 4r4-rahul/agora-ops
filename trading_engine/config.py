@@ -206,6 +206,15 @@ class ScalpConfig:
     # ── Volatility Filter ────────────────────────────────────────
     min_atr: float = 0.15               # Min ATR to trade (skip dead-flat periods)
 
+    # ── IV Discount Filter (buy cheap options) ───────────────────
+    # Core edge: only buy when realized vol > implied vol.
+    # When RV > IV, options are underpriced → the underlying is moving
+    # faster than the market has priced in → you get a vol discount.
+    iv_discount_enabled: bool = True     # Enable RV > IV filter
+    rv_lookback_bars: int = 20           # Bars to measure recent realized vol
+    rv_iv_min_ratio: float = 0.8         # Min RV/IV ratio (0.8 = RV must be 80%+ of IV)
+    rv_iv_premium_ratio: float = 1.2     # Bonus: if RV/IV > 1.2, option is deeply cheap
+
     # ── Chop Filter (anti-signal gate) ──────────────────────────
     chop_ema_pct: float = 0.0003        # EMA9/21 within 0.03% = chop
     chop_vwap_pct: float = 0.0003       # Price within 0.03% of VWAP = chop

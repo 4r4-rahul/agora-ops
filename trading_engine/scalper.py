@@ -596,6 +596,25 @@ class SignalEngine:
         orb_low = low[:orb_end].min()
         max_orb_bars = max(30, 60 // self.bar_minutes)
 
+        # ── Rolling Realized Volatility (for IV discount filter) ──
+        # Annualized realized vol from recent returns.
+        # Compare against day_iv to detect "cheap" options.
+        rv_lookback = self.cfg.rv_lookback_bars if hasattr(self.cfg, 'rv_lookback_bars') else 20
+        bars_per_day = 390 // (self.bar_minutes or 1)
+        rv_annual_factor = math.sqrt(bars_per_day * 252)
+        rv_arr = np.full(n, np.nan)
+        log_returns = np.empty(n)
+        log_returns[0] = 0.0
+        for j in range(1, n):
+            if close[j - 1] > 0 and close[j] > 0:
+                log_returns[j] = math.log(close[j] / close[j - 1])
+            else:
+                log_returns[j] = 0.0
+        for j in range(rv_lookback, n):
+            window_rets = log_returns[j - rv_lookback + 1:j + 1]
+            bar_std = np.std(window_rets, ddof=1)
+            rv_arr[j] = bar_std * rv_annual_factor
+
         return {
             'close': close,
             'high': high,
@@ -610,6 +629,7 @@ class SignalEngine:
             'orb_high': orb_high,
             'orb_low': orb_low,
             'max_orb_bars': max_orb_bars,
+            'rv': rv_arr,
             'n': n,
         }
 

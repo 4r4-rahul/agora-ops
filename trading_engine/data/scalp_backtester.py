@@ -106,6 +106,7 @@ class ScalpBacktestDay:
     winning_trades: int = 0
     losing_trades: int = 0
     atr_at_open: float = 0.0
+    iv_blocked: int = 0             # Signals blocked by IV discount filter
     # Internal
     _trades: List[SimScalpPosition] = field(default_factory=list)
 
@@ -169,6 +170,10 @@ class ScalpBacktestResults:
     mr_pnl: float = 0.0
     mr_biggest_win: float = 0.0
     mr_avg_hold: float = 0.0
+
+    # IV discount filter stats
+    iv_blocked_signals: int = 0         # Signals blocked by RV < IV
+    iv_passed_signals: int = 0          # Signals that passed IV filter
 
     # Daily detail
     daily_results: List[ScalpBacktestDay] = field(default_factory=list)
@@ -365,6 +370,8 @@ class ScalpBacktester:
 
             results.daily_results.append(day_result)
             results.trades.extend(day_result._trades)
+            results.iv_blocked_signals += day_result.iv_blocked
+            results.iv_passed_signals += day_result.trades_entered
 
             balance += day_result.day_pnl
             peak = max(peak, balance)
@@ -435,6 +442,9 @@ class ScalpBacktester:
         runner_trades_today = 0
         scalp_won_today = False          # Track if a scalp hit profit target
         scalp_win_direction = None       # Direction of winning scalp
+
+        # ── IV discount tracking ─────────────────────────────────
+        iv_blocked_count = 0             # Signals blocked by IV discount filter
 
         # Estimate IV from first 30 bars
         day_iv = self.pricer.estimate_iv(day_bars.head(30),
@@ -714,7 +724,20 @@ class ScalpBacktester:
                     and signal.direction not in stopped_directions
                 )
 
-                if can_enter_scalp:
+                # ── IV Discount Gate ─────────────────────────────
+                # Only buy when realized vol >= threshold × implied vol.
+                # When RV > IV, options are underpriced (cheap).
+                iv_discount_ok = True
+                current_rv = precomp['rv'][i] if 'rv' in precomp else float('nan')
+                if can_enter_scalp and self.scalp_cfg.iv_discount_enabled:
+                    import math as _math
+                    if not _math.isnan(current_rv) and day_iv > 0:
+                        rv_iv_ratio = current_rv / day_iv
+                        if rv_iv_ratio < self.scalp_cfg.rv_iv_min_ratio:
+                            iv_discount_ok = False
+                            iv_blocked_count += 1
+
+                if can_enter_scalp and iv_discount_ok:
                     day_result.signals_found += 1
 
                     # Compute ATM strike
@@ -1013,6 +1036,7 @@ class ScalpBacktester:
                     day_result.losing_trades += 1
 
         day_result.day_pnl = round(daily_pnl, 2)
+        day_result.iv_blocked = iv_blocked_count
         return day_result
 
     def _in_time_window(self, minutes_since_open: float) -> bool:
