@@ -727,13 +727,21 @@ class ScalpBacktester:
                 # ── IV Discount Gate ─────────────────────────────
                 # Only buy when realized vol >= threshold × implied vol.
                 # When RV > IV, options are underpriced (cheap).
+                # Morning (W1) uses a STRICTER threshold — AM has 33% WR
+                # vs 78% in PM, so require deeper IV discount to enter AM.
                 iv_discount_ok = True
                 current_rv = precomp['rv'][i] if 'rv' in precomp else float('nan')
                 if can_enter_scalp and self.scalp_cfg.iv_discount_enabled:
                     import math as _math
                     if not _math.isnan(current_rv) and day_iv > 0:
                         rv_iv_ratio = current_rv / day_iv
-                        if rv_iv_ratio < self.scalp_cfg.rv_iv_min_ratio:
+                        # Use stricter threshold for morning window
+                        w1_end = self.scalp_cfg.window_1_end
+                        if minutes_since_open <= w1_end:
+                            required_ratio = self.scalp_cfg.rv_iv_min_ratio_w1
+                        else:
+                            required_ratio = self.scalp_cfg.rv_iv_min_ratio
+                        if rv_iv_ratio < required_ratio:
                             iv_discount_ok = False
                             iv_blocked_count += 1
 

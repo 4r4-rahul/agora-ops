@@ -213,6 +213,7 @@ class ScalpConfig:
     iv_discount_enabled: bool = True     # Enable RV > IV filter
     rv_lookback_bars: int = 20           # Bars to measure recent realized vol
     rv_iv_min_ratio: float = 0.8         # Min RV/IV ratio (0.8 = RV must be 80%+ of IV)
+    rv_iv_min_ratio_w1: float = 0.9      # Stricter IV gate for morning window (AM loses $)
     rv_iv_premium_ratio: float = 1.2     # Bonus: if RV/IV > 1.2, option is deeply cheap
 
     # ── Chop Filter (anti-signal gate) ──────────────────────────
