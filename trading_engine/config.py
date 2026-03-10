@@ -182,11 +182,14 @@ class ScalpConfig:
     eod_exit_minutes: int = 15          # Close before market close
 
     # ── Time Windows (minutes after open) ───────────────────────
+    # Sweep finding: W1:15-50 W2:250-350 → PF=1.58, +$5,776 (33 trades)
+    # vs default W1:20-60 W2:270-360 → PF=1.34, +$4,099 (36 trades)
+    # Keeping defaults conservative; optimize on out-of-sample data.
     window_1_start: int = 20            # 9:50 AM — post-ORB
     window_1_end: int = 60              # 10:30 AM — before dead zone
     window_2_start: int = 270           # 2:00 PM — power hour
     window_2_end: int = 360             # 3:30 PM — before theta cliff
-    enable_midday: bool = False         # Allow 10:30-2:00? (choppy, avoid)
+    enable_midday: bool = False         # PROVEN UNPROFITABLE: WR=34%, PF=0.74
 
     # ── Risk Management ─────────────────────────────────────────
     max_trades_per_day: int = 3         # Quality over quantity
@@ -242,6 +245,90 @@ class ScalpConfig:
     runner_trail_distance_atr: float = 1.5  # Trail 1.5×ATR from best (tight capture)
     runner_max_hold_minutes: int = 120      # Up to 2 hours (rest of power hour + close)
     runner_eod_exit_minutes: int = 5        # Close 5 min before close (ride to end)
+
+
+@dataclass
+class MeanReversionConfig:
+    """
+    Configuration for Mean-Reversion Scalping strategy.
+
+    Complements the momentum/breakout scalp by trading MIDDAY CHOP.
+    When momentum fails (10:30-2:00, choppy, range-bound), this
+    strategy fades extremes: buy oversold, sell overbought.
+
+    Philosophy: During chop, price oscillates around VWAP. When it
+    reaches Bollinger Band extremes with RSI confirmation, it snaps
+    back. We capture that snap-back with tight stops and quick targets.
+
+    Components:
+      1. BB_EXTREME — Price at/beyond Bollinger Band (2σ)
+      2. RSI_EXTREME — RSI overbought (>70) or oversold (<30)
+      3. VWAP_REVERT — Price significantly from VWAP + turning back
+
+    Anti-Trend Gate:
+      If EMAs are strongly trending (spread > 0.1%), skip — don't
+      fade a strong trend, that's the momentum engine's territory.
+
+    STATUS: DISABLED by default.
+    128-config parameter sweep (Sep 2025 – Mar 2026, SPX 0DTE) found
+    ZERO profitable configurations. Best MR PF was 0.75.
+    Root cause: theta decay on long ATM 0DTE options during midday
+    overwhelms the small reversion profits. Even 60% WR configs lose
+    money because avg loss >> avg win (theta + adverse excursion).
+    Architecture preserved for future credit spread / premium selling.
+    """
+    # ── Master Enable ───────────────────────────────────────────
+    enabled: bool = False               # DISABLED: not profitable with long options
+    # ── Bollinger Band Parameters ───────────────────────────────
+    bb_period: int = 20                 # SMA period for middle band
+    bb_std: float = 2.0                 # Standard deviations for upper/lower bands
+
+    # ── RSI Parameters ──────────────────────────────────────────
+    rsi_period: int = 14                # RSI calculation period
+    rsi_overbought: float = 70.0        # RSI above this → PUT signal
+    rsi_oversold: float = 30.0          # RSI below this → CALL signal
+
+    # ── VWAP Reversion ──────────────────────────────────────────
+    vwap_extreme_pct: float = 0.001     # 0.1% from VWAP = extended
+    vwap_turn_bars: int = 2             # Need 2 bars turning back
+
+    # ── Entry Signals ───────────────────────────────────────────
+    min_confirmations: int = 2          # Need 2+ of {BB, RSI, VWAP_REVERT}
+
+    # ── Anti-Trend Gate ─────────────────────────────────────────
+    ema_trend_threshold: float = 0.002  # EMA9/21 spread > 0.2% → strong trend, skip
+
+    # ── ATR-Based Exits ─────────────────────────────────────────
+    atr_period: int = 15                # Same ATR as momentum
+    stop_atr_mult: float = 2.0          # Tighter stop: 2.0×ATR (chop = smaller moves)
+    profit_target_atr_mult: float = 2.0  # Quick target: 2.0×ATR (don't expect big runs)
+    trailing_activation_atr: float = 1.5  # Trail earlier (capture quick reversions)
+    trailing_distance_atr: float = 0.75   # Tight trail (mean-rev moves are fast)
+
+    # ── Time-Based Exits ────────────────────────────────────────
+    time_stop_minutes: int = 15         # Quicker scratch (mean-rev should work fast)
+    time_stop_atr_mult: float = 0.3     # Tighter "no move" threshold
+    max_hold_minutes: int = 30          # Max 30 min (chop doesn't sustain)
+    eod_exit_minutes: int = 15          # Same as momentum
+
+    # ── Time Window (midday only) ───────────────────────────────
+    window_start: int = 60              # 10:30 AM (after morning momentum window)
+    window_end: int = 270               # 2:00 PM (before power hour)
+
+    # ── Risk Management ─────────────────────────────────────────
+    max_trades_per_day: int = 4         # More trades allowed (shorter holds)
+    daily_loss_limit: float = 300.0     # Smaller daily limit (mean-rev is riskier)
+    max_risk_per_trade: float = 150.0   # Smaller per-trade risk
+    cooldown_bars: int = 10             # Shorter cooldown
+
+    # ── Budget ──────────────────────────────────────────────────
+    max_premium: float = 4.00           # Same ATM premiums
+    min_premium: float = 0.30
+    max_contracts: int = 2              # Smaller size (mean-rev has lower WR)
+
+    # ── Volatility Filter ────────────────────────────────────────
+    min_atr: float = 0.10               # Can trade in lower vol (chop has lower ATR)
+    max_atr_enabled: bool = False       # Anti-trend gate handles this better than ATR cap
 
 
 @dataclass
@@ -319,6 +406,7 @@ class EngineConfig:
     adaptive: AdaptiveConfig = field(default_factory=AdaptiveConfig)
     lotto: LottoConfig = field(default_factory=LottoConfig)
     scalp: ScalpConfig = field(default_factory=ScalpConfig)
+    mean_reversion: MeanReversionConfig = field(default_factory=MeanReversionConfig)
     data_dir: str = field(default_factory=lambda: os.path.join(
         os.path.dirname(os.path.dirname(__file__)), "data"
     ))

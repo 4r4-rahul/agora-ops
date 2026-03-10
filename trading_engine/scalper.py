@@ -72,7 +72,7 @@ from typing import List, Optional, Dict, Any
 import numpy as np
 import pandas as pd
 
-from .config import EngineConfig, ScalpConfig, get_ticker_profile, TickerProfile
+from .config import EngineConfig, ScalpConfig, MeanReversionConfig, get_ticker_profile, TickerProfile
 
 logger = logging.getLogger(__name__)
 
@@ -529,6 +529,346 @@ class SignalEngine:
 
         return emas_tangled and price_on_vwap
 
+    # ─── Fast Precomputation for Backtesting ────────────────────
+
+    def precompute_day_indicators(self, day_bars: pd.DataFrame) -> dict:
+        """
+        Pre-compute ALL indicators for a full day at once.
+
+        Returns a dict of numpy arrays / series indexed by bar position.
+        Used by evaluate_fast() to avoid O(n²) recomputation.
+        """
+        close = day_bars["close"].values
+        high = day_bars["high"].values
+        low = day_bars["low"].values
+        volume = day_bars["volume"].values if "volume" in day_bars.columns else np.zeros(len(day_bars))
+        n = len(day_bars)
+
+        # ── VWAP (cumulative) ────────────────────────────────────
+        typical = (high + low + close) / 3.0
+        cum_tp_vol = np.cumsum(typical * volume)
+        cum_vol = np.cumsum(volume)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            vwap = np.where(cum_vol > 0, cum_tp_vol / cum_vol, np.nan)
+
+        # ── EMA 9/21 ────────────────────────────────────────────
+        close_series = day_bars["close"]
+        ema9 = close_series.ewm(span=self.ema_fast, adjust=False).mean().values
+        ema21 = close_series.ewm(span=self.ema_slow, adjust=False).mean().values
+
+        # ── ATR (rolling) ────────────────────────────────────────
+        prev_c = np.empty(n)
+        prev_c[0] = close[0]
+        prev_c[1:] = close[:-1]
+        tr = np.maximum(
+            high - low,
+            np.maximum(np.abs(high - prev_c), np.abs(low - prev_c)),
+        )
+        # Rolling mean ATR
+        atr_arr = np.full(n, np.nan)
+        atr_period = self.atr_period
+        for i in range(min(3, n), n):
+            start = max(0, i - atr_period + 1)
+            atr_arr[i] = tr[start:i+1].mean()
+
+        # ── Volume rolling average ───────────────────────────────
+        # Slow path uses bars_so_far[:i+1] with negative indexing:
+        #   avg_vol = bars.iloc[-(vl+5):-5].mean()  → bars[i+1-vl-5:i+1-5] = bars[i-vl-4:i-4]
+        #   recent_vol = bars.iloc[-vr:].mean()      → bars[i+1-vr:i+1] = bars[i-vr+1:i+1]
+        # We pre-compute matching indices for each bar position.
+        vol_avg = np.full(n, np.nan)
+        vol_recent_arr = np.full(n, np.nan)
+        vl = self.vol_lookback
+        vr = self.vol_recent
+        for i in range(vl + vr + 5, n):
+            # Match: bars_so_far has i+1 bars, avg=iloc[-(vl+5):-5]
+            avg_start = i + 1 - vl - 5   # i-vl-4
+            avg_end = i + 1 - 5          # i-4
+            vol_avg[i] = volume[avg_start:avg_end].mean()
+            # Match: recent=iloc[-vr:]
+            rec_start = i + 1 - vr       # i-vr+1
+            rec_end = i + 1              # i+1 (exclusive)
+            vol_recent_arr[i] = volume[rec_start:rec_end].mean()
+
+        # ── ORB (first 15 min) ───────────────────────────────────
+        orb_end = min(self.orb_bar_count, n)
+        orb_high = high[:orb_end].max()
+        orb_low = low[:orb_end].min()
+        max_orb_bars = max(30, 60 // self.bar_minutes)
+
+        return {
+            'close': close,
+            'high': high,
+            'low': low,
+            'volume': volume,
+            'vwap': vwap,
+            'ema9': ema9,
+            'ema21': ema21,
+            'atr': atr_arr,
+            'vol_avg': vol_avg,
+            'vol_recent': vol_recent_arr,
+            'orb_high': orb_high,
+            'orb_low': orb_low,
+            'max_orb_bars': max_orb_bars,
+            'n': n,
+        }
+
+    def evaluate_fast(
+        self,
+        precomp: dict,
+        idx: int,
+        price: float,
+        ticker: str = "",
+        bars_index=None,
+    ) -> Optional[ScalpSignal]:
+        """
+        Fast signal evaluation using pre-computed indicators.
+
+        Same logic as evaluate() but uses O(1) lookups instead of
+        recomputing from scratch.
+        """
+        n = precomp['n']
+        if idx < max(30, self.ema_slow + 10):
+            return None
+
+        close = precomp['close']
+        high = precomp['high']
+        low = precomp['low']
+        volume = precomp['volume']
+        vwap = precomp['vwap']
+        ema9 = precomp['ema9']
+        ema21 = precomp['ema21']
+        atr_val = precomp['atr'][idx]
+
+        if np.isnan(atr_val) or atr_val <= 0 or atr_val < self.cfg.min_atr:
+            return None
+
+        # ── Anti-Signal Gate: Chop Filter ────────────────────────
+        cur_ema9 = ema9[idx]
+        cur_ema21 = ema21[idx]
+        cur_vwap = vwap[idx]
+
+        ema_gap_pct = abs(cur_ema9 - cur_ema21) / price if price > 0 else 0
+        emas_tangled = ema_gap_pct < self.cfg.chop_ema_pct
+
+        if not np.isnan(cur_vwap) and cur_vwap > 0:
+            vwap_dist_pct = abs(price - cur_vwap) / price if price > 0 else 0
+            price_on_vwap = vwap_dist_pct < self.cfg.chop_vwap_pct
+        else:
+            price_on_vwap = False
+
+        if emas_tangled and price_on_vwap:
+            return None  # Chop gate
+
+        # ── Evaluate Components ──────────────────────────────────
+        bullish: List[str] = []
+        bearish: List[str] = []
+
+        # 1. VWAP
+        v = self._check_vwap_fast(close, vwap, idx, price)
+        if v == "BULL":
+            bullish.append("VWAP")
+        elif v == "BEAR":
+            bearish.append("VWAP")
+
+        # 2. EMA Trend
+        e = self._check_ema_trend_fast(ema9, ema21, idx, price)
+        if e == "BULL":
+            bullish.append("EMA")
+        elif e == "BEAR":
+            bearish.append("EMA")
+
+        # 3. Breakout
+        b = self._check_breakout_fast(close, high, low, idx, price)
+        if b == "BULL":
+            bullish.append("BREAKOUT")
+        elif b == "BEAR":
+            bearish.append("BREAKOUT")
+
+        # 4. Volume
+        vol = self._check_volume_fast(precomp, close, idx)
+        if vol == "BULL":
+            bullish.append("VOLUME")
+        elif vol == "BEAR":
+            bearish.append("VOLUME")
+
+        # 5. ORB Context
+        orb = self._check_orb_fast(precomp, idx, price)
+        if orb == "BULL":
+            bullish.append("ORB")
+        elif orb == "BEAR":
+            bearish.append("ORB")
+
+        # ── Require min_confirmations to agree ───────────────────
+        min_conf = self.cfg.min_confirmations
+
+        ts = bars_index[idx] if bars_index is not None and hasattr(bars_index[idx], 'hour') else datetime.now()
+
+        if len(bullish) >= min_conf:
+            if "VOLUME" not in bullish or "VWAP" not in bullish:
+                return None
+            return ScalpSignal(
+                direction="CALL",
+                confirmations=bullish,
+                confidence=len(bullish) / 5.0,
+                entry_underlying=price,
+                atr=atr_val,
+                timestamp=ts,
+                ticker=ticker,
+            )
+
+        if len(bearish) >= min_conf:
+            if "VOLUME" not in bearish or "VWAP" not in bearish:
+                return None
+            return ScalpSignal(
+                direction="PUT",
+                confirmations=bearish,
+                confidence=len(bearish) / 5.0,
+                entry_underlying=price,
+                atr=atr_val,
+                timestamp=ts,
+                ticker=ticker,
+            )
+
+        return None
+
+    # ─── Fast Component Checks (numpy arrays, O(1) each) ────────
+
+    def _check_vwap_fast(self, close: np.ndarray, vwap: np.ndarray,
+                         idx: int, price: float) -> str:
+        if idx < 10:
+            return "NEUTRAL"
+        cur_vwap = vwap[idx]
+        if np.isnan(cur_vwap) or cur_vwap <= 0:
+            return "NEUTRAL"
+
+        distance_pct = (price - cur_vwap) / cur_vwap
+        if abs(distance_pct) < self.cfg.vwap_distance_min_pct:
+            return "NEUTRAL"
+
+        # Slow path: lookback = min(10, len(bars)-2) where len=i+1
+        lookback = min(10, idx - 1)
+        if lookback < 5:
+            return "NEUTRAL"
+
+        # Count bars on each side of VWAP in prior window
+        # Slow: bars.iloc[-lookback-2:-2] = bars[i+1-lookback-2 : i+1-2] = bars[i-lookback-1 : i-1]
+        below_count = 0
+        above_count = 0
+        for j in range(idx - lookback - 1, idx - 1):
+            if j < 0:
+                continue
+            v = vwap[j]
+            if np.isnan(v):
+                continue
+            if close[j] < v:
+                below_count += 1
+            elif close[j] > v:
+                above_count += 1
+
+        # Last 2 bars confirm
+        last_2_above = all(
+            close[idx - j] > vwap[idx - j]
+            for j in range(0, 2)
+            if not np.isnan(vwap[idx - j])
+        )
+        last_2_below = all(
+            close[idx - j] < vwap[idx - j]
+            for j in range(0, 2)
+            if not np.isnan(vwap[idx - j])
+        )
+
+        if last_2_above and below_count >= 5:
+            return "BULL"
+        if last_2_below and above_count >= 5:
+            return "BEAR"
+        return "NEUTRAL"
+
+    def _check_ema_trend_fast(self, ema9: np.ndarray, ema21: np.ndarray,
+                              idx: int, price: float) -> str:
+        if idx < 4:
+            return "NEUTRAL"
+        cur_ema9 = ema9[idx]
+        cur_ema21 = ema21[idx]
+        prev_ema9 = ema9[idx - 3]
+
+        slope = (cur_ema9 - prev_ema9) / (3 * price) if price > 0 else 0
+        min_slope = self.cfg.ema_slope_min_pct
+
+        if cur_ema9 > cur_ema21 and slope > min_slope and price > cur_ema9:
+            return "BULL"
+        if cur_ema9 < cur_ema21 and slope < -min_slope and price < cur_ema9:
+            return "BEAR"
+        return "NEUTRAL"
+
+    def _check_breakout_fast(self, close: np.ndarray, high: np.ndarray,
+                             low: np.ndarray, idx: int, price: float) -> str:
+        lookback = max(5, 10 // self.bar_minutes)
+        if idx < lookback + 3:
+            return "NEUTRAL"
+
+        # Slow path: consol_bars = bars.iloc[-(lookback+2):-2]
+        # With len=i+1: bars[i+1-lookback-2 : i+1-2] = bars[i-lookback-1 : i-1]
+        consol_start = idx - lookback - 1
+        consol_end = idx - 1  # exclusive end
+        if consol_start < 0:
+            return "NEUTRAL"
+
+        consol_high = high[consol_start:consol_end].max()
+        consol_low = low[consol_start:consol_end].min()
+        consol_range = consol_high - consol_low
+
+        bar_ranges = high[consol_start:consol_end] - low[consol_start:consol_end]
+        avg_bar_range = bar_ranges.mean()
+        if avg_bar_range <= 0:
+            return "NEUTRAL"
+
+        if consol_range > avg_bar_range * 2.5:
+            return "NEUTRAL"
+
+        last_close = close[idx]
+        prev_close = close[idx - 1]
+
+        if last_close > consol_high and prev_close <= consol_high:
+            return "BULL"
+        if last_close < consol_low and prev_close >= consol_low:
+            return "BEAR"
+        return "NEUTRAL"
+
+    def _check_volume_fast(self, precomp: dict, close: np.ndarray,
+                           idx: int) -> str:
+        avg_vol = precomp['vol_avg'][idx]
+        recent_vol = precomp['vol_recent'][idx]
+        if np.isnan(avg_vol) or np.isnan(recent_vol) or avg_vol <= 0:
+            return "NEUTRAL"
+
+        vol_ratio = recent_vol / avg_vol
+        if vol_ratio < self.cfg.volume_surge_mult:
+            return "NEUTRAL"
+
+        # net_move: slow path = close.iloc[-1] - close.iloc[-vol_recent - 1]
+        # With i+1 bars: close[i] - close[i+1-vol_recent-1] = close[i] - close[i-vol_recent]
+        net_move = close[idx] - close[idx - self.vol_recent]
+        if net_move > 0:
+            return "BULL"
+        elif net_move < 0:
+            return "BEAR"
+        return "NEUTRAL"
+
+    def _check_orb_fast(self, precomp: dict, idx: int, price: float) -> str:
+        # Slow: len(bars) < orb_bar_count + 1 → i+1 < orb_bar_count + 1 → i < orb_bar_count
+        if idx < self.orb_bar_count:
+            return "NEUTRAL"
+        # Slow: len(bars) > max_orb_bars → i+1 > max_orb_bars → i >= max_orb_bars
+        if idx >= precomp['max_orb_bars']:
+            return "NEUTRAL"
+
+        if price > precomp['orb_high']:
+            return "BULL"
+        if price < precomp['orb_low']:
+            return "BEAR"
+        return "NEUTRAL"
+
     # ─── Utilities ───────────────────────────────────────────────
 
     @staticmethod
@@ -564,6 +904,349 @@ class SignalEngine:
             np.maximum(abs(high - prev_close), abs(low - prev_close)),
         )
         return tr.tail(period).mean()
+
+
+# ─────────────────────────────────────────────────────────────────
+# Mean-Reversion Signal Engine — Fade Extremes in Chop
+# ─────────────────────────────────────────────────────────────────
+
+class MeanReversionSignalEngine:
+    """
+    Mean-reversion signal generation for midday chop zones.
+
+    The OPPOSITE of the momentum SignalEngine:
+      Momentum: "Price broke out, ride the trend"
+      MeanRev:  "Price hit an extreme, fade it back to VWAP"
+
+    Designed for 10:30 AM - 2:00 PM when SPX oscillates around VWAP
+    in tight ranges. The momentum engine's WR drops to 34% here, but
+    mean-reversion THRIVES in exactly this environment.
+
+    Components:
+      1. BB_EXTREME — Price at/beyond Bollinger Band (2σ)
+      2. RSI_EXTREME — RSI overbought (>70) or oversold (<30)
+      3. VWAP_REVERT — Price extended from VWAP and turning back
+
+    Anti-Trend Gate:
+      If EMA9/21 spread > 0.1%, market is trending — skip.
+      Don't fade a strong trend. That's the momentum engine's job.
+    """
+
+    def __init__(self, config: MeanReversionConfig, bar_minutes: int = 1):
+        self.cfg = config
+        self.bar_minutes = bar_minutes
+        self.atr_period = max(5, config.atr_period // bar_minutes)
+
+    def precompute_day_indicators(self, day_bars: pd.DataFrame) -> dict:
+        """
+        Pre-compute Bollinger Bands, RSI, and VWAP for the full day.
+        Returns arrays indexed by bar position for O(1) evaluate_fast().
+        """
+        close = day_bars["close"].values
+        high = day_bars["high"].values
+        low = day_bars["low"].values
+        open_ = day_bars["open"].values
+        volume = day_bars["volume"].values if "volume" in day_bars.columns else np.zeros(len(day_bars))
+        n = len(day_bars)
+
+        # ── VWAP (cumulative) ────────────────────────────────────
+        typical = (high + low + close) / 3.0
+        cum_tp_vol = np.cumsum(typical * volume)
+        cum_vol = np.cumsum(volume)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            vwap = np.where(cum_vol > 0, cum_tp_vol / cum_vol, np.nan)
+
+        # ── Bollinger Bands (rolling SMA + std) ──────────────────
+        bb_period = self.cfg.bb_period
+        bb_std_mult = self.cfg.bb_std
+        bb_mid = np.full(n, np.nan)
+        bb_upper = np.full(n, np.nan)
+        bb_lower = np.full(n, np.nan)
+        for i in range(bb_period - 1, n):
+            window = close[i - bb_period + 1:i + 1]
+            mid = window.mean()
+            std = window.std(ddof=1)
+            bb_mid[i] = mid
+            bb_upper[i] = mid + bb_std_mult * std
+            bb_lower[i] = mid - bb_std_mult * std
+
+        # ── RSI (Wilder's smoothing) ─────────────────────────────
+        rsi_period = self.cfg.rsi_period
+        rsi = np.full(n, np.nan)
+        if n > rsi_period + 1:
+            deltas = np.diff(close)
+            gains = np.where(deltas > 0, deltas, 0.0)
+            losses = np.where(deltas < 0, -deltas, 0.0)
+
+            # Initial average (SMA of first rsi_period values)
+            avg_gain = gains[:rsi_period].mean()
+            avg_loss = losses[:rsi_period].mean()
+
+            if avg_loss > 0:
+                rs = avg_gain / avg_loss
+                rsi[rsi_period] = 100.0 - 100.0 / (1.0 + rs)
+            else:
+                rsi[rsi_period] = 100.0
+
+            # Wilder's smoothing for remaining
+            for i in range(rsi_period, len(deltas)):
+                avg_gain = (avg_gain * (rsi_period - 1) + gains[i]) / rsi_period
+                avg_loss = (avg_loss * (rsi_period - 1) + losses[i]) / rsi_period
+                if avg_loss > 0:
+                    rs = avg_gain / avg_loss
+                    rsi[i + 1] = 100.0 - 100.0 / (1.0 + rs)
+                else:
+                    rsi[i + 1] = 100.0
+
+        # ── EMA 9/21 (for anti-trend gate) ───────────────────────
+        close_series = day_bars["close"]
+        ema9 = close_series.ewm(span=9, adjust=False).mean().values
+        ema21 = close_series.ewm(span=21, adjust=False).mean().values
+
+        # ── ATR ──────────────────────────────────────────────────
+        prev_c = np.empty(n)
+        prev_c[0] = close[0]
+        prev_c[1:] = close[:-1]
+        tr = np.maximum(
+            high - low,
+            np.maximum(np.abs(high - prev_c), np.abs(low - prev_c)),
+        )
+        atr_arr = np.full(n, np.nan)
+        atr_period = self.atr_period
+        for i in range(min(3, n), n):
+            start = max(0, i - atr_period + 1)
+            atr_arr[i] = tr[start:i + 1].mean()
+
+        return {
+            'close': close,
+            'high': high,
+            'low': low,
+            'open': open_,
+            'volume': volume,
+            'vwap': vwap,
+            'bb_mid': bb_mid,
+            'bb_upper': bb_upper,
+            'bb_lower': bb_lower,
+            'rsi': rsi,
+            'ema9': ema9,
+            'ema21': ema21,
+            'atr': atr_arr,
+            'n': n,
+        }
+
+    def evaluate_fast(
+        self,
+        precomp: dict,
+        idx: int,
+        price: float,
+        ticker: str = "",
+        bars_index=None,
+    ) -> Optional[ScalpSignal]:
+        """
+        Fast mean-reversion signal evaluation using pre-computed indicators.
+
+        Returns a ScalpSignal if 2+ mean-reversion components agree.
+        Direction is OPPOSITE of the extreme (fade the move).
+        """
+        n = precomp['n']
+        if idx < max(30, self.cfg.bb_period + 5, self.cfg.rsi_period + 5):
+            return None
+
+        atr_val = precomp['atr'][idx]
+        if np.isnan(atr_val) or atr_val <= 0 or atr_val < self.cfg.min_atr:
+            return None
+
+        # ── Anti-Trend Gate ──────────────────────────────────────
+        ema9 = precomp['ema9'][idx]
+        ema21 = precomp['ema21'][idx]
+        if price > 0:
+            ema_spread = abs(ema9 - ema21) / price
+            if ema_spread > self.cfg.ema_trend_threshold:
+                return None  # Strong trend — let momentum handle it
+
+        # ── Evaluate Components ──────────────────────────────────
+        # Mean-reversion signals: CALL when oversold, PUT when overbought
+        bullish: List[str] = []   # Oversold → buy CALL
+        bearish: List[str] = []   # Overbought → buy PUT
+
+        # 1. Bollinger Band Extreme
+        bb_upper = precomp['bb_upper'][idx]
+        bb_lower = precomp['bb_lower'][idx]
+        if not np.isnan(bb_upper) and not np.isnan(bb_lower):
+            if price <= bb_lower:
+                bullish.append("BB_EXTREME")
+            elif price >= bb_upper:
+                bearish.append("BB_EXTREME")
+
+        # 2. RSI Extreme
+        rsi_val = precomp['rsi'][idx]
+        if not np.isnan(rsi_val):
+            if rsi_val <= self.cfg.rsi_oversold:
+                bullish.append("RSI_EXTREME")
+            elif rsi_val >= self.cfg.rsi_overbought:
+                bearish.append("RSI_EXTREME")
+
+        # 3. VWAP Reversion (extended from VWAP + turning back)
+        vwap_val = precomp['vwap'][idx]
+        if not np.isnan(vwap_val) and vwap_val > 0:
+            vwap_dist = (price - vwap_val) / vwap_val
+
+            if abs(vwap_dist) >= self.cfg.vwap_extreme_pct:
+                # Check if price is turning back toward VWAP
+                close = precomp['close']
+                turn_bars = self.cfg.vwap_turn_bars
+                if idx >= turn_bars:
+                    # Price below VWAP and turning up (last N bars closing higher)
+                    if vwap_dist < 0:
+                        turning_up = all(
+                            close[idx - j] > close[idx - j - 1]
+                            for j in range(turn_bars)
+                            if idx - j - 1 >= 0
+                        )
+                        if turning_up:
+                            bullish.append("VWAP_REVERT")
+
+                    # Price above VWAP and turning down
+                    elif vwap_dist > 0:
+                        turning_down = all(
+                            close[idx - j] < close[idx - j - 1]
+                            for j in range(turn_bars)
+                            if idx - j - 1 >= 0
+                        )
+                        if turning_down:
+                            bearish.append("VWAP_REVERT")
+
+        # ── Require min_confirmations to agree ───────────────────
+        min_conf = self.cfg.min_confirmations
+
+        ts = bars_index[idx] if bars_index is not None and hasattr(bars_index[idx], 'hour') else datetime.now()
+
+        if len(bullish) >= min_conf:
+            return ScalpSignal(
+                direction="CALL",
+                confirmations=bullish,
+                confidence=len(bullish) / 3.0,
+                entry_underlying=price,
+                atr=atr_val,
+                timestamp=ts,
+                ticker=ticker,
+            )
+
+        if len(bearish) >= min_conf:
+            return ScalpSignal(
+                direction="PUT",
+                confirmations=bearish,
+                confidence=len(bearish) / 3.0,
+                entry_underlying=price,
+                atr=atr_val,
+                timestamp=ts,
+                ticker=ticker,
+            )
+
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────
+# Mean-Reversion Exit Engine — Quick Captures
+# ─────────────────────────────────────────────────────────────────
+
+class MeanReversionExitEngine:
+    """
+    Exit engine for mean-reversion positions.
+
+    Key differences from momentum ScalpExitEngine:
+      • Tighter stops (2.0×ATR vs 3.0×ATR) — mean-rev thesis fails faster
+      • Quicker targets (2.0×ATR vs 3.5×ATR) — don't expect big runs
+      • Earlier trailing (1.5×ATR activation vs 3.5×ATR)
+      • Shorter time stop (15 min vs 30 min)
+      • Shorter max hold (30 min vs 60 min)
+
+    Mean-reversion trades should work quickly. If price doesn't snap
+    back to VWAP within 15 minutes, the thesis is probably wrong.
+    """
+
+    def __init__(self, config: MeanReversionConfig):
+        self.cfg = config
+
+    def check_exit(
+        self,
+        pos,  # SimScalpPosition or ScalpPosition
+        bar_high: float,
+        bar_low: float,
+        bar_close: float,
+        current_time: datetime,
+        minutes_to_close: float,
+    ) -> Optional[tuple]:
+        """Check exit conditions for mean-reversion position."""
+        entry = pos.entry_underlying
+        stop = pos.stop_price
+        target = pos.target_price
+        atr = pos.atr_at_entry
+
+        # ── Update best favorable underlying ─────────────────────
+        if pos.direction == "CALL":
+            pos.best_favorable_underlying = max(pos.best_favorable_underlying, bar_high)
+        else:
+            pos.best_favorable_underlying = min(pos.best_favorable_underlying, bar_low)
+
+        # ── 1. Hard Stop ─────────────────────────────────────────
+        if pos.direction == "CALL":
+            stop_hit = bar_low <= stop
+            target_hit = bar_high >= target
+        else:
+            stop_hit = bar_high >= stop
+            target_hit = bar_low <= target
+
+        if stop_hit and target_hit:
+            return ("MR_STOP_LOSS", stop)
+
+        if stop_hit:
+            return ("MR_STOP_LOSS", stop)
+
+        # ── 2. Profit Target ─────────────────────────────────────
+        if target_hit:
+            return ("MR_PROFIT_TARGET", target)
+
+        # ── 3. Trailing Stop ─────────────────────────────────────
+        trail_activation = atr * self.cfg.trailing_activation_atr
+        trail_dist = atr * self.cfg.trailing_distance_atr
+
+        if pos.direction == "CALL":
+            favorable_move = pos.best_favorable_underlying - entry
+            if favorable_move >= trail_activation:
+                trail_level = pos.best_favorable_underlying - trail_dist
+                if bar_low <= trail_level:
+                    return ("MR_TRAILING_STOP", trail_level)
+        else:
+            favorable_move = entry - pos.best_favorable_underlying
+            if favorable_move >= trail_activation:
+                trail_level = pos.best_favorable_underlying + trail_dist
+                if bar_high >= trail_level:
+                    return ("MR_TRAILING_STOP", trail_level)
+
+        # ── 4. Time Stop ─────────────────────────────────────────
+        hold_seconds = (current_time - pos.entry_time).total_seconds()
+        hold_minutes = hold_seconds / 60
+
+        if hold_minutes >= self.cfg.time_stop_minutes:
+            if pos.direction == "CALL":
+                move = bar_close - entry
+            else:
+                move = entry - bar_close
+
+            threshold = atr * self.cfg.time_stop_atr_mult
+            if abs(move) <= threshold:
+                return ("MR_TIME_STOP", bar_close)
+
+        # ── 5. Max Hold ──────────────────────────────────────────
+        if hold_minutes >= self.cfg.max_hold_minutes:
+            return ("MR_MAX_HOLD", bar_close)
+
+        # ── 6. EOD Close ─────────────────────────────────────────
+        if minutes_to_close <= self.cfg.eod_exit_minutes:
+            return ("MR_EOD_CLOSE", bar_close)
+
+        return None
 
 
 # ─────────────────────────────────────────────────────────────────
