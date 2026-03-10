@@ -40,6 +40,7 @@ class TestBacktestRegression:
         from trading_engine.execution.state import StateManager
         from trading_engine.execution.safety import SafetyMonitor
         from trading_engine.data.backtester import Backtester
+        from trading_engine.data.lotto_backtester import LottoBacktester, OptionPricer
         from trading_engine.lotto import LottoScanner, LottoTrigger, MomentumDetector
         assert True
 
@@ -503,6 +504,118 @@ class TestBacktestRegression:
 
         # SPX has wider strike increments
         assert spx.strike_increment > spy.strike_increment
+
+    # ── Long Options Backtester Tests ──────────────────────────
+
+    def test_option_pricer_call(self):
+        """OptionPricer correctly prices a call option."""
+        from trading_engine.data.lotto_backtester import OptionPricer
+
+        pricer = OptionPricer()
+
+        # ATM call: S=550, K=550, T=1day, IV=20%
+        price = pricer.price_option(S=550, K=550, T=1/252, iv=0.20, right="C")
+        assert 1.0 < price < 10.0  # Should be a few dollars
+
+        # Deep OTM call should be cheap
+        otm_price = pricer.price_option(S=550, K=560, T=1/252, iv=0.20, right="C")
+        assert otm_price < price
+
+        # At expiration
+        expired = pricer.price_option(S=550, K=545, T=0, iv=0.20, right="C")
+        assert expired == 5.0  # Intrinsic value
+
+    def test_option_pricer_put(self):
+        """OptionPricer correctly prices a put option."""
+        from trading_engine.data.lotto_backtester import OptionPricer
+
+        pricer = OptionPricer()
+
+        # ATM put
+        price = pricer.price_option(S=550, K=550, T=1/252, iv=0.20, right="P")
+        assert 1.0 < price < 10.0
+
+        # At expiration, OTM put = 0
+        expired = pricer.price_option(S=550, K=545, T=0, iv=0.20, right="P")
+        assert expired == 0.0
+
+    def test_option_pricer_iv_estimation(self):
+        """OptionPricer estimates IV from bar data."""
+        from trading_engine.data.lotto_backtester import OptionPricer
+        import pandas as pd
+        import numpy as np
+
+        pricer = OptionPricer()
+
+        # Create synthetic bars
+        np.random.seed(42)
+        n = 30
+        prices = [550 + np.random.randn() * 0.5 for _ in range(n)]
+        bars = pd.DataFrame({
+            "open": prices,
+            "high": [p + 0.3 for p in prices],
+            "low": [p - 0.3 for p in prices],
+            "close": prices,
+            "volume": [100000] * n,
+        })
+
+        iv = pricer.estimate_iv(bars, 550)
+        assert 0.05 < iv < 1.0  # Reasonable IV range
+
+    def test_lotto_backtester_init(self):
+        """LottoBacktester initializes with defaults."""
+        from trading_engine.data.lotto_backtester import LottoBacktester
+
+        bt = LottoBacktester(account_size=10_000)
+        assert bt.account_size == 10_000
+        assert bt.detector is not None
+        assert bt.pricer is not None
+
+    def test_lotto_backtester_empty_data(self):
+        """LottoBacktester handles empty DataFrame gracefully."""
+        from trading_engine.data.lotto_backtester import LottoBacktester
+        import pandas as pd
+
+        bt = LottoBacktester()
+        empty_df = pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+        results = bt.run(empty_df, ticker="SPY")
+        assert results.total_trades == 0
+        assert results.total_pnl == 0.0
+
+    def test_lotto_backtester_synthetic_run(self):
+        """LottoBacktester runs on synthetic data without crashing."""
+        from trading_engine.data.lotto_backtester import LottoBacktester
+        import pandas as pd
+        import numpy as np
+
+        bt = LottoBacktester(account_size=10_000)
+
+        # Create 2 days of 5-min bars (78 bars/day)
+        np.random.seed(42)
+        n = 156  # 2 days
+        base = 550.0
+        times = pd.date_range(
+            "2025-01-06 09:30", periods=78, freq="5min"
+        ).tolist() + pd.date_range(
+            "2025-01-07 09:30", periods=78, freq="5min"
+        ).tolist()
+
+        prices = [base + np.random.randn() * 1.0 for _ in range(n)]
+
+        df = pd.DataFrame({
+            "open": [p - 0.1 for p in prices],
+            "high": [p + 0.5 for p in prices],
+            "low": [p - 0.5 for p in prices],
+            "close": prices,
+            "volume": [50000 + int(np.random.rand() * 100000) for _ in range(n)],
+        }, index=pd.DatetimeIndex(times))
+
+        results = bt.run(df, ticker="SPY", interval="5m")
+
+        # Should not crash and should return valid results
+        assert results.total_days == 2
+        assert isinstance(results.total_pnl, float)
+        assert results.starting_balance == 10_000
 
 
 if __name__ == "__main__":
