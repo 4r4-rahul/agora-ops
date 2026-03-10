@@ -233,13 +233,13 @@ class ScalpConfig:
     runner_min_confirmations: int = 3       # Same signal quality as scalp
     runner_window_start: int = 270          # Power hour only: 2:00 PM ET
     runner_window_end: int = 330            # Until 3:00 PM ET
-    runner_min_atr_mult: float = 1.3        # ATR must be >1.3× day median (momentum day)
+    runner_min_atr_mult: float = 1.2        # ATR must be >1.2× day median (momentum day)
     runner_require_winning_scalp: bool = False  # If True, need a winning scalp first
 
     # Exits: let winners run
-    runner_stop_atr_mult: float = 5.0       # Wide stop: 5×ATR (give it room)
+    runner_stop_atr_mult: float = 3.0       # Tighter stop: 3×ATR (sweep optimal)
     runner_trail_activation_atr: float = 3.0  # Start trailing at 3×ATR favorable
-    runner_trail_distance_atr: float = 2.0  # Trail 2×ATR from best
+    runner_trail_distance_atr: float = 1.5  # Trail 1.5×ATR from best (tight capture)
     runner_max_hold_minutes: int = 120      # Up to 2 hours (rest of power hour + close)
     runner_eod_exit_minutes: int = 5        # Close 5 min before close (ride to end)
 
