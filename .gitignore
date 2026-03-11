@@ -67,6 +67,10 @@ frontend/.vite/
 # ── Docker ───────────────────────────────────────────────────
 *.pyc
 
+# ── Temporary backtest results ────────────────────────────────
+lotto_backtest_*.json
+scalp_backtest_SPY_*.json
+
 # ── OS ───────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
