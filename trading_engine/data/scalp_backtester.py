@@ -37,15 +37,17 @@ from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from ..config import EngineConfig, ScalpConfig, MeanReversionConfig, get_ticker_profile, TickerProfile
+from ..config import EngineConfig, ScalpConfig, MeanReversionConfig, ORBConfig, get_ticker_profile, TickerProfile
 from ..black_scholes import (
     bs_call_price, bs_put_price, bs_delta, bs_gamma, bs_theta, bs_vega,
 )
 from ..scalper import (
     SignalEngine, ScalpExitEngine, RunnerExitEngine,
     MeanReversionSignalEngine, MeanReversionExitEngine,
+    ORBSignalEngine, ORBExitEngine, ORBSignal,
     ScalpSignal,
 )
+from ..regime import RegimeDetector, RegimeInfo
 from ..formatters import header, sub_header, kv, pnl, bar, C
 
 
@@ -171,6 +173,14 @@ class ScalpBacktestResults:
     mr_biggest_win: float = 0.0
     mr_avg_hold: float = 0.0
 
+    # ORB tier stats
+    orb_trades: int = 0
+    orb_wins: int = 0
+    orb_pnl: float = 0.0
+    orb_biggest_win: float = 0.0
+    orb_avg_hold: float = 0.0
+    orb_regime_skipped: int = 0         # Days skipped by regime filter
+
     # IV discount filter stats
     iv_blocked_signals: int = 0         # Signals blocked by RV < IV
     iv_passed_signals: int = 0          # Signals that passed IV filter
@@ -278,6 +288,7 @@ class ScalpBacktester:
         self.config = config or EngineConfig()
         self.scalp_cfg = self.config.scalp
         self.mr_cfg = self.config.mean_reversion
+        self.orb_cfg = self.config.orb
         self.account_size = account_size
         self.pricer = ScalpOptionPricer()
 
@@ -290,9 +301,12 @@ class ScalpBacktester:
         # Will be created per-run with correct bar_minutes
         self._signal_engine = None
         self._mr_signal_engine = None
+        self._orb_signal_engine = None
         self._exit_engine = ScalpExitEngine(self.scalp_cfg)
         self._mr_exit_engine = MeanReversionExitEngine(self.mr_cfg)
         self._runner_exit_engine = RunnerExitEngine(self.scalp_cfg)
+        self._orb_exit_engine = ORBExitEngine(self.orb_cfg)
+        self._regime_detector = RegimeDetector()
 
         # Slippage model — ATM options have tighter spreads than OTM
         # SPX 0DTE ATM: massive liquidity, ~$0.50 wide on $20 = 1.25% each way
@@ -342,6 +356,7 @@ class ScalpBacktester:
         bar_minutes = self._parse_interval(interval)
         self._signal_engine = SignalEngine(self.scalp_cfg, bar_minutes=bar_minutes)
         self._mr_signal_engine = MeanReversionSignalEngine(self.mr_cfg, bar_minutes=bar_minutes)
+        self._orb_signal_engine = ORBSignalEngine(self.orb_cfg, bar_minutes=bar_minutes)
 
         results = ScalpBacktestResults(
             ticker=ticker,
@@ -364,6 +379,7 @@ class ScalpBacktester:
 
         prev_day_high = None
         prev_day_low = None
+        orb_regime_skipped = 0
 
         for day_date, day_bars in days:
             day_result = self._run_day(
@@ -380,6 +396,7 @@ class ScalpBacktester:
             results.trades.extend(day_result._trades)
             results.iv_blocked_signals += day_result.iv_blocked
             results.iv_passed_signals += day_result.trades_entered
+            orb_regime_skipped += getattr(day_result, '_orb_regime_skipped', 0)
 
             balance += day_result.day_pnl
             peak = max(peak, balance)
@@ -393,6 +410,7 @@ class ScalpBacktester:
 
         results.equity_curve = equity
         results.ending_balance = round(balance, 2)
+        results.orb_regime_skipped = orb_regime_skipped
 
         self._compute_stats(results)
         return results
@@ -429,10 +447,12 @@ class ScalpBacktester:
         Strategy A (MOMENTUM SCALP): ATM options, breakout signals, morning + power hour.
         Strategy B (MEAN-REVERSION): ATM options, fade extremes, midday chop zone.
         Strategy C (RUNNER): OTM options, wide exits, let winners ride in power hour.
+        Strategy D (ORB BREAKOUT): ATM options, opening range breakout, regime-filtered.
         All can be open simultaneously (different strategies, different edges).
         """
         day_result = ScalpBacktestDay(date=day_date)
         day_result._trades = []
+        day_result._orb_regime_skipped = 0
 
         # ── Momentum scalp tier state ────────────────────────────
         open_scalp: Optional[SimScalpPosition] = None
@@ -452,6 +472,11 @@ class ScalpBacktester:
         runner_trades_today = 0
         scalp_won_today = False          # Track if a scalp hit profit target
         scalp_win_direction = None       # Direction of winning scalp
+
+        # ── ORB tier state ───────────────────────────────────────
+        open_orb: Optional[SimScalpPosition] = None
+        orb_trades_today = 0
+        momentum_signal_fired = False    # Track if momentum ever fires this day
 
         # ── IV discount tracking ─────────────────────────────────
         iv_blocked_count = 0             # Signals blocked by IV discount filter
@@ -490,6 +515,30 @@ class ScalpBacktester:
         mr_enabled = self.config.mean_reversion.enabled
         mr_precomp = self._mr_signal_engine.precompute_day_indicators(day_bars) if mr_enabled else None
         day_bars_index = day_bars.index
+
+        # ── ORB pre-computation ──────────────────────────────────
+        orb_enabled = self.orb_cfg.enabled
+        orb_data = None
+        orb_regime_ok = True
+        if orb_enabled:
+            orb_data = self._orb_signal_engine.compute_orb(day_bars)
+            # Regime filter: classify day and skip bad regimes
+            # In backtesting, use full-day classify for accuracy.
+            # In live trading, classify_early() can be used after ORB forms.
+            if self.orb_cfg.regime_filter_enabled and orb_data.get("valid", False):
+                regime_info = self._regime_detector.classify(day_bars)
+                skip = (
+                    (self.orb_cfg.skip_dead_flat and regime_info.regime == "DEAD_FLAT")
+                    or (self.orb_cfg.skip_choppy and regime_info.regime == "CHOPPY")
+                    or (self.orb_cfg.skip_range_bound and regime_info.regime == "RANGE_BOUND")
+                    or (self.orb_cfg.skip_mixed and regime_info.regime == "MIXED")
+                )
+                if skip:
+                    orb_regime_ok = False
+                    day_result._orb_regime_skipped = 1
+                    if verbose:
+                        print(f"    [{day_date}] 📊 ORB skipped: {regime_info.regime} "
+                              f"(range={regime_info.day_range_pct:.4f})")
 
         # Pre-extract numpy arrays for fast bar access
         _close_arr = day_bars["close"].values
@@ -694,6 +743,55 @@ class ScalpBacktester:
 
                     open_mr = None
 
+            # ── 1d. Update open ORB position ─────────────────────
+            if open_orb and open_orb.is_open:
+                result = self._orb_exit_engine.check_exit(
+                    open_orb, bar_high, bar_low, current_price,
+                    current_time, minutes_to_close,
+                )
+
+                if result:
+                    exit_reason, exit_underlying = result
+
+                    exit_premium = self.pricer.price_option(
+                        exit_underlying, open_orb.strike, T,
+                        open_orb.entry_iv, open_orb.right,
+                    )
+                    exit_premium = max(0, exit_premium * (1 - self.exit_slippage_pct))
+
+                    commission = self.commission_per_contract * open_orb.num_contracts * 2
+                    pnl_amount = (exit_premium - open_orb.entry_premium) * \
+                                 open_orb.num_contracts * 100 - commission
+
+                    open_orb.is_open = False
+                    open_orb.exit_time = current_time
+                    open_orb.exit_underlying = exit_underlying
+                    open_orb.exit_premium = exit_premium
+                    open_orb.exit_reason = exit_reason
+                    open_orb.total_pnl = round(pnl_amount, 2)
+                    open_orb.hold_minutes = round(
+                        (current_time - open_orb.entry_time).total_seconds() / 60, 1
+                    )
+
+                    daily_pnl += pnl_amount
+                    day_result.trades_closed += 1
+                    if pnl_amount > 5:
+                        day_result.winning_trades += 1
+                    elif pnl_amount < -5:
+                        day_result.losing_trades += 1
+
+                    if verbose:
+                        mult = exit_premium / open_orb.entry_premium \
+                            if open_orb.entry_premium > 0 else 0
+                        print(f"    [{day_date}] 📊 ORB EXIT  {open_orb.direction} "
+                              f"{open_orb.strike}{open_orb.right} "
+                              f"→ {exit_reason} | {mult:.2f}x | "
+                              f"P&L: ${pnl_amount:+.2f} | "
+                              f"hold: {open_orb.hold_minutes:.0f}m | "
+                              f"Δunderlying: ${exit_underlying - open_orb.entry_underlying:+.2f}")
+
+                    open_orb = None
+
             # ── 2. Scan for new signals ──────────────────────────
             if cooldown_remaining > 0:
                 cooldown_remaining -= 1
@@ -717,6 +815,7 @@ class ScalpBacktester:
 
             if signal is not None:
                 prev_signal_direction = signal.direction
+                momentum_signal_fired = True  # ORB defers when momentum fires
             else:
                 prev_signal_direction = None
 
@@ -929,114 +1028,193 @@ class ScalpBacktester:
 
             # ── 3c. RUNNER entry ─────────────────────────────────
             # Runner requires a momentum signal (from the same engine)
-            if signal is None:
-                continue
+            if signal is not None:
+                cfg = self.scalp_cfg
+                if cfg.runner_enabled:
+                    in_runner_window = (
+                        cfg.runner_window_start <= minutes_since_open <= cfg.runner_window_end
+                    )
+                    can_enter_runner = (
+                        open_runner is None
+                        and in_runner_window
+                        and runner_trades_today < cfg.runner_max_per_day
+                        and len(signal.confirmations) >= cfg.runner_min_confirmations
+                    )
 
-            cfg = self.scalp_cfg
-            if not cfg.runner_enabled:
-                continue
+                    if can_enter_runner:
+                        # Runner gate: ATR must be elevated (momentum day)
+                        atr_ratio = current_atr / daily_median_atr if daily_median_atr > 0 else 0
+                        atr_gate_passed = atr_ratio >= cfg.runner_min_atr_mult
 
-            in_runner_window = (
-                cfg.runner_window_start <= minutes_since_open <= cfg.runner_window_end
-            )
-            can_enter_runner = (
-                open_runner is None
-                and in_runner_window
-                and runner_trades_today < cfg.runner_max_per_day
-                and len(signal.confirmations) >= cfg.runner_min_confirmations
-            )
+                        # Or: a scalp just won in this direction (piggyback)
+                        piggyback = (
+                            cfg.runner_require_winning_scalp
+                            and scalp_won_today
+                            and scalp_win_direction == signal.direction
+                        )
 
-            if not can_enter_runner:
-                continue
+                        enter_runner = atr_gate_passed or piggyback
+                        if not enter_runner and not cfg.runner_require_winning_scalp:
+                            enter_runner = False
 
-            # Runner gate: ATR must be elevated (momentum day)
-            atr_ratio = current_atr / daily_median_atr if daily_median_atr > 0 else 0
-            atr_gate_passed = atr_ratio >= cfg.runner_min_atr_mult
+                        if enter_runner:
+                            # Compute OTM strike
+                            otm_distance = current_price * cfg.runner_otm_pct
+                            if signal.direction == "CALL":
+                                runner_strike = self._round_strike(current_price + otm_distance, profile)
+                                runner_right = "C"
+                            else:
+                                runner_strike = self._round_strike(current_price - otm_distance, profile)
+                                runner_right = "P"
 
-            # Or: a scalp just won in this direction (piggyback)
-            piggyback = (
-                cfg.runner_require_winning_scalp
-                and scalp_won_today
-                and scalp_win_direction == signal.direction
-            )
+                            # Price the OTM option
+                            runner_option_price = self.pricer.price_option(
+                                current_price, runner_strike, T, day_iv, runner_right,
+                            )
+                            # OTM entry slippage is wider
+                            otm_entry_slippage = 0.05 if self.spx_mode else 0.08
+                            runner_entry_premium = runner_option_price * (1 + otm_entry_slippage)
 
-            if not atr_gate_passed and not piggyback:
-                if cfg.runner_require_winning_scalp and not piggyback:
-                    continue
-                if not atr_gate_passed:
-                    continue
+                            # Premium filters for runner (cheaper options)
+                            runner_min_prem = cfg.runner_min_premium * premium_scale
+                            runner_max_prem = cfg.runner_max_premium * premium_scale
 
-            # Compute OTM strike
-            otm_distance = current_price * cfg.runner_otm_pct
-            if signal.direction == "CALL":
-                runner_strike = self._round_strike(current_price + otm_distance, profile)
-                runner_right = "C"
-            else:
-                runner_strike = self._round_strike(current_price - otm_distance, profile)
-                runner_right = "P"
+                            if runner_min_prem <= runner_entry_premium <= runner_max_prem:
+                                # Runner position sizing: budget-based (small, disposable)
+                                runner_budget = balance * cfg.runner_budget_pct
+                                runner_num = min(
+                                    int(runner_budget / (runner_entry_premium * 100)) if runner_entry_premium > 0 else 0,
+                                    cfg.runner_max_contracts,
+                                )
+                                runner_num = max(1, runner_num) if runner_num >= 1 else 0
 
-            # Price the OTM option
-            runner_option_price = self.pricer.price_option(
-                current_price, runner_strike, T, day_iv, runner_right,
-            )
-            # OTM entry slippage is wider
-            otm_entry_slippage = 0.05 if self.spx_mode else 0.08
-            runner_entry_premium = runner_option_price * (1 + otm_entry_slippage)
+                                if runner_num > 0 and runner_entry_premium * 100 * runner_num <= balance * 0.10:
+                                    # Runner stop
+                                    runner_stop_dist = current_atr * cfg.runner_stop_atr_mult
+                                    if signal.direction == "CALL":
+                                        runner_stop_price = current_price - runner_stop_dist
+                                        runner_target_price = 0  # No fixed target — let it run
+                                    else:
+                                        runner_stop_price = current_price + runner_stop_dist
+                                        runner_target_price = 0
 
-            # Premium filters for runner (cheaper options)
-            runner_min_prem = cfg.runner_min_premium * premium_scale
-            runner_max_prem = cfg.runner_max_premium * premium_scale
+                                    runner_pos = SimScalpPosition(
+                                        ticker=ticker, strike=runner_strike, right=runner_right,
+                                        direction=signal.direction, expiry_date=day_date,
+                                        confirmations=signal.confirmations.copy(),
+                                        confidence=signal.confidence, tier="runner",
+                                        entry_time=current_time, entry_underlying=current_price,
+                                        entry_premium=runner_entry_premium, entry_iv=day_iv,
+                                        num_contracts=runner_num, atr_at_entry=current_atr,
+                                        stop_price=runner_stop_price, target_price=runner_target_price,
+                                        best_favorable_underlying=current_price,
+                                    )
 
-            if runner_entry_premium < runner_min_prem or runner_entry_premium > runner_max_prem:
-                continue
+                                    open_runner = runner_pos
+                                    runner_trades_today += 1
+                                    day_result.trades_entered += 1
+                                    day_result._trades.append(runner_pos)
 
-            # Runner position sizing: budget-based (small, disposable)
-            runner_budget = balance * cfg.runner_budget_pct
-            runner_num = min(
-                int(runner_budget / (runner_entry_premium * 100)) if runner_entry_premium > 0 else 0,
-                cfg.runner_max_contracts,
-            )
-            runner_num = max(1, runner_num) if runner_num >= 1 else 0
+                                    if verbose:
+                                        print(f"    [{day_date}] 🏃 RUNNER ENTER {signal.direction} "
+                                              f"{ticker} {runner_strike}{runner_right} "
+                                              f"@ ${runner_entry_premium:.2f} x{runner_num} "
+                                              f"({', '.join(signal.confirmations)}) "
+                                              f"ATR=${current_atr:.3f} (ATR ratio: {atr_ratio:.2f}x) "
+                                              f"stop=${runner_stop_price:.2f}")
 
-            if runner_num <= 0 or runner_entry_premium * 100 * runner_num > balance * 0.10:
-                continue
+            # ── 3d. ORB BREAKOUT entry ───────────────────────────
+            # Strategy D: fires ONLY when momentum engine has no signal this day.
+            # Regime-filtered: skip DEAD_FLAT and CHOPPY days.
+            if (orb_enabled and orb_regime_ok and orb_data and orb_data.get("valid", False)
+                    and open_orb is None
+                    and orb_trades_today < self.orb_cfg.max_trades_per_day):
 
-            # Runner stop: wide (5×ATR)
-            runner_stop_dist = current_atr * cfg.runner_stop_atr_mult
-            if signal.direction == "CALL":
-                runner_stop_price = current_price - runner_stop_dist
-                runner_target_price = 0  # No fixed target — let it run
-            else:
-                runner_stop_price = current_price + runner_stop_dist
-                runner_target_price = 0
+                # Defer to momentum: if momentum already fired OR has a signal, skip ORB
+                skip_for_momentum = (
+                    self.orb_cfg.only_when_no_momentum and momentum_signal_fired
+                )
 
-            runner_pos = SimScalpPosition(
-                ticker=ticker, strike=runner_strike, right=runner_right,
-                direction=signal.direction, expiry_date=day_date,
-                confirmations=signal.confirmations.copy(),
-                confidence=signal.confidence, tier="runner",
-                entry_time=current_time, entry_underlying=current_price,
-                entry_premium=runner_entry_premium, entry_iv=day_iv,
-                num_contracts=runner_num, atr_at_entry=current_atr,
-                stop_price=runner_stop_price, target_price=runner_target_price,
-                best_favorable_underlying=current_price,
-            )
+                if not skip_for_momentum:
+                    orb_signal = self._orb_signal_engine.evaluate(day_bars, orb_data, i)
 
-            open_runner = runner_pos
-            runner_trades_today += 1
-            day_result.trades_entered += 1
-            day_result._trades.append(runner_pos)
+                    if orb_signal is not None:
+                        day_result.signals_found += 1
 
-            if verbose:
-                print(f"    [{day_date}] 🏃 RUNNER ENTER {signal.direction} "
-                      f"{ticker} {runner_strike}{runner_right} "
-                      f"@ ${runner_entry_premium:.2f} x{runner_num} "
-                      f"({', '.join(signal.confirmations)}) "
-                      f"ATR=${current_atr:.3f} (ATR ratio: {atr_ratio:.2f}x) "
-                      f"stop=${runner_stop_price:.2f}")
+                        # ATM strike (same as momentum scalp)
+                        otm_distance = current_price * self.orb_cfg.max_otm_pct
+                        if orb_signal.direction == "CALL":
+                            orb_strike = self._round_strike(current_price + otm_distance, profile)
+                            orb_right = "C"
+                        else:
+                            orb_strike = self._round_strike(current_price - otm_distance, profile)
+                            orb_right = "P"
+
+                        # Price the option
+                        orb_option_price = self.pricer.price_option(
+                            current_price, orb_strike, T, day_iv, orb_right,
+                        )
+                        orb_entry_premium = orb_option_price * (1 + self.entry_slippage_pct)
+
+                        # Premium filters
+                        orb_min_prem = self.orb_cfg.min_premium * premium_scale
+                        orb_max_prem = self.orb_cfg.max_premium * premium_scale
+
+                        if orb_min_prem <= orb_entry_premium <= orb_max_prem:
+                            # Position sizing
+                            orb_range = orb_signal.orb_range
+                            stop_dist = orb_range * self.orb_cfg.stop_range_mult
+                            risk_per_contract = 0.50 * stop_dist * 100
+                            if risk_per_contract > 0:
+                                max_risk = self.orb_cfg.max_risk_per_trade * self.price_scale
+                                budget_pct = 0.25 if self.spx_mode else 0.05
+                                max_budget_contracts = int(balance * budget_pct / (orb_entry_premium * 100)) \
+                                    if orb_entry_premium > 0 else 0
+
+                                num_contracts = min(
+                                    int(max_risk / risk_per_contract),
+                                    self.orb_cfg.max_contracts,
+                                    max(1, max_budget_contracts),
+                                )
+                                num_contracts = max(1, num_contracts)
+
+                                if orb_entry_premium * 100 <= balance * 0.50:
+                                    # Compute stop and target from ORB range
+                                    target_dist = orb_range * self.orb_cfg.target_range_mult
+                                    if orb_signal.direction == "CALL":
+                                        orb_stop_price = current_price - stop_dist
+                                        orb_target_price = current_price + target_dist
+                                    else:
+                                        orb_stop_price = current_price + stop_dist
+                                        orb_target_price = current_price - target_dist
+
+                                    orb_pos = SimScalpPosition(
+                                        ticker=ticker, strike=orb_strike, right=orb_right,
+                                        direction=orb_signal.direction, expiry_date=day_date,
+                                        confirmations=orb_signal.confirmations.copy(),
+                                        confidence=orb_signal.confidence, tier="orb",
+                                        entry_time=current_time, entry_underlying=current_price,
+                                        entry_premium=orb_entry_premium, entry_iv=day_iv,
+                                        num_contracts=num_contracts, atr_at_entry=current_atr,
+                                        stop_price=orb_stop_price, target_price=orb_target_price,
+                                        best_favorable_underlying=current_price,
+                                    )
+
+                                    open_orb = orb_pos
+                                    orb_trades_today += 1
+                                    day_result.trades_entered += 1
+                                    day_result._trades.append(orb_pos)
+
+                                    if verbose:
+                                        print(f"    [{day_date}] 📊 ORB ENTER {orb_signal.direction} "
+                                              f"{ticker} {orb_strike}{orb_right} "
+                                              f"@ ${orb_entry_premium:.2f} x{num_contracts} "
+                                              f"({', '.join(orb_signal.confirmations)}) "
+                                              f"ORB range=${orb_range:.2f} "
+                                              f"stop=${orb_stop_price:.2f} target=${orb_target_price:.2f}")
 
         # ── End of day: force-close ALL open positions ───────────
-        for pos_to_close in [open_scalp, open_runner, open_mr]:
+        for pos_to_close in [open_scalp, open_runner, open_mr, open_orb]:
             if pos_to_close and pos_to_close.is_open:
                 last_price = float(day_bars["close"].iloc[-1])
                 last_time = day_bars.index[-1]
@@ -1046,7 +1224,7 @@ class ScalpBacktester:
                     last_price, pos_to_close.strike,
                     max(T_final, 1e-8), pos_to_close.entry_iv, pos_to_close.right,
                 )
-                slippage = self.exit_slippage_pct if pos_to_close.tier in ("scalp", "mean_rev") else 0.05
+                slippage = self.exit_slippage_pct if pos_to_close.tier in ("scalp", "mean_rev", "orb") else 0.05
                 exit_premium = max(0, exit_premium * (1 - slippage))
                 commission = self.commission_per_contract * pos_to_close.num_contracts * 2
                 pnl_amount = (exit_premium - pos_to_close.entry_premium) * \
@@ -1223,6 +1401,18 @@ class ScalpBacktester:
             mr_holds = [t.hold_minutes for t in mr_trades_list if t.hold_minutes > 0]
             results.mr_avg_hold = round(np.mean(mr_holds), 1) if mr_holds else 0
 
+        # ORB tier
+        orb_trades_list = [t for t in trades if t.tier == "orb"]
+        results.orb_trades = len(orb_trades_list)
+        results.orb_wins = sum(1 for t in orb_trades_list if t.total_pnl > 5)
+        results.orb_pnl = round(sum(t.total_pnl for t in orb_trades_list), 2)
+        if orb_trades_list:
+            results.orb_biggest_win = round(
+                max(t.total_pnl for t in orb_trades_list), 2
+            )
+            orb_holds = [t.hold_minutes for t in orb_trades_list if t.hold_minutes > 0]
+            results.orb_avg_hold = round(np.mean(orb_holds), 1) if orb_holds else 0
+
     # ─────────────────────────────────────────────────────────────
     # Reporting
     # ─────────────────────────────────────────────────────────────
@@ -1329,10 +1519,21 @@ class ScalpBacktester:
                       f"{rc}${results.runner_pnl:>+11,.2f}{C.RESET} "
                       f"${results.runner_biggest_win:>+9,.2f}")
 
+            if results.orb_trades > 0:
+                o_wr = results.orb_wins / results.orb_trades * 100
+                oc = C.GREEN if results.orb_pnl >= 0 else C.RED
+                print(f"  {'📊 ORB':<14} {results.orb_trades:>6} "
+                      f"{results.orb_wins:>5} {o_wr:>5.1f}% "
+                      f"{oc}${results.orb_pnl:>+11,.2f}{C.RESET} "
+                      f"${results.orb_biggest_win:>+9,.2f}")
+
             if results.mr_trades > 0:
                 print(f"\n  MeanRev avg hold: {results.mr_avg_hold:.1f} min")
             if results.runner_trades > 0:
                 print(f"  Runner avg hold: {results.runner_avg_hold:.1f} min")
+            if results.orb_trades > 0:
+                print(f"  ORB avg hold: {results.orb_avg_hold:.1f} min"
+                      f"  (regime skipped: {results.orb_regime_skipped} days)")
 
         # Exit Reason Breakdown
         if results.exit_stats:
@@ -1440,6 +1641,10 @@ class ScalpBacktester:
                 "mr_trades": results.mr_trades,
                 "mr_pnl": results.mr_pnl,
                 "mr_biggest_win": results.mr_biggest_win,
+                "orb_trades": results.orb_trades,
+                "orb_pnl": results.orb_pnl,
+                "orb_biggest_win": results.orb_biggest_win,
+                "orb_regime_skipped": results.orb_regime_skipped,
             },
             "exit_stats": results.exit_stats,
             "confirmation_stats": results.confirmation_stats,

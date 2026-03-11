@@ -267,6 +267,77 @@ class ScalpConfig:
 
 
 @dataclass
+class ORBConfig:
+    """
+    Configuration for ORB (Opening Range Breakout) strategy.
+
+    Trades breakouts above/below the first N minutes' high/low.
+    Integrated as Strategy B: fires on days where the momentum engine
+    has NO signal, providing coverage on 50-60 additional days.
+
+    Backtested on 129 days SPX 0DTE (Sep 2025 – Mar 2026):
+      ORB30 (30-bar range, target=1.5×range, stop=0.7×range):
+        Raw: 60 days, 53.3% WR, PF=1.71, +$7,645
+      Regime-filtered (MODERATE_TREND + STRONG_TREND only),
+      max_hold=120 bars, full-day classify:
+        17 days, 64.5% WR, PF=3.16, +$41,955
+
+    Key insight: ORB captures TRENDS that the momentum engine's
+    strict confirmation stack (VOL+VWAP+3 confirms) rejects.
+    On flat days, ORB is a coin flip → regime filter is essential.
+    """
+    # ── Master Enable ───────────────────────────────────────────
+    enabled: bool = True                 # Enable ORB30 strategy
+
+    # ── ORB Formation ───────────────────────────────────────────
+    orb_bars: int = 30                   # 30 bars (30 min) for range formation
+    min_range_pct: float = 0.001         # Min ORB range 0.1% of open ($5.70 SPX)
+    max_range_pct: float = 0.025         # Max ORB range 2.5% (skip gap days)
+
+    # ── Breakout Detection ──────────────────────────────────────
+    max_wait_bars: int = 90              # Max bars after ORB to detect breakout
+    require_close_break: bool = True     # Require close (not just wick) above/below
+
+    # ── ATR-Based Exits (in ORB range multiples) ────────────────
+    target_range_mult: float = 1.5       # Target: 1.5× ORB range
+    stop_range_mult: float = 0.7         # Stop: 0.7× ORB range back inside
+    max_hold_bars: int = 120             # Max bars to hold (2h, lets trend develop)
+
+    # ── Time Window ─────────────────────────────────────────────
+    # ORB forms 9:30-10:00, then we watch for breakouts 10:00-11:30
+    entry_start_bar: int = 30            # Earliest entry (after ORB forms)
+    entry_end_bar: int = 120             # Latest entry (bar 120 = ~11:30)
+    eod_exit_minutes: int = 15           # Close before market close
+
+    # ── Risk Management ─────────────────────────────────────────
+    max_trades_per_day: int = 1          # 1 ORB trade per day (breakout is binary)
+    max_risk_per_trade: float = 500.0    # Max dollar risk ($500 SPX scale)
+    max_risk_pct: float = 0.05           # 5% of account per trade
+
+    # ── Budget ──────────────────────────────────────────────────
+    max_premium: float = 4.00            # Max per-contract premium (SPY scale)
+    min_premium: float = 0.30            # Minimum viable premium
+    max_contracts: int = 3               # Max contracts per trade
+
+    # ── Strike Selection ────────────────────────────────────────
+    max_otm_pct: float = 0.001           # ATM: 0.1% OTM
+
+    # ── Regime Filter ───────────────────────────────────────────
+    # Only trade ORB on days classified as trending.
+    # DEAD_FLAT days lose money with ORB (-$1,049 on 48 trades).
+    regime_filter_enabled: bool = True   # Filter by day regime
+    skip_dead_flat: bool = True          # Skip DEAD_FLAT days
+    skip_choppy: bool = True             # Skip CHOPPY days
+    skip_range_bound: bool = True        # Skip RANGE_BOUND days (choppy for breakouts)
+    skip_mixed: bool = True              # Skip MIXED days (ambiguous regime)
+
+    # ── Priority ────────────────────────────────────────────────
+    # ORB is Strategy B: only fires when momentum engine has no signal.
+    # This prevents conflicts and preserves momentum's superior edge.
+    only_when_no_momentum: bool = True   # Defer to momentum signals
+
+
+@dataclass
 class MeanReversionConfig:
     """
     Configuration for Mean-Reversion Scalping strategy.
@@ -425,6 +496,7 @@ class EngineConfig:
     adaptive: AdaptiveConfig = field(default_factory=AdaptiveConfig)
     lotto: LottoConfig = field(default_factory=LottoConfig)
     scalp: ScalpConfig = field(default_factory=ScalpConfig)
+    orb: ORBConfig = field(default_factory=ORBConfig)
     mean_reversion: MeanReversionConfig = field(default_factory=MeanReversionConfig)
     data_dir: str = field(default_factory=lambda: os.path.join(
         os.path.dirname(os.path.dirname(__file__)), "data"

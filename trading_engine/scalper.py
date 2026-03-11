@@ -72,7 +72,7 @@ from typing import List, Optional, Dict, Any
 import numpy as np
 import pandas as pd
 
-from .config import EngineConfig, ScalpConfig, MeanReversionConfig, get_ticker_profile, TickerProfile
+from .config import EngineConfig, ScalpConfig, MeanReversionConfig, ORBConfig, get_ticker_profile, TickerProfile
 
 logger = logging.getLogger(__name__)
 
@@ -2099,3 +2099,237 @@ class ScalpScanner:
         self.stopped_directions.clear()
         self.cooldown_remaining = 0
         self.open_position = None
+
+
+# ─────────────────────────────────────────────────────────────────
+# ORB (Opening Range Breakout) Signal Engine
+# ─────────────────────────────────────────────────────────────────
+
+@dataclass
+class ORBSignal:
+    """An ORB breakout signal."""
+    direction: str = ""          # "CALL" or "PUT"
+    confirmations: List[str] = field(default_factory=list)
+    confidence: float = 0.0
+    entry_underlying: float = 0.0
+    orb_high: float = 0.0
+    orb_low: float = 0.0
+    orb_range: float = 0.0
+    timestamp: datetime = field(default_factory=datetime.now)
+    ticker: str = ""
+
+
+class ORBSignalEngine:
+    """
+    Opening Range Breakout signal engine.
+
+    Computes the ORB range (high/low of first N bars), then watches
+    for a close above/below the range as a breakout signal.
+
+    Strategy B in the multi-strategy stack: fires only on days where
+    momentum engine (Strategy A) has no signal.
+
+    Confirmation components:
+      1. ORB_BREAK — Close above ORB high / below ORB low (required)
+      2. ORB_VOLUME — Volume at breakout bar > average ORB volume
+      3. ORB_TREND  — Bar direction aligns with breakout
+    """
+
+    def __init__(self, config: ORBConfig, bar_minutes: int = 1):
+        self.cfg = config
+        self.bar_minutes = bar_minutes
+
+    def compute_orb(self, day_bars: pd.DataFrame) -> Dict[str, Any]:
+        """
+        Compute ORB levels from the first N bars.
+
+        Returns dict with:
+          orb_high, orb_low, orb_range, orb_range_pct, orb_vol_avg,
+          valid (bool — whether ORB passes filters).
+        """
+        n = len(day_bars)
+        orb_n = self.cfg.orb_bars
+
+        if n < orb_n + 10:
+            return {"valid": False}
+
+        h = day_bars["high"].values
+        l = day_bars["low"].values
+        v = day_bars["volume"].values
+        o_open = day_bars["open"].values[0]
+
+        orb_high = float(h[:orb_n].max())
+        orb_low = float(l[:orb_n].min())
+        orb_range = orb_high - orb_low
+        orb_range_pct = orb_range / o_open if o_open > 0 else 0
+        orb_vol_avg = float(v[:orb_n].mean())
+
+        # Range filters
+        valid = (
+            self.cfg.min_range_pct <= orb_range_pct <= self.cfg.max_range_pct
+        )
+
+        return {
+            "orb_high": orb_high,
+            "orb_low": orb_low,
+            "orb_range": orb_range,
+            "orb_range_pct": orb_range_pct,
+            "orb_vol_avg": orb_vol_avg,
+            "valid": valid,
+        }
+
+    def evaluate(
+        self,
+        day_bars: pd.DataFrame,
+        orb_data: Dict[str, Any],
+        bar_idx: int,
+    ) -> Optional[ORBSignal]:
+        """
+        Check if bar_idx is a breakout above/below ORB range.
+
+        Args:
+            day_bars: Full day bars DataFrame
+            orb_data: Pre-computed ORB levels from compute_orb()
+            bar_idx: Current bar index
+
+        Returns:
+            ORBSignal if breakout detected, None otherwise.
+        """
+        if not orb_data.get("valid", False):
+            return None
+
+        cfg = self.cfg
+        if bar_idx < cfg.entry_start_bar or bar_idx > cfg.entry_end_bar:
+            return None
+
+        c = day_bars["close"].values
+        v = day_bars["volume"].values
+        o = day_bars["open"].values
+        n = len(c)
+
+        if bar_idx >= n or bar_idx < 1:
+            return None
+
+        cur_close = float(c[bar_idx])
+        prev_close = float(c[bar_idx - 1])
+        cur_vol = float(v[bar_idx])
+        cur_open = float(o[bar_idx])
+
+        orb_high = orb_data["orb_high"]
+        orb_low = orb_data["orb_low"]
+        orb_range = orb_data["orb_range"]
+        orb_vol_avg = orb_data["orb_vol_avg"]
+
+        # ── Breakout above ORB high ──────────────────────────────
+        if cur_close > orb_high and prev_close <= orb_high:
+            confirmations = ["ORB_BREAK"]
+
+            # Volume confirmation
+            if orb_vol_avg > 0 and cur_vol > orb_vol_avg * 1.2:
+                confirmations.append("ORB_VOLUME")
+
+            # Bar is green (close > open) — aligned with breakout
+            if cur_close > cur_open:
+                confirmations.append("ORB_TREND")
+
+            return ORBSignal(
+                direction="CALL",
+                confirmations=confirmations,
+                confidence=len(confirmations) / 3.0,
+                entry_underlying=cur_close,
+                orb_high=orb_high,
+                orb_low=orb_low,
+                orb_range=orb_range,
+                ticker="",
+            )
+
+        # ── Breakout below ORB low ───────────────────────────────
+        if cur_close < orb_low and prev_close >= orb_low:
+            confirmations = ["ORB_BREAK"]
+
+            if orb_vol_avg > 0 and cur_vol > orb_vol_avg * 1.2:
+                confirmations.append("ORB_VOLUME")
+
+            # Bar is red (close < open) — aligned with breakdown
+            if cur_close < cur_open:
+                confirmations.append("ORB_TREND")
+
+            return ORBSignal(
+                direction="PUT",
+                confirmations=confirmations,
+                confidence=len(confirmations) / 3.0,
+                entry_underlying=cur_close,
+                orb_high=orb_high,
+                orb_low=orb_low,
+                orb_range=orb_range,
+                ticker="",
+            )
+
+        return None
+
+
+class ORBExitEngine:
+    """
+    Exit engine for ORB breakout positions.
+
+    Exits based on ORB-range-multiple stops and targets:
+      - Target: price moves target_range_mult × ORB range beyond breakout level
+      - Stop: price reverts stop_range_mult × ORB range back inside
+      - Time stop: max_hold_bars without hitting target
+      - EOD: close before market close
+
+    Same hierarchy as ScalpExitEngine: stop assumed first if both trigger.
+    """
+
+    def __init__(self, config: ORBConfig):
+        self.cfg = config
+
+    def check_exit(
+        self,
+        pos,                    # SimScalpPosition
+        bar_high: float,
+        bar_low: float,
+        bar_close: float,
+        current_time: datetime,
+        minutes_to_close: float,
+    ) -> Optional[tuple]:
+        """
+        Check exit conditions for an ORB position.
+
+        Returns:
+            Tuple of (exit_reason, exit_underlying_price) or None.
+        """
+        stop = pos.stop_price
+        target = pos.target_price
+
+        # ── 1. Hard Stop ─────────────────────────────────────────
+        if pos.direction == "CALL":
+            stop_hit = bar_low <= stop
+            target_hit = bar_high >= target
+        else:
+            stop_hit = bar_high >= stop
+            target_hit = bar_low <= target
+
+        # Conservative: stop wins ties
+        if stop_hit and target_hit:
+            return ("STOP_LOSS", stop)
+
+        if stop_hit:
+            return ("STOP_LOSS", stop)
+
+        # ── 2. Target ────────────────────────────────────────────
+        if target_hit:
+            return ("PROFIT_TARGET", target)
+
+        # ── 3. Time stop (max hold bars) ─────────────────────────
+        hold_minutes = (current_time - pos.entry_time).total_seconds() / 60
+        max_hold_minutes = self.cfg.max_hold_bars * 1  # 1 bar = 1 min
+
+        if hold_minutes >= max_hold_minutes:
+            return ("TIME_STOP", bar_close)
+
+        # ── 4. EOD exit ──────────────────────────────────────────
+        if minutes_to_close <= self.cfg.eod_exit_minutes:
+            return ("EOD_CLOSE", bar_close)
+
+        return None
