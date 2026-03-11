@@ -72,7 +72,7 @@ from typing import List, Optional, Dict, Any
 import numpy as np
 import pandas as pd
 
-from .config import EngineConfig, ScalpConfig, MeanReversionConfig, ORBConfig, get_ticker_profile, TickerProfile
+from .config import EngineConfig, ScalpConfig, MeanReversionConfig, ORBConfig, RangeFadeConfig, get_ticker_profile, TickerProfile
 
 logger = logging.getLogger(__name__)
 
@@ -2295,6 +2295,287 @@ class ORBExitEngine:
     ) -> Optional[tuple]:
         """
         Check exit conditions for an ORB position.
+
+        Returns:
+            Tuple of (exit_reason, exit_underlying_price) or None.
+        """
+        stop = pos.stop_price
+        target = pos.target_price
+
+        # ── 1. Hard Stop ─────────────────────────────────────────
+        if pos.direction == "CALL":
+            stop_hit = bar_low <= stop
+            target_hit = bar_high >= target
+        else:
+            stop_hit = bar_high >= stop
+            target_hit = bar_low <= target
+
+        # Conservative: stop wins ties
+        if stop_hit and target_hit:
+            return ("STOP_LOSS", stop)
+
+        if stop_hit:
+            return ("STOP_LOSS", stop)
+
+        # ── 2. Target ────────────────────────────────────────────
+        if target_hit:
+            return ("PROFIT_TARGET", target)
+
+        # ── 3. Time stop (max hold bars) ─────────────────────────
+        hold_minutes = (current_time - pos.entry_time).total_seconds() / 60
+        max_hold_minutes = self.cfg.max_hold_bars * 1  # 1 bar = 1 min
+
+        if hold_minutes >= max_hold_minutes:
+            return ("TIME_STOP", bar_close)
+
+        # ── 4. EOD exit ──────────────────────────────────────────
+        if minutes_to_close <= self.cfg.eod_exit_minutes:
+            return ("EOD_CLOSE", bar_close)
+
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────
+# Range Fade Signal Engine (Strategy E: RANGE_BOUND days)
+# ─────────────────────────────────────────────────────────────────
+
+@dataclass
+class RangeFadeSignal:
+    """A range-fade signal: buy calls at range low, puts at range high."""
+    direction: str = ""          # "CALL" or "PUT"
+    confirmations: List[str] = field(default_factory=list)
+    confidence: float = 0.0
+    entry_underlying: float = 0.0
+    range_high: float = 0.0
+    range_low: float = 0.0
+    range_size: float = 0.0
+    timestamp: datetime = field(default_factory=datetime.now)
+    ticker: str = ""
+
+
+class RangeFadeSignalEngine:
+    """
+    Range-Bound Fade signal engine.
+
+    Identifies range boundaries from the first N bars, then watches for
+    price to reach the top/bottom boundary zone with confirmation.
+
+    Strategy E: fires only on RANGE_BOUND (and optionally MIXED) days
+    where ORB and momentum are both disabled.
+
+    Confirmation components:
+      1. RANGE_TOUCH — Price in top/bottom boundary zone of the range
+      2. REVERSAL_BAR — Rejection wick or engulfing pattern at boundary
+      3. VWAP_CROSS — Price crossing back toward VWAP (mean reversion)
+      4. RSI_EXTREME — RSI confirms overbought/oversold at boundary
+    """
+
+    def __init__(self, config: RangeFadeConfig, bar_minutes: int = 1):
+        self.cfg = config
+        self.bar_minutes = bar_minutes
+
+    def compute_range(self, day_bars: pd.DataFrame) -> Dict[str, Any]:
+        """
+        Compute range levels from the first N bars.
+
+        Returns dict with:
+          range_high, range_low, range_size, range_mid, vwap_at_form,
+          valid (bool).
+        """
+        n = len(day_bars)
+        form_n = self.cfg.formation_bars
+
+        if n < form_n + 20:
+            return {"valid": False}
+
+        h = day_bars["high"].values
+        l = day_bars["low"].values
+        c = day_bars["close"].values
+        o_open = c[0]
+
+        range_high = float(h[:form_n].max())
+        range_low = float(l[:form_n].min())
+        range_size = range_high - range_low
+        range_pct = range_size / o_open if o_open > 0 else 0
+
+        # Need a meaningful range (>0.3% for SPX ~ $17)
+        valid = range_pct > 0.003 and range_size > 0
+
+        range_mid = (range_high + range_low) / 2.0
+
+        # Compute VWAP if volume available
+        vwap = float(c[:form_n].mean())  # Simple price mean as proxy
+        if "volume" in day_bars.columns:
+            v = day_bars["volume"].values[:form_n]
+            total_vol = v.sum()
+            if total_vol > 0:
+                typical = (h[:form_n] + l[:form_n] + c[:form_n]) / 3.0
+                vwap = float((typical * v).sum() / total_vol)
+
+        return {
+            "range_high": range_high,
+            "range_low": range_low,
+            "range_size": range_size,
+            "range_pct": range_pct,
+            "range_mid": range_mid,
+            "vwap": vwap,
+            "valid": valid,
+        }
+
+    def evaluate(
+        self,
+        day_bars: pd.DataFrame,
+        range_data: Dict[str, Any],
+        bar_idx: int,
+    ) -> Optional[RangeFadeSignal]:
+        """
+        Check if bar_idx is a fade opportunity at range boundary.
+
+        Generates PUT signals at range high (fade down),
+        CALL signals at range low (fade up).
+        """
+        if not range_data.get("valid", False):
+            return None
+
+        cfg = self.cfg
+        if bar_idx < cfg.entry_start_bar or bar_idx > cfg.entry_end_bar:
+            return None
+
+        c = day_bars["close"].values
+        h = day_bars["high"].values
+        l = day_bars["low"].values
+        o = day_bars["open"].values
+        n = len(c)
+
+        if bar_idx >= n or bar_idx < 2:
+            return None
+
+        cur_close = float(c[bar_idx])
+        prev_close = float(c[bar_idx - 1])
+        cur_high = float(h[bar_idx])
+        cur_low = float(l[bar_idx])
+        cur_open = float(o[bar_idx])
+
+        range_high = range_data["range_high"]
+        range_low = range_data["range_low"]
+        range_size = range_data["range_size"]
+        range_mid = range_data["range_mid"]
+        vwap = range_data["vwap"]
+
+        boundary_zone = range_size * cfg.boundary_zone_pct
+
+        # ── Compute RSI ──────────────────────────────────────────
+        rsi = self._compute_rsi(c, bar_idx, cfg.rsi_period)
+
+        # ── Check UPPER boundary (fade → PUT) ────────────────────
+        upper_threshold = range_high - boundary_zone
+        if cur_high >= upper_threshold:
+            confirmations = ["RANGE_TOUCH"]
+
+            # Reversal bar: wick rejection at top (upper wick > body)
+            body = abs(cur_close - cur_open)
+            upper_wick = cur_high - max(cur_close, cur_open)
+            if upper_wick > body and cur_close < cur_open:
+                confirmations.append("REVERSAL_BAR")
+
+            # VWAP cross: price was above VWAP, closing back toward it
+            if prev_close > vwap and cur_close < prev_close:
+                confirmations.append("VWAP_CROSS")
+
+            # RSI overbought
+            if rsi > cfg.rsi_overbought:
+                confirmations.append("RSI_EXTREME")
+
+            if len(confirmations) >= cfg.min_confirmations:
+                return RangeFadeSignal(
+                    direction="PUT",
+                    confirmations=confirmations,
+                    confidence=len(confirmations) / 4.0,
+                    entry_underlying=cur_close,
+                    range_high=range_high,
+                    range_low=range_low,
+                    range_size=range_size,
+                    ticker="",
+                )
+
+        # ── Check LOWER boundary (fade → CALL) ──────────────────
+        lower_threshold = range_low + boundary_zone
+        if cur_low <= lower_threshold:
+            confirmations = ["RANGE_TOUCH"]
+
+            # Reversal bar: wick rejection at bottom (lower wick > body)
+            body = abs(cur_close - cur_open)
+            lower_wick = min(cur_close, cur_open) - cur_low
+            if lower_wick > body and cur_close > cur_open:
+                confirmations.append("REVERSAL_BAR")
+
+            # VWAP cross: price was below VWAP, closing back toward it
+            if prev_close < vwap and cur_close > prev_close:
+                confirmations.append("VWAP_CROSS")
+
+            # RSI oversold
+            if rsi < cfg.rsi_oversold:
+                confirmations.append("RSI_EXTREME")
+
+            if len(confirmations) >= cfg.min_confirmations:
+                return RangeFadeSignal(
+                    direction="CALL",
+                    confirmations=confirmations,
+                    confidence=len(confirmations) / 4.0,
+                    entry_underlying=cur_close,
+                    range_high=range_high,
+                    range_low=range_low,
+                    range_size=range_size,
+                    ticker="",
+                )
+
+        return None
+
+    @staticmethod
+    def _compute_rsi(closes: np.ndarray, idx: int, period: int = 14) -> float:
+        """Compute RSI at a given bar index."""
+        if idx < period + 1:
+            return 50.0  # Neutral default
+
+        window = closes[idx - period:idx + 1]
+        deltas = np.diff(window)
+        gains = np.where(deltas > 0, deltas, 0)
+        losses = np.where(deltas < 0, -deltas, 0)
+
+        avg_gain = gains.mean()
+        avg_loss = losses.mean()
+
+        if avg_loss == 0:
+            return 100.0
+        rs = avg_gain / avg_loss
+        return 100.0 - (100.0 / (1.0 + rs))
+
+
+class RangeFadeExitEngine:
+    """
+    Exit engine for range-fade positions.
+
+    Mean-reversion targets: fade back toward range midpoint.
+      - Target: price reverts target_range_pct × range toward center
+      - Stop: price breaks stop_range_pct × range beyond boundary
+      - Time stop: max_hold_bars without reversion
+      - EOD: close before market close
+    """
+
+    def __init__(self, config: RangeFadeConfig):
+        self.cfg = config
+
+    def check_exit(
+        self,
+        pos,                    # SimScalpPosition
+        bar_high: float,
+        bar_low: float,
+        bar_close: float,
+        current_time: datetime,
+        minutes_to_close: float,
+    ) -> Optional[tuple]:
+        """
+        Check exit conditions for a range-fade position.
 
         Returns:
             Tuple of (exit_reason, exit_underlying_price) or None.

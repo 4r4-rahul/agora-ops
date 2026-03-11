@@ -37,7 +37,7 @@ from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from ..config import EngineConfig, ScalpConfig, MeanReversionConfig, ORBConfig, get_ticker_profile, TickerProfile
+from ..config import EngineConfig, ScalpConfig, MeanReversionConfig, ORBConfig, RangeFadeConfig, get_ticker_profile, TickerProfile
 from ..black_scholes import (
     bs_call_price, bs_put_price, bs_delta, bs_gamma, bs_theta, bs_vega,
 )
@@ -45,6 +45,7 @@ from ..scalper import (
     SignalEngine, ScalpExitEngine, RunnerExitEngine,
     MeanReversionSignalEngine, MeanReversionExitEngine,
     ORBSignalEngine, ORBExitEngine, ORBSignal,
+    RangeFadeSignalEngine, RangeFadeExitEngine, RangeFadeSignal,
     ScalpSignal,
 )
 from ..regime import RegimeDetector, RegimeInfo
@@ -181,6 +182,13 @@ class ScalpBacktestResults:
     orb_avg_hold: float = 0.0
     orb_regime_skipped: int = 0         # Days skipped by regime filter
 
+    # Range-fade tier stats
+    rf_trades: int = 0
+    rf_wins: int = 0
+    rf_pnl: float = 0.0
+    rf_biggest_win: float = 0.0
+    rf_avg_hold: float = 0.0
+
     # IV discount filter stats
     iv_blocked_signals: int = 0         # Signals blocked by RV < IV
     iv_passed_signals: int = 0          # Signals that passed IV filter
@@ -289,6 +297,7 @@ class ScalpBacktester:
         self.scalp_cfg = self.config.scalp
         self.mr_cfg = self.config.mean_reversion
         self.orb_cfg = self.config.orb
+        self.rf_cfg = self.config.range_fade
         self.account_size = account_size
         self.pricer = ScalpOptionPricer()
 
@@ -302,10 +311,12 @@ class ScalpBacktester:
         self._signal_engine = None
         self._mr_signal_engine = None
         self._orb_signal_engine = None
+        self._rf_signal_engine = None
         self._exit_engine = ScalpExitEngine(self.scalp_cfg)
         self._mr_exit_engine = MeanReversionExitEngine(self.mr_cfg)
         self._runner_exit_engine = RunnerExitEngine(self.scalp_cfg)
         self._orb_exit_engine = ORBExitEngine(self.orb_cfg)
+        self._rf_exit_engine = RangeFadeExitEngine(self.rf_cfg)
         self._regime_detector = RegimeDetector()
 
         # Slippage model — ATM options have tighter spreads than OTM
@@ -357,6 +368,7 @@ class ScalpBacktester:
         self._signal_engine = SignalEngine(self.scalp_cfg, bar_minutes=bar_minutes)
         self._mr_signal_engine = MeanReversionSignalEngine(self.mr_cfg, bar_minutes=bar_minutes)
         self._orb_signal_engine = ORBSignalEngine(self.orb_cfg, bar_minutes=bar_minutes)
+        self._rf_signal_engine = RangeFadeSignalEngine(self.rf_cfg, bar_minutes=bar_minutes)
 
         results = ScalpBacktestResults(
             ticker=ticker,
@@ -478,6 +490,10 @@ class ScalpBacktester:
         orb_trades_today = 0
         momentum_signal_fired = False    # Track if momentum ever fires this day
 
+        # ── Range-fade tier state ────────────────────────────────
+        open_rf: Optional[SimScalpPosition] = None
+        rf_trades_today = 0
+
         # ── IV discount tracking ─────────────────────────────────
         iv_blocked_count = 0             # Signals blocked by IV discount filter
 
@@ -539,6 +555,27 @@ class ScalpBacktester:
                     if verbose:
                         print(f"    [{day_date}] 📊 ORB skipped: {regime_info.regime} "
                               f"(range={regime_info.day_range_pct:.4f})")
+
+        # ── Range-fade pre-computation ───────────────────────────
+        rf_enabled = self.rf_cfg.enabled
+        rf_data = None
+        rf_regime_ok = False
+        if rf_enabled:
+            rf_data = self._rf_signal_engine.compute_range(day_bars)
+            # Range-fade requires RANGE_BOUND (and optionally MIXED) regime
+            if rf_data and rf_data.get("valid", False):
+                # Reuse regime_info if already computed, else compute
+                if orb_enabled and self.orb_cfg.regime_filter_enabled:
+                    ri = regime_info  # Already classified above
+                else:
+                    ri = self._regime_detector.classify(day_bars)
+                rf_regime_ok = (
+                    ri.regime == "RANGE_BOUND"
+                    or (self.rf_cfg.also_trade_mixed and ri.regime == "MIXED")
+                )
+                if verbose and rf_regime_ok:
+                    print(f"    [{day_date}] 🔃 Range-fade enabled: {ri.regime} "
+                          f"(range={ri.day_range_pct:.4f})")
 
         # Pre-extract numpy arrays for fast bar access
         _close_arr = day_bars["close"].values
@@ -791,6 +828,55 @@ class ScalpBacktester:
                               f"Δunderlying: ${exit_underlying - open_orb.entry_underlying:+.2f}")
 
                     open_orb = None
+
+            # ── 1e. Update open RANGE-FADE position ──────────────
+            if open_rf and open_rf.is_open:
+                result = self._rf_exit_engine.check_exit(
+                    open_rf, bar_high, bar_low, current_price,
+                    current_time, minutes_to_close,
+                )
+
+                if result:
+                    exit_reason, exit_underlying = result
+
+                    exit_premium = self.pricer.price_option(
+                        exit_underlying, open_rf.strike, T,
+                        open_rf.entry_iv, open_rf.right,
+                    )
+                    exit_premium = max(0, exit_premium * (1 - self.exit_slippage_pct))
+
+                    commission = self.commission_per_contract * open_rf.num_contracts * 2
+                    pnl_amount = (exit_premium - open_rf.entry_premium) * \
+                                 open_rf.num_contracts * 100 - commission
+
+                    open_rf.is_open = False
+                    open_rf.exit_time = current_time
+                    open_rf.exit_underlying = exit_underlying
+                    open_rf.exit_premium = exit_premium
+                    open_rf.exit_reason = exit_reason
+                    open_rf.total_pnl = round(pnl_amount, 2)
+                    open_rf.hold_minutes = round(
+                        (current_time - open_rf.entry_time).total_seconds() / 60, 1
+                    )
+
+                    daily_pnl += pnl_amount
+                    day_result.trades_closed += 1
+                    if pnl_amount > 5:
+                        day_result.winning_trades += 1
+                    elif pnl_amount < -5:
+                        day_result.losing_trades += 1
+
+                    if verbose:
+                        mult = exit_premium / open_rf.entry_premium \
+                            if open_rf.entry_premium > 0 else 0
+                        print(f"    [{day_date}] 🔃 RF EXIT  {open_rf.direction} "
+                              f"{open_rf.strike}{open_rf.right} "
+                              f"→ {exit_reason} | {mult:.2f}x | "
+                              f"P&L: ${pnl_amount:+.2f} | "
+                              f"hold: {open_rf.hold_minutes:.0f}m | "
+                              f"Δunderlying: ${exit_underlying - open_rf.entry_underlying:+.2f}")
+
+                    open_rf = None
 
             # ── 2. Scan for new signals ──────────────────────────
             if cooldown_remaining > 0:
@@ -1213,8 +1299,100 @@ class ScalpBacktester:
                                               f"ORB range=${orb_range:.2f} "
                                               f"stop=${orb_stop_price:.2f} target=${orb_target_price:.2f}")
 
+            # ── 3e. RANGE-FADE entry ─────────────────────────────
+            # Strategy E: fires only on RANGE_BOUND / MIXED days.
+            # Fades price at range boundaries with confirmation.
+            if (rf_enabled and rf_regime_ok and rf_data and rf_data.get("valid", False)
+                    and open_rf is None
+                    and rf_trades_today < self.rf_cfg.max_trades_per_day):
+
+                # Defer to momentum
+                skip_for_momentum = (
+                    self.rf_cfg.only_when_no_momentum and momentum_signal_fired
+                )
+
+                if not skip_for_momentum:
+                    rf_signal = self._rf_signal_engine.evaluate(day_bars, rf_data, i)
+
+                    if rf_signal is not None:
+                        day_result.signals_found += 1
+
+                        # ATM strike
+                        otm_distance = current_price * self.rf_cfg.max_otm_pct
+                        if rf_signal.direction == "CALL":
+                            rf_strike = self._round_strike(current_price + otm_distance, profile)
+                            rf_right = "C"
+                        else:
+                            rf_strike = self._round_strike(current_price - otm_distance, profile)
+                            rf_right = "P"
+
+                        # Price the option
+                        rf_option_price = self.pricer.price_option(
+                            current_price, rf_strike, T, day_iv, rf_right,
+                        )
+                        rf_entry_premium = rf_option_price * (1 + self.entry_slippage_pct)
+
+                        # Premium filters
+                        rf_min_prem = self.rf_cfg.min_premium * premium_scale
+                        rf_max_prem = self.rf_cfg.max_premium * premium_scale
+
+                        if rf_min_prem <= rf_entry_premium <= rf_max_prem:
+                            # Position sizing from range-based stop
+                            range_size = rf_signal.range_size
+                            stop_dist = range_size * self.rf_cfg.stop_range_pct
+                            risk_per_contract = 0.50 * stop_dist * 100
+                            if risk_per_contract > 0:
+                                max_risk = self.rf_cfg.max_risk_per_trade * self.price_scale
+                                budget_pct = 0.20 if self.spx_mode else 0.04
+                                max_budget_contracts = int(balance * budget_pct / (rf_entry_premium * 100)) \
+                                    if rf_entry_premium > 0 else 0
+
+                                num_contracts = min(
+                                    int(max_risk / risk_per_contract),
+                                    self.rf_cfg.max_contracts,
+                                    max(1, max_budget_contracts),
+                                )
+                                num_contracts = max(1, num_contracts)
+
+                                if rf_entry_premium * 100 <= balance * 0.40:
+                                    # Compute stop and target
+                                    target_dist = range_size * self.rf_cfg.target_range_pct
+                                    if rf_signal.direction == "CALL":
+                                        # Fading at range low → expect price to go UP toward mid
+                                        rf_stop_price = current_price - stop_dist
+                                        rf_target_price = current_price + target_dist
+                                    else:
+                                        # Fading at range high → expect price to go DOWN toward mid
+                                        rf_stop_price = current_price + stop_dist
+                                        rf_target_price = current_price - target_dist
+
+                                    rf_pos = SimScalpPosition(
+                                        ticker=ticker, strike=rf_strike, right=rf_right,
+                                        direction=rf_signal.direction, expiry_date=day_date,
+                                        confirmations=rf_signal.confirmations.copy(),
+                                        confidence=rf_signal.confidence, tier="range_fade",
+                                        entry_time=current_time, entry_underlying=current_price,
+                                        entry_premium=rf_entry_premium, entry_iv=day_iv,
+                                        num_contracts=num_contracts, atr_at_entry=current_atr,
+                                        stop_price=rf_stop_price, target_price=rf_target_price,
+                                        best_favorable_underlying=current_price,
+                                    )
+
+                                    open_rf = rf_pos
+                                    rf_trades_today += 1
+                                    day_result.trades_entered += 1
+                                    day_result._trades.append(rf_pos)
+
+                                    if verbose:
+                                        print(f"    [{day_date}] 🔃 RF ENTER {rf_signal.direction} "
+                                              f"{ticker} {rf_strike}{rf_right} "
+                                              f"@ ${rf_entry_premium:.2f} x{num_contracts} "
+                                              f"({', '.join(rf_signal.confirmations)}) "
+                                              f"range=${range_size:.2f} "
+                                              f"stop=${rf_stop_price:.2f} target=${rf_target_price:.2f}")
+
         # ── End of day: force-close ALL open positions ───────────
-        for pos_to_close in [open_scalp, open_runner, open_mr, open_orb]:
+        for pos_to_close in [open_scalp, open_runner, open_mr, open_orb, open_rf]:
             if pos_to_close and pos_to_close.is_open:
                 last_price = float(day_bars["close"].iloc[-1])
                 last_time = day_bars.index[-1]
@@ -1224,7 +1402,7 @@ class ScalpBacktester:
                     last_price, pos_to_close.strike,
                     max(T_final, 1e-8), pos_to_close.entry_iv, pos_to_close.right,
                 )
-                slippage = self.exit_slippage_pct if pos_to_close.tier in ("scalp", "mean_rev", "orb") else 0.05
+                slippage = self.exit_slippage_pct if pos_to_close.tier in ("scalp", "mean_rev", "orb", "range_fade") else 0.05
                 exit_premium = max(0, exit_premium * (1 - slippage))
                 commission = self.commission_per_contract * pos_to_close.num_contracts * 2
                 pnl_amount = (exit_premium - pos_to_close.entry_premium) * \
@@ -1413,6 +1591,18 @@ class ScalpBacktester:
             orb_holds = [t.hold_minutes for t in orb_trades_list if t.hold_minutes > 0]
             results.orb_avg_hold = round(np.mean(orb_holds), 1) if orb_holds else 0
 
+        # Range-fade tier
+        rf_trades_list = [t for t in trades if t.tier == "range_fade"]
+        results.rf_trades = len(rf_trades_list)
+        results.rf_wins = sum(1 for t in rf_trades_list if t.total_pnl > 5)
+        results.rf_pnl = round(sum(t.total_pnl for t in rf_trades_list), 2)
+        if rf_trades_list:
+            results.rf_biggest_win = round(
+                max(t.total_pnl for t in rf_trades_list), 2
+            )
+            rf_holds = [t.hold_minutes for t in rf_trades_list if t.hold_minutes > 0]
+            results.rf_avg_hold = round(np.mean(rf_holds), 1) if rf_holds else 0
+
     # ─────────────────────────────────────────────────────────────
     # Reporting
     # ─────────────────────────────────────────────────────────────
@@ -1483,7 +1673,7 @@ class ScalpBacktester:
         print(f"  Avg Δ Underlying: ${results.avg_underlying_move_at_exit:+.3f}")
 
         # ── Multi-Strategy Breakdown ─────────────────────────────
-        has_tiers = results.runner_trades > 0 or results.scalp_trades > 0 or results.mr_trades > 0
+        has_tiers = results.runner_trades > 0 or results.scalp_trades > 0 or results.mr_trades > 0 or results.rf_trades > 0
         if has_tiers:
             print(f"\n  {'─' * 60}")
             print(f"  {C.BOLD}MULTI-STRATEGY BREAKDOWN{C.RESET}")
@@ -1527,6 +1717,14 @@ class ScalpBacktester:
                       f"{oc}${results.orb_pnl:>+11,.2f}{C.RESET} "
                       f"${results.orb_biggest_win:>+9,.2f}")
 
+            if results.rf_trades > 0:
+                rf_wr = results.rf_wins / results.rf_trades * 100
+                rfc = C.GREEN if results.rf_pnl >= 0 else C.RED
+                print(f"  {'🔃 RangeFade':<14} {results.rf_trades:>6} "
+                      f"{results.rf_wins:>5} {rf_wr:>5.1f}% "
+                      f"{rfc}${results.rf_pnl:>+11,.2f}{C.RESET} "
+                      f"${results.rf_biggest_win:>+9,.2f}")
+
             if results.mr_trades > 0:
                 print(f"\n  MeanRev avg hold: {results.mr_avg_hold:.1f} min")
             if results.runner_trades > 0:
@@ -1534,6 +1732,8 @@ class ScalpBacktester:
             if results.orb_trades > 0:
                 print(f"  ORB avg hold: {results.orb_avg_hold:.1f} min"
                       f"  (regime skipped: {results.orb_regime_skipped} days)")
+            if results.rf_trades > 0:
+                print(f"  RangeFade avg hold: {results.rf_avg_hold:.1f} min")
 
         # Exit Reason Breakdown
         if results.exit_stats:
@@ -1645,6 +1845,9 @@ class ScalpBacktester:
                 "orb_pnl": results.orb_pnl,
                 "orb_biggest_win": results.orb_biggest_win,
                 "orb_regime_skipped": results.orb_regime_skipped,
+                "rf_trades": results.rf_trades,
+                "rf_pnl": results.rf_pnl,
+                "rf_biggest_win": results.rf_biggest_win,
             },
             "exit_stats": results.exit_stats,
             "confirmation_stats": results.confirmation_stats,

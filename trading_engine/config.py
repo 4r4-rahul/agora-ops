@@ -488,6 +488,79 @@ class AdaptiveConfig:
 
 
 @dataclass
+class RangeFadeConfig:
+    """
+    Configuration for Range-Bound Fade strategy.
+
+    Trades mean-reversion on RANGE_BOUND days: buy calls at range lows,
+    buy puts at range highs. Price oscillates between support/resistance
+    levels identified from the first 60 bars.
+
+    Target regime: RANGE_BOUND (11-14 days / 129, avg 1.5% day range,
+    wide swings but no net direction).
+
+    Key insight: On RANGE_BOUND days, ORB breakouts fail (price reverts)
+    but the large range provides excellent fade opportunities.
+    We identify the high/low zone from first 60 bars, then fade touches.
+
+    Confirmations:
+      1. RANGE_TOUCH — Price reaches upper/lower boundary zone
+      2. REVERSAL_BAR — Bar reversal pattern (wick rejection, engulfing)
+      3. VWAP_CROSS — Price crossing VWAP supports mean reversion
+      4. RSI_EXTREME — RSI > 70 at range high or RSI < 30 at range low
+    """
+    # ── Master Enable ───────────────────────────────────────────
+    enabled: bool = True
+
+    # ── Range Formation ────────────────────────────────────────
+    formation_bars: int = 60           # 60 bars (1 hour) to establish range
+    # Boundary zone: price must enter top/bottom X% of range to trigger
+    boundary_zone_pct: float = 0.15    # Top/bottom 15% of range = fade zone
+
+    # ── Regime Requirement ─────────────────────────────────────
+    # Only trade on RANGE_BOUND days (detected by full-day classify in backtest)
+    require_range_bound: bool = True
+    also_trade_mixed: bool = True      # Also trade on MIXED days (13 more days)
+
+    # ── Entry Confirmations ────────────────────────────────────
+    min_confirmations: int = 2         # Need ≥2 of {RANGE_TOUCH, REVERSAL_BAR, VWAP_CROSS, RSI_EXTREME}
+
+    # ── Entry Window ───────────────────────────────────────────
+    entry_start_bar: int = 60          # After range forms
+    entry_end_bar: int = 350           # Until ~15 min before close
+    eod_exit_minutes: int = 15         # Close before market close
+
+    # ── Exits (ATR-based) ──────────────────────────────────────
+    # Mean-reversion targets are SMALL — we're fading, not trending
+    target_range_pct: float = 0.50     # Target: 50% of range (fade past midpoint)
+    stop_range_pct: float = 0.15       # Stop: 15% of range beyond boundary
+    max_hold_bars: int = 60            # Max 60 bars (1 hour) — reversion should be fast
+
+    # ── Risk Management ────────────────────────────────────────
+    max_trades_per_day: int = 1        # 1 fade per day (2nd trade = revenge trading)
+    max_risk_per_trade: float = 400.0  # Max dollar risk
+    max_risk_pct: float = 0.04         # 4% of account per trade
+
+    # ── Budget ─────────────────────────────────────────────────
+    max_premium: float = 4.00          # Max per-contract premium (SPY scale)
+    min_premium: float = 0.30          # Minimum viable premium
+    max_contracts: int = 2             # Conservative sizing (fades are riskier)
+
+    # ── Strike Selection ───────────────────────────────────────
+    max_otm_pct: float = 0.001         # ATM: 0.1% OTM
+
+    # ── Priority ───────────────────────────────────────────────
+    # Range fade defers to momentum (Strategy A) but can coexist with ORB.
+    # On RANGE_BOUND days, ORB is already disabled, so no conflict.
+    only_when_no_momentum: bool = True
+
+    # ── RSI Parameters ─────────────────────────────────────────
+    rsi_period: int = 14
+    rsi_overbought: float = 70.0
+    rsi_oversold: float = 30.0
+
+
+@dataclass
 class EngineConfig:
     """Master engine configuration."""
     account: AccountConfig = field(default_factory=AccountConfig)
@@ -498,6 +571,7 @@ class EngineConfig:
     scalp: ScalpConfig = field(default_factory=ScalpConfig)
     orb: ORBConfig = field(default_factory=ORBConfig)
     mean_reversion: MeanReversionConfig = field(default_factory=MeanReversionConfig)
+    range_fade: RangeFadeConfig = field(default_factory=RangeFadeConfig)
     data_dir: str = field(default_factory=lambda: os.path.join(
         os.path.dirname(os.path.dirname(__file__)), "data"
     ))
