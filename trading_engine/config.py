@@ -305,6 +305,13 @@ class ORBConfig:
     stop_close_confirm: bool = False     # Tested True: -$804 drag from theta decay on delayed exits
     max_hold_bars: int = 120             # Max bars to hold (2h, lets trend develop)
 
+    # ── Trailing Stop (Phase 3: protect profits on runners) ────
+    trailing_enabled: bool = True         # Enable trailing stop for ORB
+    trailing_activation_pct: float = 0.25 # Activate after 25% of target distance
+    trailing_breakeven: bool = True       # First move stop to breakeven at activation
+    trailing_distance_pct: float = 0.50   # Trail at 50% of favorable move behind peak
+    trailing_min_bars: int = 60             # Min bars before trailing activates (preserves early target hits)
+
     # ── Time Window ─────────────────────────────────────────────
     # ORB forms 9:30-10:00, then we watch for breakouts 10:00-11:30
     entry_start_bar: int = 30            # Earliest entry (after ORB forms)

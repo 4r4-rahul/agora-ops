@@ -2304,6 +2304,17 @@ class ORBExitEngine:
         """
         stop = pos.stop_price
         target = pos.target_price
+        entry = pos.entry_underlying
+
+        # ── Update best favorable underlying (MFE tracking) ──────
+        if pos.direction == "CALL":
+            pos.best_favorable_underlying = max(
+                pos.best_favorable_underlying, bar_high
+            )
+        else:
+            pos.best_favorable_underlying = min(
+                pos.best_favorable_underlying, bar_low
+            )
 
         # ── 1. Hard Stop ─────────────────────────────────────────
         use_close = self.cfg.stop_close_confirm
@@ -2325,14 +2336,59 @@ class ORBExitEngine:
         if target_hit:
             return ("PROFIT_TARGET", target)
 
-        # ── 3. Time stop (max hold bars) ─────────────────────────
+        # ── 3. Trailing Stop (protect profits on runners) ────────
+        if self.cfg.trailing_enabled:
+            hold_mins = (current_time - pos.entry_time).total_seconds() / 60
+            past_min_bars = hold_mins >= self.cfg.trailing_min_bars
+
+            if past_min_bars:
+                if pos.direction == "CALL":
+                    target_dist = target - entry
+                    favorable_move = pos.best_favorable_underlying - entry
+                else:
+                    target_dist = entry - target
+                    favorable_move = entry - pos.best_favorable_underlying
+
+                activation_threshold = target_dist * self.cfg.trailing_activation_pct
+
+                if favorable_move >= activation_threshold and target_dist > 0:
+                    # Trailing is active — compute trail level
+                    trail_offset = favorable_move * self.cfg.trailing_distance_pct
+                    if self.cfg.trailing_breakeven:
+                        # Trail from peak, but never below breakeven (entry)
+                        if pos.direction == "CALL":
+                            trail_level = max(
+                                entry,
+                                pos.best_favorable_underlying - trail_offset,
+                            )
+                            if bar_low <= trail_level:
+                                return ("TRAILING_STOP", trail_level)
+                        else:
+                            trail_level = min(
+                                entry,
+                                pos.best_favorable_underlying + trail_offset,
+                            )
+                            if bar_high >= trail_level:
+                                return ("TRAILING_STOP", trail_level)
+                    else:
+                        # Trail from peak without breakeven floor
+                        if pos.direction == "CALL":
+                            trail_level = pos.best_favorable_underlying - trail_offset
+                            if bar_low <= trail_level:
+                                return ("TRAILING_STOP", trail_level)
+                        else:
+                            trail_level = pos.best_favorable_underlying + trail_offset
+                            if bar_high >= trail_level:
+                                return ("TRAILING_STOP", trail_level)
+
+        # ── 4. Time stop (max hold bars) ─────────────────────────
         hold_minutes = (current_time - pos.entry_time).total_seconds() / 60
         max_hold_minutes = self.cfg.max_hold_bars * 1  # 1 bar = 1 min
 
         if hold_minutes >= max_hold_minutes:
             return ("TIME_STOP", bar_close)
 
-        # ── 4. EOD exit ──────────────────────────────────────────
+        # ── 5. EOD exit ──────────────────────────────────────────
         if minutes_to_close <= self.cfg.eod_exit_minutes:
             return ("EOD_CLOSE", bar_close)
 
