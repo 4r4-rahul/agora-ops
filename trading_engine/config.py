@@ -676,6 +676,28 @@ class EngineConfig:
         os.path.dirname(os.path.dirname(__file__)), "data", "trade_journal.json"
     ))
 
+    @staticmethod
+    def for_qqq() -> "EngineConfig":
+        """
+        QQQ-optimized configuration.
+
+        QQQ has 1.36× the daily range of SPY (higher beta).
+        Calibrated via fine-grid sweep on 129 QQQ trading days:
+          - ORB: wider target (1.75× vs 1.5×), tighter stop (0.45× vs 0.6×)
+            captures QQQ's bigger trends without giving back on reversals
+          - RF: same params work (mean-reversion is regime-dependent, not beta-dependent)
+          - Scalp: same params (momentum signals are % based, scale-invariant)
+          - Trailing: SPY defaults (0.25/0.50/60) work well for QQQ too
+
+        Sweep results (stop=0.45, tgt=1.75, default trailing):
+          99 trades, PF=3.48, PnL=$+100,723, MaxDD=27.9%, WR=53.5%
+        """
+        cfg = EngineConfig()
+        # ORB: QQQ trends harder → wider target, tighter stop
+        cfg.orb.stop_range_mult = 0.45   # 0.45 vs SPY's 0.6 (tighter)
+        cfg.orb.target_range_mult = 1.75 # 1.75 vs SPY's 1.5 (wider target)
+        return cfg
+
 
 # ─────────────────────────────────────────────────────────────────
 # Ticker Profiles
@@ -724,6 +746,12 @@ TICKER_PROFILES: Dict[str, TickerProfile] = {
         option_exchange="SMART", strike_increment=5.0,
         multiplier=100, is_cash_settled=True, is_european=True,
         tax_1256=True, notional_scale=10.0, premium_scale=10.0,
+    ),
+    "NDX": TickerProfile(
+        symbol="NDX", sec_type="IND", exchange="CBOE",
+        option_exchange="SMART", strike_increment=25.0,
+        multiplier=100, is_cash_settled=True, is_european=True,
+        tax_1256=True, notional_scale=40.0, premium_scale=40.0,
     ),
     "IWM": TickerProfile(
         symbol="IWM", sec_type="STK", exchange="SMART",

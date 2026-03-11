@@ -300,7 +300,8 @@ class ScalpBacktester:
 
     def __init__(self, config: Optional[EngineConfig] = None,
                  account_size: float = 10_000.0,
-                 spx_mode: bool = False):
+                 spx_mode: bool = False,
+                 ndx_mode: bool = False):
         self.config = config or EngineConfig()
         self.scalp_cfg = self.config.scalp
         self.mr_cfg = self.config.mean_reversion
@@ -310,11 +311,17 @@ class ScalpBacktester:
         self.account_size = account_size
         self.pricer = ScalpOptionPricer()
 
-        # SPX Mode: When True, scale SPY bars ×10 to SPX levels.
-        # This is valid because SPX = SPY × 10 (identical % moves),
-        # but option pricing, strike grid, and slippage differ.
+        # Index Mode: Scale ETF bars to index levels.
+        # SPX Mode: SPY ×10 → SPX ($5 strikes, 10× premiums)
+        # NDX Mode: QQQ ×40 → NDX ($25 strikes, 40× premiums)
         self.spx_mode = spx_mode
-        self.price_scale = 10.0 if spx_mode else 1.0
+        self.ndx_mode = ndx_mode
+        if ndx_mode:
+            self.price_scale = 40.0
+        elif spx_mode:
+            self.price_scale = 10.0
+        else:
+            self.price_scale = 1.0
 
         # Will be created per-run with correct bar_minutes
         self._signal_engine = None
@@ -332,11 +339,16 @@ class ScalpBacktester:
 
         # Slippage model — ATM options have tighter spreads than OTM
         # SPX 0DTE ATM: massive liquidity, ~$0.50 wide on $20 = 1.25% each way
+        # NDX 0DTE ATM: good liquidity, ~$1.00 wide on $50 = 1.0% each way
         # SPY ATM 0DTE: bid-ask ~5% of mid → 2% each way
-        if spx_mode:
+        if ndx_mode:
+            self.entry_slippage_pct = 0.010   # NDX ATM: 1.0% (good liquidity)
+            self.exit_slippage_pct = 0.010
+            self.commission_per_contract = 0.65
+        elif spx_mode:
             self.entry_slippage_pct = 0.0125  # SPX ATM: 1.25% (tighter spreads)
             self.exit_slippage_pct = 0.0125
-            self.commission_per_contract = 0.65  # Same per contract
+            self.commission_per_contract = 0.65
         else:
             self.entry_slippage_pct = 0.03
             self.exit_slippage_pct = 0.03
@@ -357,17 +369,26 @@ class ScalpBacktester:
         Returns:
             ScalpBacktestResults
         """
-        # In SPX mode, scale SPY price bars to SPX levels (×10)
-        if self.spx_mode:
+        # In index mode, scale ETF price bars to index levels
+        if self.ndx_mode:
+            ticker = "NDX"
+            bars_df = bars_df.copy()
+            for col in ["open", "high", "low", "close"]:
+                if col in bars_df.columns:
+                    bars_df[col] = bars_df[col] * self.price_scale
+            if "vwap" in bars_df.columns:
+                bars_df["vwap"] = bars_df["vwap"] * self.price_scale
+            if verbose:
+                print(f"  🔄 NDX MODE: Scaled QQQ bars ×{self.price_scale:.0f} "
+                      f"(price ~${bars_df['close'].iloc[0]:,.0f})")
+        elif self.spx_mode:
             ticker = "SPX"
             bars_df = bars_df.copy()
             for col in ["open", "high", "low", "close"]:
                 if col in bars_df.columns:
                     bars_df[col] = bars_df[col] * self.price_scale
-            # VWAP also scales if present
             if "vwap" in bars_df.columns:
                 bars_df["vwap"] = bars_df["vwap"] * self.price_scale
-            # Volume stays the same (it's a count)
             if verbose:
                 print(f"  🔄 SPX MODE: Scaled SPY bars ×{self.price_scale:.0f} "
                       f"(price ~${bars_df['close'].iloc[0]:,.0f})")
