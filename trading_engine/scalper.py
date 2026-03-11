@@ -1565,12 +1565,15 @@ class ScalpExitEngine:
         else:
             pos.best_favorable_underlying = min(pos.best_favorable_underlying, bar_low)
 
-        # ── 1. Hard Stop (using bar extremes) ────────────────────
+        # ── 1. Hard Stop ─────────────────────────────────────────
+        # stop_close_confirm: use bar CLOSE (filters wick whipsaws)
+        # otherwise: use bar extremes (LOW for calls, HIGH for puts)
+        use_close = self.cfg.stop_close_confirm
         if pos.direction == "CALL":
-            stop_hit = bar_low <= stop
+            stop_hit = bar_close <= stop if use_close else bar_low <= stop
             target_hit = bar_high >= target
         else:  # PUT
-            stop_hit = bar_high >= stop
+            stop_hit = bar_close >= stop if use_close else bar_high >= stop
             target_hit = bar_low <= target
 
         # Conservative: if both could have triggered, assume stop first
@@ -2303,11 +2306,12 @@ class ORBExitEngine:
         target = pos.target_price
 
         # ── 1. Hard Stop ─────────────────────────────────────────
+        use_close = self.cfg.stop_close_confirm
         if pos.direction == "CALL":
-            stop_hit = bar_low <= stop
+            stop_hit = bar_close <= stop if use_close else bar_low <= stop
             target_hit = bar_high >= target
         else:
-            stop_hit = bar_high >= stop
+            stop_hit = bar_close >= stop if use_close else bar_high >= stop
             target_hit = bar_low <= target
 
         # Conservative: stop wins ties
@@ -2584,11 +2588,12 @@ class RangeFadeExitEngine:
         target = pos.target_price
 
         # ── 1. Hard Stop ─────────────────────────────────────────
+        use_close = self.cfg.stop_close_confirm
         if pos.direction == "CALL":
-            stop_hit = bar_low <= stop
+            stop_hit = bar_close <= stop if use_close else bar_low <= stop
             target_hit = bar_high >= target
         else:
-            stop_hit = bar_high >= stop
+            stop_hit = bar_close >= stop if use_close else bar_high >= stop
             target_hit = bar_low <= target
 
         # Conservative: stop wins ties

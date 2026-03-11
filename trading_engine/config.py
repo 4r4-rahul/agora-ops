@@ -171,6 +171,7 @@ class ScalpConfig:
     # ── ATR-Based Exits (in ATR multiples) ──────────────────────
     atr_period: int = 15                # 15-bar rolling ATR (= 15 min on 1m)
     stop_atr_mult: float = 3.0          # Stop: 3 × ATR adverse ($7.80 SPX)
+    stop_close_confirm: bool = False     # Tested True: -$804 drag from theta decay on delayed exits
     profit_target_atr_mult: float = 3.5  # Target: 3.5 × ATR favorable ($9.10 SPX)
     trailing_activation_atr: float = 3.5  # Start trailing after 3.5 × ATR
     trailing_distance_atr: float = 1.5   # Trail distance: 1.5 × ATR
@@ -300,7 +301,8 @@ class ORBConfig:
 
     # ── ATR-Based Exits (in ORB range multiples) ────────────────
     target_range_mult: float = 1.5       # Target: 1.5× ORB range
-    stop_range_mult: float = 0.7         # Stop: 0.7× ORB range back inside
+    stop_range_mult: float = 0.6         # Stop: 0.6× ORB range back inside (was 0.7, tighter saves theta)
+    stop_close_confirm: bool = False     # Tested True: -$804 drag from theta decay on delayed exits
     max_hold_bars: int = 120             # Max bars to hold (2h, lets trend develop)
 
     # ── Time Window ─────────────────────────────────────────────
@@ -533,7 +535,8 @@ class RangeFadeConfig:
     # ── Exits (ATR-based) ──────────────────────────────────────
     # Mean-reversion targets are SMALL — we're fading, not trending
     target_range_pct: float = 0.50     # Target: 50% of range (fade past midpoint)
-    stop_range_pct: float = 0.15       # Stop: 15% of range beyond boundary
+    stop_range_pct: float = 0.12       # Stop: 12% of range beyond boundary (was 15%, tighter saves theta)
+    stop_close_confirm: bool = False   # Tested True: -$804 drag from theta decay on delayed exits
     max_hold_bars: int = 60            # Max 60 bars (1 hour) — reversion should be fast
 
     # ── Risk Management ────────────────────────────────────────
@@ -593,7 +596,7 @@ class VWAPMRConfig:
       - Result: 37 trades, 43.2% WR, R:R=2.1:1, +$4,180 VM P&L
     """
     # ── Master Enable ───────────────────────────────────────────
-    enabled: bool = True
+    enabled: bool = False  # Disabled: standalone +$4K but -$981 total from compounding drag
 
     # ── Regime Requirement ─────────────────────────────────────
     require_dead_flat: bool = True     # Only trade on DEAD_FLAT days
