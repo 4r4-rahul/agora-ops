@@ -46,6 +46,7 @@ from ..scalper import (
     MeanReversionSignalEngine, MeanReversionExitEngine,
     ORBSignalEngine, ORBExitEngine, ORBSignal,
     RangeFadeSignalEngine, RangeFadeExitEngine, RangeFadeSignal,
+    VWAPMRSignalEngine, VWAPMRExitEngine, VWAPMRSignal,
     ScalpSignal,
 )
 from ..regime import RegimeDetector, RegimeInfo
@@ -189,6 +190,13 @@ class ScalpBacktestResults:
     rf_biggest_win: float = 0.0
     rf_avg_hold: float = 0.0
 
+    # VWAP mean-reversion tier stats
+    vm_trades: int = 0
+    vm_wins: int = 0
+    vm_pnl: float = 0.0
+    vm_biggest_win: float = 0.0
+    vm_avg_hold: float = 0.0
+
     # IV discount filter stats
     iv_blocked_signals: int = 0         # Signals blocked by RV < IV
     iv_passed_signals: int = 0          # Signals that passed IV filter
@@ -298,6 +306,7 @@ class ScalpBacktester:
         self.mr_cfg = self.config.mean_reversion
         self.orb_cfg = self.config.orb
         self.rf_cfg = self.config.range_fade
+        self.vm_cfg = self.config.vwap_mr
         self.account_size = account_size
         self.pricer = ScalpOptionPricer()
 
@@ -312,11 +321,13 @@ class ScalpBacktester:
         self._mr_signal_engine = None
         self._orb_signal_engine = None
         self._rf_signal_engine = None
+        self._vm_signal_engine = None
         self._exit_engine = ScalpExitEngine(self.scalp_cfg)
         self._mr_exit_engine = MeanReversionExitEngine(self.mr_cfg)
         self._runner_exit_engine = RunnerExitEngine(self.scalp_cfg)
         self._orb_exit_engine = ORBExitEngine(self.orb_cfg)
         self._rf_exit_engine = RangeFadeExitEngine(self.rf_cfg)
+        self._vm_exit_engine = VWAPMRExitEngine(self.vm_cfg)
         self._regime_detector = RegimeDetector()
 
         # Slippage model — ATM options have tighter spreads than OTM
@@ -369,6 +380,7 @@ class ScalpBacktester:
         self._mr_signal_engine = MeanReversionSignalEngine(self.mr_cfg, bar_minutes=bar_minutes)
         self._orb_signal_engine = ORBSignalEngine(self.orb_cfg, bar_minutes=bar_minutes)
         self._rf_signal_engine = RangeFadeSignalEngine(self.rf_cfg, bar_minutes=bar_minutes)
+        self._vm_signal_engine = VWAPMRSignalEngine(self.vm_cfg, bar_minutes=bar_minutes)
 
         results = ScalpBacktestResults(
             ticker=ticker,
@@ -494,6 +506,10 @@ class ScalpBacktester:
         open_rf: Optional[SimScalpPosition] = None
         rf_trades_today = 0
 
+        # ── VWAP mean-reversion tier state ───────────────────────
+        open_vm: Optional[SimScalpPosition] = None
+        vm_trades_today = 0
+
         # ── IV discount tracking ─────────────────────────────────
         iv_blocked_count = 0             # Signals blocked by IV discount filter
 
@@ -576,6 +592,30 @@ class ScalpBacktester:
                 if verbose and rf_regime_ok:
                     print(f"    [{day_date}] 🔃 Range-fade enabled: {ri.regime} "
                           f"(range={ri.day_range_pct:.4f})")
+
+        # ── VWAP mean-reversion pre-computation ──────────────────
+        vm_enabled = self.vm_cfg.enabled
+        vm_data = None
+        vm_regime_ok = False
+        if vm_enabled:
+            vm_data = self._vm_signal_engine.compute_vwap(day_bars)
+            # VWAP MR requires DEAD_FLAT regime
+            if vm_data and vm_data.get("valid", False):
+                # Reuse regime_info if already computed, else compute
+                if orb_enabled and self.orb_cfg.regime_filter_enabled:
+                    ri_vm = regime_info
+                elif rf_enabled and rf_data and rf_data.get("valid", False):
+                    ri_vm = ri  # Already classified for RF
+                else:
+                    ri_vm = self._regime_detector.classify(day_bars)
+                vm_regime_ok = (
+                    ri_vm.regime == "DEAD_FLAT"
+                    if self.vm_cfg.require_dead_flat
+                    else True
+                )
+                if verbose and vm_regime_ok:
+                    print(f"    [{day_date}] 📉 VWAP-MR enabled: {ri_vm.regime} "
+                          f"(range={ri_vm.day_range_pct:.4f})")
 
         # Pre-extract numpy arrays for fast bar access
         _close_arr = day_bars["close"].values
@@ -877,6 +917,58 @@ class ScalpBacktester:
                               f"Δunderlying: ${exit_underlying - open_rf.entry_underlying:+.2f}")
 
                     open_rf = None
+
+            # ── 1f. Update open VWAP-MR position ─────────────────
+            if open_vm and open_vm.is_open:
+                # Get current VWAP for dynamic exit
+                cur_vwap = float(vm_data["vwap_arr"][i]) if vm_data and vm_data.get("valid", False) else 0.0
+
+                result = self._vm_exit_engine.check_exit(
+                    open_vm, bar_high, bar_low, current_price,
+                    current_time, minutes_to_close, cur_vwap,
+                )
+
+                if result:
+                    exit_reason, exit_underlying = result
+
+                    exit_premium = self.pricer.price_option(
+                        exit_underlying, open_vm.strike, T,
+                        open_vm.entry_iv, open_vm.right,
+                    )
+                    exit_premium = max(0, exit_premium * (1 - self.exit_slippage_pct))
+
+                    commission = self.commission_per_contract * open_vm.num_contracts * 2
+                    pnl_amount = (exit_premium - open_vm.entry_premium) * \
+                                 open_vm.num_contracts * 100 - commission
+
+                    open_vm.is_open = False
+                    open_vm.exit_time = current_time
+                    open_vm.exit_underlying = exit_underlying
+                    open_vm.exit_premium = exit_premium
+                    open_vm.exit_reason = exit_reason
+                    open_vm.total_pnl = round(pnl_amount, 2)
+                    open_vm.hold_minutes = round(
+                        (current_time - open_vm.entry_time).total_seconds() / 60, 1
+                    )
+
+                    daily_pnl += pnl_amount
+                    day_result.trades_closed += 1
+                    if pnl_amount > 5:
+                        day_result.winning_trades += 1
+                    elif pnl_amount < -5:
+                        day_result.losing_trades += 1
+
+                    if verbose:
+                        mult = exit_premium / open_vm.entry_premium \
+                            if open_vm.entry_premium > 0 else 0
+                        print(f"    [{day_date}] 📉 VM EXIT  {open_vm.direction} "
+                              f"{open_vm.strike}{open_vm.right} "
+                              f"→ {exit_reason} | {mult:.2f}x | "
+                              f"P&L: ${pnl_amount:+.2f} | "
+                              f"hold: {open_vm.hold_minutes:.0f}m | "
+                              f"Δunderlying: ${exit_underlying - open_vm.entry_underlying:+.2f}")
+
+                    open_vm = None
 
             # ── 2. Scan for new signals ──────────────────────────
             if cooldown_remaining > 0:
@@ -1391,8 +1483,103 @@ class ScalpBacktester:
                                               f"range=${range_size:.2f} "
                                               f"stop=${rf_stop_price:.2f} target=${rf_target_price:.2f}")
 
+            # ── 3f. VWAP MEAN-REVERSION entry ────────────────────
+            # Strategy F: fires only on DEAD_FLAT days.
+            # Fades price deviation from VWAP with confirmation.
+            if (vm_enabled and vm_regime_ok and vm_data and vm_data.get("valid", False)
+                    and open_vm is None
+                    and vm_trades_today < self.vm_cfg.max_trades_per_day):
+
+                # Defer to momentum
+                skip_for_momentum = (
+                    self.vm_cfg.only_when_no_momentum and momentum_signal_fired
+                )
+
+                if not skip_for_momentum:
+                    vm_signal = self._vm_signal_engine.evaluate(day_bars, vm_data, i)
+
+                    if vm_signal is not None:
+                        day_result.signals_found += 1
+
+                        # ATM strike
+                        otm_distance = current_price * self.vm_cfg.max_otm_pct
+                        if vm_signal.direction == "CALL":
+                            vm_strike = self._round_strike(current_price + otm_distance, profile)
+                            vm_right = "C"
+                        else:
+                            vm_strike = self._round_strike(current_price - otm_distance, profile)
+                            vm_right = "P"
+
+                        # Price the option
+                        vm_option_price = self.pricer.price_option(
+                            current_price, vm_strike, T, day_iv, vm_right,
+                        )
+                        vm_entry_premium = vm_option_price * (1 + self.entry_slippage_pct)
+
+                        # Premium filters
+                        vm_min_prem = self.vm_cfg.min_premium * premium_scale
+                        vm_max_prem = self.vm_cfg.max_premium * premium_scale
+
+                        if vm_min_prem <= vm_entry_premium <= vm_max_prem:
+                            # Position sizing: deviation-based stop
+                            cur_vwap = vm_signal.vwap_price
+                            dev_abs = abs(current_price - cur_vwap)
+                            # Stop: if deviation grows to stop_deviation_pct
+                            stop_dev = current_price * self.vm_cfg.stop_deviation_pct / 100
+                            risk_per_contract = 0.50 * stop_dev * 100
+                            if risk_per_contract > 0:
+                                max_risk = self.vm_cfg.max_risk_per_trade * self.price_scale
+                                budget_pct = 0.20 if self.spx_mode else 0.03
+                                max_budget_contracts = int(balance * budget_pct / (vm_entry_premium * 100)) \
+                                    if vm_entry_premium > 0 else 0
+
+                                num_contracts = min(
+                                    int(max_risk / risk_per_contract),
+                                    self.vm_cfg.max_contracts,
+                                    max(1, max_budget_contracts),
+                                )
+                                num_contracts = max(1, num_contracts)
+
+                                if vm_entry_premium * 100 <= balance * 0.40:
+                                    # Compute stop and target
+                                    # Target: price returns to within target_vwap_return_pct of VWAP
+                                    target_offset = cur_vwap * self.vm_cfg.target_vwap_return_pct / 100
+                                    if vm_signal.direction == "CALL":
+                                        # Price below VWAP → expect snap-back UP
+                                        vm_stop_price = current_price - stop_dev
+                                        vm_target_price = cur_vwap - target_offset
+                                    else:
+                                        # Price above VWAP → expect snap-back DOWN
+                                        vm_stop_price = current_price + stop_dev
+                                        vm_target_price = cur_vwap + target_offset
+
+                                    vm_pos = SimScalpPosition(
+                                        ticker=ticker, strike=vm_strike, right=vm_right,
+                                        direction=vm_signal.direction, expiry_date=day_date,
+                                        confirmations=vm_signal.confirmations.copy(),
+                                        confidence=vm_signal.confidence, tier="vwap_mr",
+                                        entry_time=current_time, entry_underlying=current_price,
+                                        entry_premium=vm_entry_premium, entry_iv=day_iv,
+                                        num_contracts=num_contracts, atr_at_entry=current_atr,
+                                        stop_price=vm_stop_price, target_price=vm_target_price,
+                                        best_favorable_underlying=current_price,
+                                    )
+
+                                    open_vm = vm_pos
+                                    vm_trades_today += 1
+                                    day_result.trades_entered += 1
+                                    day_result._trades.append(vm_pos)
+
+                                    if verbose:
+                                        print(f"    [{day_date}] 📉 VM ENTER {vm_signal.direction} "
+                                              f"{ticker} {vm_strike}{vm_right} "
+                                              f"@ ${vm_entry_premium:.2f} x{num_contracts} "
+                                              f"({', '.join(vm_signal.confirmations)}) "
+                                              f"dev={vm_signal.deviation_pct:.3f}% "
+                                              f"stop=${vm_stop_price:.2f} target=${vm_target_price:.2f}")
+
         # ── End of day: force-close ALL open positions ───────────
-        for pos_to_close in [open_scalp, open_runner, open_mr, open_orb, open_rf]:
+        for pos_to_close in [open_scalp, open_runner, open_mr, open_orb, open_rf, open_vm]:
             if pos_to_close and pos_to_close.is_open:
                 last_price = float(day_bars["close"].iloc[-1])
                 last_time = day_bars.index[-1]
@@ -1402,7 +1589,7 @@ class ScalpBacktester:
                     last_price, pos_to_close.strike,
                     max(T_final, 1e-8), pos_to_close.entry_iv, pos_to_close.right,
                 )
-                slippage = self.exit_slippage_pct if pos_to_close.tier in ("scalp", "mean_rev", "orb", "range_fade") else 0.05
+                slippage = self.exit_slippage_pct if pos_to_close.tier in ("scalp", "mean_rev", "orb", "range_fade", "vwap_mr") else 0.05
                 exit_premium = max(0, exit_premium * (1 - slippage))
                 commission = self.commission_per_contract * pos_to_close.num_contracts * 2
                 pnl_amount = (exit_premium - pos_to_close.entry_premium) * \
@@ -1603,6 +1790,18 @@ class ScalpBacktester:
             rf_holds = [t.hold_minutes for t in rf_trades_list if t.hold_minutes > 0]
             results.rf_avg_hold = round(np.mean(rf_holds), 1) if rf_holds else 0
 
+        # VWAP mean-reversion tier
+        vm_trades_list = [t for t in trades if t.tier == "vwap_mr"]
+        results.vm_trades = len(vm_trades_list)
+        results.vm_wins = sum(1 for t in vm_trades_list if t.total_pnl > 5)
+        results.vm_pnl = round(sum(t.total_pnl for t in vm_trades_list), 2)
+        if vm_trades_list:
+            results.vm_biggest_win = round(
+                max(t.total_pnl for t in vm_trades_list), 2
+            )
+            vm_holds = [t.hold_minutes for t in vm_trades_list if t.hold_minutes > 0]
+            results.vm_avg_hold = round(np.mean(vm_holds), 1) if vm_holds else 0
+
     # ─────────────────────────────────────────────────────────────
     # Reporting
     # ─────────────────────────────────────────────────────────────
@@ -1673,7 +1872,7 @@ class ScalpBacktester:
         print(f"  Avg Δ Underlying: ${results.avg_underlying_move_at_exit:+.3f}")
 
         # ── Multi-Strategy Breakdown ─────────────────────────────
-        has_tiers = results.runner_trades > 0 or results.scalp_trades > 0 or results.mr_trades > 0 or results.rf_trades > 0
+        has_tiers = results.runner_trades > 0 or results.scalp_trades > 0 or results.mr_trades > 0 or results.rf_trades > 0 or results.vm_trades > 0
         if has_tiers:
             print(f"\n  {'─' * 60}")
             print(f"  {C.BOLD}MULTI-STRATEGY BREAKDOWN{C.RESET}")
@@ -1725,6 +1924,14 @@ class ScalpBacktester:
                       f"{rfc}${results.rf_pnl:>+11,.2f}{C.RESET} "
                       f"${results.rf_biggest_win:>+9,.2f}")
 
+            if results.vm_trades > 0:
+                vm_wr = results.vm_wins / results.vm_trades * 100
+                vmc = C.GREEN if results.vm_pnl >= 0 else C.RED
+                print(f"  {'📉 VWAP-MR':<14} {results.vm_trades:>6} "
+                      f"{results.vm_wins:>5} {vm_wr:>5.1f}% "
+                      f"{vmc}${results.vm_pnl:>+11,.2f}{C.RESET} "
+                      f"${results.vm_biggest_win:>+9,.2f}")
+
             if results.mr_trades > 0:
                 print(f"\n  MeanRev avg hold: {results.mr_avg_hold:.1f} min")
             if results.runner_trades > 0:
@@ -1734,6 +1941,8 @@ class ScalpBacktester:
                       f"  (regime skipped: {results.orb_regime_skipped} days)")
             if results.rf_trades > 0:
                 print(f"  RangeFade avg hold: {results.rf_avg_hold:.1f} min")
+            if results.vm_trades > 0:
+                print(f"  VWAP-MR avg hold: {results.vm_avg_hold:.1f} min")
 
         # Exit Reason Breakdown
         if results.exit_stats:
@@ -1848,6 +2057,9 @@ class ScalpBacktester:
                 "rf_trades": results.rf_trades,
                 "rf_pnl": results.rf_pnl,
                 "rf_biggest_win": results.rf_biggest_win,
+                "vm_trades": results.vm_trades,
+                "vm_pnl": results.vm_pnl,
+                "vm_biggest_win": results.vm_biggest_win,
             },
             "exit_stats": results.exit_stats,
             "confirmation_stats": results.confirmation_stats,

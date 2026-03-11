@@ -72,7 +72,7 @@ from typing import List, Optional, Dict, Any
 import numpy as np
 import pandas as pd
 
-from .config import EngineConfig, ScalpConfig, MeanReversionConfig, ORBConfig, RangeFadeConfig, get_ticker_profile, TickerProfile
+from .config import EngineConfig, ScalpConfig, MeanReversionConfig, ORBConfig, RangeFadeConfig, VWAPMRConfig, get_ticker_profile, TickerProfile
 
 logger = logging.getLogger(__name__)
 
@@ -2610,6 +2610,292 @@ class RangeFadeExitEngine:
             return ("TIME_STOP", bar_close)
 
         # ── 4. EOD exit ──────────────────────────────────────────
+        if minutes_to_close <= self.cfg.eod_exit_minutes:
+            return ("EOD_CLOSE", bar_close)
+
+        return None
+
+
+# ═════════════════════════════════════════════════════════════════
+# Strategy F — VWAP Mean-Reversion (DEAD_FLAT days)
+# ═════════════════════════════════════════════════════════════════
+
+@dataclass
+class VWAPMRSignal:
+    """A VWAP mean-reversion signal: fade deviations from VWAP on flat days."""
+    direction: str = ""          # "CALL" (price below VWAP) or "PUT" (above)
+    confirmations: List[str] = field(default_factory=list)
+    confidence: float = 0.0
+    entry_underlying: float = 0.0
+    vwap_price: float = 0.0      # VWAP at signal time
+    deviation_pct: float = 0.0   # How far price is from VWAP (%)
+    timestamp: datetime = field(default_factory=datetime.now)
+    ticker: str = ""
+
+
+class VWAPMRSignalEngine:
+    """
+    VWAP Mean-Reversion signal engine for DEAD_FLAT days.
+
+    On dead-flat days (range <0.8%), price oscillates tightly around VWAP.
+    When price drifts ≥0.15% from VWAP, we fade the deviation expecting
+    a snap-back. DEAD_FLAT days have avg max VWAP deviation of 0.286%,
+    so a 0.15% threshold catches the meaningful oscillations.
+
+    Strategy F: fires only on DEAD_FLAT days where all other strategies
+    are disabled (ORB skips dead flat, momentum doesn't fire, RF needs
+    RANGE_BOUND).
+
+    Confirmation components:
+      1. VWAP_DEV    — Price deviation ≥ threshold from VWAP
+      2. REVERSAL_BAR — Wick rejection or engulfing at deviation extreme
+      3. RSI_EXTREME  — RSI confirms overextension
+      4. SNAP_BACK    — Price starting to revert (closing toward VWAP)
+    """
+
+    def __init__(self, config: VWAPMRConfig, bar_minutes: int = 1):
+        self.cfg = config
+        self.bar_minutes = bar_minutes
+
+    def compute_vwap(self, day_bars: pd.DataFrame) -> Dict[str, Any]:
+        """
+        Compute rolling VWAP for the entire day.
+
+        Returns dict with:
+          vwap_arr (numpy array of VWAP per bar), valid (bool).
+        """
+        n = len(day_bars)
+        if n < self.cfg.vwap_warmup_bars + 10:
+            return {"valid": False}
+
+        h = day_bars["high"].values
+        l = day_bars["low"].values
+        c = day_bars["close"].values
+        typical = (h + l + c) / 3.0
+
+        # Use volume-weighted VWAP if volume available
+        if "volume" in day_bars.columns:
+            v = day_bars["volume"].values.astype(float)
+            cum_vol = np.cumsum(v)
+            cum_tp_vol = np.cumsum(typical * v)
+            # Avoid division by zero
+            vwap_arr = np.where(
+                cum_vol > 0,
+                cum_tp_vol / cum_vol,
+                typical
+            )
+        else:
+            # Fallback: cumulative mean of typical price
+            vwap_arr = np.cumsum(typical) / np.arange(1, n + 1)
+
+        return {
+            "vwap_arr": vwap_arr,
+            "valid": True,
+        }
+
+    def evaluate(
+        self,
+        day_bars: pd.DataFrame,
+        vwap_data: Dict[str, Any],
+        bar_idx: int,
+    ) -> Optional[VWAPMRSignal]:
+        """
+        Check if bar_idx has a VWAP mean-reversion opportunity.
+
+        Generates CALL when price is below VWAP (expect snap-back up),
+        PUT when price is above VWAP (expect snap-back down).
+        """
+        if not vwap_data.get("valid", False):
+            return None
+
+        cfg = self.cfg
+        if bar_idx < cfg.entry_start_bar or bar_idx > cfg.entry_end_bar:
+            return None
+
+        c = day_bars["close"].values
+        h = day_bars["high"].values
+        l = day_bars["low"].values
+        o = day_bars["open"].values
+        n = len(c)
+
+        if bar_idx >= n or bar_idx < 2:
+            return None
+
+        vwap_arr = vwap_data["vwap_arr"]
+        cur_close = float(c[bar_idx])
+        prev_close = float(c[bar_idx - 1])
+        cur_high = float(h[bar_idx])
+        cur_low = float(l[bar_idx])
+        cur_open = float(o[bar_idx])
+        cur_vwap = float(vwap_arr[bar_idx])
+
+        if cur_vwap <= 0:
+            return None
+
+        # ── Compute deviation from VWAP ──────────────────────────
+        deviation = cur_close - cur_vwap
+        deviation_pct = abs(deviation) / cur_vwap * 100  # in %
+
+        if deviation_pct < cfg.min_vwap_deviation_pct:
+            return None
+
+        # ── Compute RSI ──────────────────────────────────────────
+        rsi = self._compute_rsi(c, bar_idx, cfg.rsi_period)
+
+        # ── Price BELOW VWAP → buy CALL (expect snap-back up) ───
+        if deviation < 0:
+            confirmations = ["VWAP_DEV"]
+
+            # Reversal bar: wick rejection at bottom (lower wick > body)
+            body = abs(cur_close - cur_open)
+            lower_wick = min(cur_close, cur_open) - cur_low
+            if lower_wick > body * 1.2 and cur_close > cur_open:
+                confirmations.append("REVERSAL_BAR")
+
+            # RSI oversold
+            if rsi < cfg.rsi_oversold:
+                confirmations.append("RSI_EXTREME")
+
+            # Snap-back: price closing back toward VWAP vs prior bar
+            prev_dev = abs(prev_close - float(vwap_arr[bar_idx - 1]))
+            cur_dev = abs(cur_close - cur_vwap)
+            if cur_dev < prev_dev and cur_close > prev_close:
+                confirmations.append("SNAP_BACK")
+
+            if len(confirmations) >= cfg.min_confirmations:
+                return VWAPMRSignal(
+                    direction="CALL",
+                    confirmations=confirmations,
+                    confidence=len(confirmations) / 4.0,
+                    entry_underlying=cur_close,
+                    vwap_price=cur_vwap,
+                    deviation_pct=deviation_pct,
+                    ticker="",
+                )
+
+        # ── Price ABOVE VWAP → buy PUT (expect snap-back down) ──
+        elif deviation > 0:
+            confirmations = ["VWAP_DEV"]
+
+            # Reversal bar: wick rejection at top (upper wick > body)
+            body = abs(cur_close - cur_open)
+            upper_wick = cur_high - max(cur_close, cur_open)
+            if upper_wick > body * 1.2 and cur_close < cur_open:
+                confirmations.append("REVERSAL_BAR")
+
+            # RSI overbought
+            if rsi > cfg.rsi_overbought:
+                confirmations.append("RSI_EXTREME")
+
+            # Snap-back: price closing back toward VWAP vs prior bar
+            prev_dev = abs(prev_close - float(vwap_arr[bar_idx - 1]))
+            cur_dev = abs(cur_close - cur_vwap)
+            if cur_dev < prev_dev and cur_close < prev_close:
+                confirmations.append("SNAP_BACK")
+
+            if len(confirmations) >= cfg.min_confirmations:
+                return VWAPMRSignal(
+                    direction="PUT",
+                    confirmations=confirmations,
+                    confidence=len(confirmations) / 4.0,
+                    entry_underlying=cur_close,
+                    vwap_price=cur_vwap,
+                    deviation_pct=deviation_pct,
+                    ticker="",
+                )
+
+        return None
+
+    @staticmethod
+    def _compute_rsi(closes: np.ndarray, idx: int, period: int = 14) -> float:
+        """Compute RSI at a given bar index."""
+        if idx < period + 1:
+            return 50.0
+
+        window = closes[idx - period:idx + 1]
+        deltas = np.diff(window)
+        gains = np.where(deltas > 0, deltas, 0)
+        losses = np.where(deltas < 0, -deltas, 0)
+
+        avg_gain = gains.mean()
+        avg_loss = losses.mean()
+
+        if avg_loss == 0:
+            return 100.0
+        rs = avg_gain / avg_loss
+        return 100.0 - (100.0 / (1.0 + rs))
+
+
+class VWAPMRExitEngine:
+    """
+    Exit engine for VWAP mean-reversion positions.
+
+    Mean-reversion targets: price snaps back toward VWAP.
+      - Target: price returns within target_vwap_return_pct of VWAP
+      - Stop: deviation grows past stop_deviation_pct (breakout)
+      - Time stop: max_hold_bars without reversion
+      - EOD: close before market close
+    """
+
+    def __init__(self, config: VWAPMRConfig):
+        self.cfg = config
+
+    def check_exit(
+        self,
+        pos,                    # SimScalpPosition
+        bar_high: float,
+        bar_low: float,
+        bar_close: float,
+        current_time: datetime,
+        minutes_to_close: float,
+        current_vwap: float,    # Current VWAP value
+    ) -> Optional[tuple]:
+        """
+        Check exit conditions for a VWAP MR position.
+
+        Returns:
+            Tuple of (exit_reason, exit_underlying_price) or None.
+        """
+        if current_vwap <= 0:
+            return None
+
+        stop = pos.stop_price
+        target = pos.target_price
+
+        # ── 1. Hard Stop (deviation increases) ───────────────────
+        if pos.direction == "CALL":
+            stop_hit = bar_low <= stop
+            target_hit = bar_high >= target
+        else:
+            stop_hit = bar_high >= stop
+            target_hit = bar_low <= target
+
+        # Conservative: stop wins ties
+        if stop_hit and target_hit:
+            return ("STOP_LOSS", stop)
+
+        if stop_hit:
+            return ("STOP_LOSS", stop)
+
+        # ── 2. Target (snap-back to VWAP) ────────────────────────
+        if target_hit:
+            return ("PROFIT_TARGET", target)
+
+        # ── 3. Dynamic VWAP target ───────────────────────────────
+        # Also exit if price crosses VWAP (full reversion)
+        if pos.direction == "CALL" and bar_high >= current_vwap:
+            return ("VWAP_TOUCH", current_vwap)
+        if pos.direction == "PUT" and bar_low <= current_vwap:
+            return ("VWAP_TOUCH", current_vwap)
+
+        # ── 4. Time stop ─────────────────────────────────────────
+        hold_minutes = (current_time - pos.entry_time).total_seconds() / 60
+        max_hold_minutes = self.cfg.max_hold_bars * 1  # 1 bar = 1 min
+
+        if hold_minutes >= max_hold_minutes:
+            return ("TIME_STOP", bar_close)
+
+        # ── 5. EOD exit ──────────────────────────────────────────
         if minutes_to_close <= self.cfg.eod_exit_minutes:
             return ("EOD_CLOSE", bar_close)
 

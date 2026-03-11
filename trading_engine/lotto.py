@@ -102,16 +102,39 @@ class LottoPosition:
 
 class MomentumDetector:
     """
-    Detects momentum triggers from intraday 1-min bars.
+    Detects momentum triggers from intraday bars.
 
     All triggers are designed around 0DTE gamma mechanics:
     you need a sustained move in one direction to profit from
     gamma acceleration. These triggers identify the START of
     such moves.
+
+    Supports multiple bar resolutions (1m, 2m, 3m, 5m, 15m).
+    All time-based lookbacks auto-adjust to the bar interval.
     """
 
-    def __init__(self, config: LottoConfig):
+    def __init__(self, config: LottoConfig, bar_minutes: int = 1):
         self.cfg = config
+        self.bar_minutes = bar_minutes
+
+        # Pre-compute time-scaled lookback windows (in bars)
+        # ORB = first 15 minutes of trading
+        self.orb_bar_count = max(3, 15 // bar_minutes)
+        # VWAP lookback = 30 minutes minimum history
+        self.vwap_min_bars = max(10, 30 // bar_minutes)
+        self.vwap_below_threshold = max(8, 20 // bar_minutes)
+        # Volume: 20-minute rolling average, compare last ~3 min
+        self.vol_lookback = max(10, 20 // bar_minutes)
+        self.vol_recent = max(2, 3 // bar_minutes)
+        # Trend: EMA periods scale with bar size to cover same time
+        # At 1m: 9/21/50 bars = 9/21/50 min
+        # At 5m: 2/4/10 bars ≈ 10/20/50 min (same time)
+        self.ema_fast = max(3, 9 // bar_minutes)
+        self.ema_mid = max(5, 21 // bar_minutes)
+        self.ema_slow = max(10, 50 // bar_minutes)
+        self.ema_min_bars = self.ema_slow + 5
+        # Mean reversion: look at last ~5 min
+        self.mr_recent = max(3, 5 // bar_minutes)
 
     def detect_all(
         self,
@@ -124,7 +147,8 @@ class MomentumDetector:
 
         Args:
             bars: DataFrame with columns [open, high, low, close, volume]
-                  Index is timestamp. Should be 1-min bars, last ~60 bars.
+                  Index is timestamp. Supports 1m/2m/3m/5m/15m bars.
+                  Set bar_minutes in __init__ to match.
             ticker: Symbol
             underlying_price: Current price
 
@@ -181,11 +205,11 @@ class MomentumDetector:
 
         Professional basis: SMB Capital ORB framework.
         """
-        if len(bars) < 16:
+        if len(bars) < self.orb_bar_count + 1:
             return None
 
-        # First 15 bars = opening range
-        orb_bars = bars.iloc[:15]
+        # First N bars = opening range (15 minutes scaled to bar interval)
+        orb_bars = bars.iloc[:self.orb_bar_count]
         orb_high = orb_bars["high"].max()
         orb_low = orb_bars["low"].min()
         orb_range = orb_high - orb_low
@@ -262,7 +286,7 @@ class MomentumDetector:
         drop_pct = (session_high - price) / session_high if session_high > 0 else 0
         if drop_pct >= flush_threshold:
             # Look for reversal: last bar is green after red bars
-            recent = bars.tail(5)
+            recent = bars.tail(self.mr_recent)
             last_bar_green = recent.iloc[-1]["close"] > recent.iloc[-1]["open"]
             prev_bars_red = sum(
                 1 for _, b in recent.iloc[:-1].iterrows()
@@ -288,7 +312,7 @@ class MomentumDetector:
         # Check for upside flush + reversal
         rise_pct = (price - session_low) / session_low if session_low > 0 else 0
         if rise_pct >= flush_threshold:
-            recent = bars.tail(5)
+            recent = bars.tail(self.mr_recent)
             last_bar_red = recent.iloc[-1]["close"] < recent.iloc[-1]["open"]
             prev_bars_green = sum(
                 1 for _, b in recent.iloc[:-1].iterrows()
@@ -328,7 +352,7 @@ class MomentumDetector:
         Professional basis: Every institutional desk watches VWAP.
         Reclaiming VWAP after extended time below = trapped shorts covering.
         """
-        if len(bars) < 30 or "volume" not in bars.columns:
+        if len(bars) < self.vwap_min_bars or "volume" not in bars.columns:
             return None
 
         # Calculate session VWAP
@@ -345,8 +369,9 @@ class MomentumDetector:
             return None
 
         # How many recent bars were below/above VWAP?
-        recent_30 = bars.tail(min(30, len(bars)))
-        recent_vwap = vwap.tail(min(30, len(bars)))
+        vwap_lookback = self.vwap_min_bars
+        recent_30 = bars.tail(min(vwap_lookback, len(bars)))
+        recent_vwap = vwap.tail(min(vwap_lookback, len(bars)))
 
         below_vwap_count = sum(
             1 for i in range(len(recent_30) - self.cfg.vwap_reclaim_bars)
@@ -371,8 +396,8 @@ class MomentumDetector:
         )
 
         # VWAP Reclaim (was below, now above)
-        if all_above and below_vwap_count >= 20:
-            confidence = min(1.0, below_vwap_count / 25) * 0.75
+        if all_above and below_vwap_count >= self.vwap_below_threshold:
+            confidence = min(1.0, below_vwap_count / (self.vwap_below_threshold * 1.25)) * 0.75
             strike = _round_strike(price + price * self.cfg.otm_distance_pct, ticker)
             return LottoTrigger(
                 trigger_type="VWAP_RECLAIM",
@@ -388,8 +413,8 @@ class MomentumDetector:
             )
 
         # VWAP Rejection (was above, now below)
-        if all_below and above_vwap_count >= 20:
-            confidence = min(1.0, above_vwap_count / 25) * 0.75
+        if all_below and above_vwap_count >= self.vwap_below_threshold:
+            confidence = min(1.0, above_vwap_count / (self.vwap_below_threshold * 1.25)) * 0.75
             strike = _round_strike(price - price * self.cfg.otm_distance_pct, ticker)
             return LottoTrigger(
                 trigger_type="VWAP_REJECT",
@@ -419,22 +444,23 @@ class MomentumDetector:
 
         Professional basis: Market microstructure / order flow analysis.
         """
-        if len(bars) < 25 or "volume" not in bars.columns:
+        min_bars_needed = self.vol_lookback + self.vol_recent + 5
+        if len(bars) < min_bars_needed or "volume" not in bars.columns:
             return None
 
-        avg_vol_20 = bars["volume"].iloc[-25:-5].mean()
+        avg_vol_20 = bars["volume"].iloc[-(self.vol_lookback + 5):-5].mean()
         if avg_vol_20 <= 0:
             return None
 
-        recent_vol = bars["volume"].iloc[-3:].mean()
+        recent_vol = bars["volume"].iloc[-self.vol_recent:].mean()
         vol_ratio = recent_vol / avg_vol_20
 
         if vol_ratio < self.cfg.volume_surge_mult:
             return None
 
-        # Determine direction from recent 3 bars
-        recent_close = bars["close"].iloc[-3:]
-        recent_open = bars["open"].iloc[-3:]
+        # Determine direction from recent bars
+        recent_close = bars["close"].iloc[-self.vol_recent:]
+        recent_open = bars["open"].iloc[-self.vol_recent:]
         net_move = recent_close.iloc[-1] - recent_open.iloc[0]
         move_pct = net_move / price if price > 0 else 0
 
@@ -492,13 +518,13 @@ class MomentumDetector:
         Professional basis: Minervini / O'Neil trend-following principles
         applied to intraday timeframe.
         """
-        if len(bars) < 55:
+        if len(bars) < self.ema_min_bars:
             return None
 
         close = bars["close"]
-        ema9 = close.ewm(span=9, adjust=False).mean()
-        ema21 = close.ewm(span=21, adjust=False).mean()
-        ema50 = close.ewm(span=50, adjust=False).mean()
+        ema9 = close.ewm(span=self.ema_fast, adjust=False).mean()
+        ema21 = close.ewm(span=self.ema_mid, adjust=False).mean()
+        ema50 = close.ewm(span=self.ema_slow, adjust=False).mean()
 
         # Current values
         cur_ema9 = ema9.iloc[-1]

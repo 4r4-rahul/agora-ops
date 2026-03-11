@@ -172,7 +172,8 @@ class OptionPricer:
     def __init__(self, risk_free_rate: float = 0.045):
         self.r = risk_free_rate
 
-    def estimate_iv(self, bars: pd.DataFrame, underlying_price: float) -> float:
+    def estimate_iv(self, bars: pd.DataFrame, underlying_price: float,
+                    bar_minutes: int = 1) -> float:
         """
         Estimate intraday implied volatility from recent bar data.
 
@@ -187,9 +188,9 @@ class OptionPricer:
         if len(returns) < 5:
             return 0.18
 
-        # Annualize: 1-min bars → ~390 bars/day × 252 days
+        # Annualize: bars_per_day = 390 / bar_minutes
         bar_vol = returns.std()
-        bars_per_day = 390 if len(bars) > 100 else 78  # 1m vs 5m
+        bars_per_day = 390 // bar_minutes
         annual_vol = bar_vol * math.sqrt(bars_per_day * 252)
 
         # Clamp to realistic range
@@ -268,8 +269,10 @@ class LottoBacktester:
         self.config = config or EngineConfig()
         self.lotto_cfg = self.config.lotto
         self.account_size = account_size
-        self.detector = MomentumDetector(self.lotto_cfg)
         self.pricer = OptionPricer()
+
+        # MomentumDetector is created per-run with correct bar_minutes
+        self._detector = None
 
         # Slippage model: 0DTE options have wide bid-ask
         self.entry_slippage_pct = 0.10    # Pay 10% above mid on entry
@@ -297,6 +300,12 @@ class LottoBacktester:
         profile = get_ticker_profile(ticker)
         premium_scale = profile.premium_scale
 
+        # Parse bar interval to minutes
+        bar_minutes = self._parse_interval(interval)
+
+        # Create timeframe-aware detector
+        self._detector = MomentumDetector(self.lotto_cfg, bar_minutes=bar_minutes)
+
         results = LottoBacktestResults(
             ticker=ticker,
             interval=interval,
@@ -320,7 +329,7 @@ class LottoBacktester:
         for day_date, day_bars in days:
             day_result = self._run_day(
                 day_date, day_bars, ticker, profile, premium_scale,
-                balance, max_trades_per_day, verbose,
+                balance, max_trades_per_day, verbose, bar_minutes,
             )
 
             results.daily_results.append(day_result)
@@ -346,6 +355,18 @@ class LottoBacktester:
 
         return results
 
+    @staticmethod
+    def _parse_interval(interval: str) -> int:
+        """Parse interval string like '1m', '5m' to minutes."""
+        interval = interval.strip().lower()
+        if interval.endswith("m"):
+            return max(1, int(interval[:-1]))
+        elif interval.endswith("h"):
+            return int(interval[:-1]) * 60
+        elif interval.endswith("s"):
+            return 1  # Sub-minute treated as 1m
+        return 5  # Default
+
     def _split_into_days(self, df: pd.DataFrame) -> List[Tuple[date, pd.DataFrame]]:
         """Split a continuous DataFrame into per-day DataFrames."""
         if df.empty:
@@ -365,7 +386,8 @@ class LottoBacktester:
     def _run_day(self, day_date: date, day_bars: pd.DataFrame,
                  ticker: str, profile: TickerProfile,
                  premium_scale: float, balance: float,
-                 max_trades: int, verbose: bool) -> LottoBacktestDay:
+                 max_trades: int, verbose: bool,
+                 bar_minutes: int = 1) -> LottoBacktestDay:
         """Simulate one trading day."""
         day_result = LottoBacktestDay(date=day_date)
         day_result._trades = []  # Internal: track ALL trade objects
@@ -379,7 +401,8 @@ class LottoBacktester:
         trades_entered = 0
 
         # Estimate IV for the day from the first 30 bars
-        day_iv = self.pricer.estimate_iv(day_bars.head(30), day_bars["close"].iloc[0])
+        day_iv = self.pricer.estimate_iv(day_bars.head(30), day_bars["close"].iloc[0],
+                                          bar_minutes=bar_minutes)
 
         # Determine bar interval in minutes
         if len(day_bars) >= 2:
@@ -436,7 +459,7 @@ class LottoBacktester:
 
                 # Feed bars up to current point to detector
                 bars_so_far = day_bars.iloc[:i+1].copy()
-                triggers = self.detector.detect_all(bars_so_far, ticker, current_price)
+                triggers = self._detector.detect_all(bars_so_far, ticker, current_price)
 
                 if triggers:
                     day_result.triggers_found += len(triggers)

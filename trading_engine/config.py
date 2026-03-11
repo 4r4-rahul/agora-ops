@@ -561,6 +561,89 @@ class RangeFadeConfig:
 
 
 @dataclass
+class VWAPMRConfig:
+    """
+    Configuration for VWAP Mean-Reversion strategy (Strategy F).
+
+    Trades DEAD_FLAT days where price oscillates tightly around VWAP.
+    When price drifts too far from VWAP, fade the deviation expecting
+    a snap-back. On dead-flat days (avg range 0.59%, avg max VWAP
+    deviation 0.286%), VWAP acts as a magnet — every deviation reverts.
+
+    Target regime: DEAD_FLAT (63 days / 129, avg range <0.8%)
+
+    Key insight: On DEAD_FLAT days, there are NO strong trends, NO
+    wide ranges to fade, and ORB/momentum/RF all skip. But price
+    DOES oscillate ±0.15-0.30% around VWAP, creating micro mean-
+    reversion opportunities. We buy calls when price dips below VWAP,
+    puts when price rises above VWAP.
+
+    Confirmations:
+      1. VWAP_DEV — Price deviation exceeds threshold from VWAP
+      2. REVERSAL_BAR — Bar shows rejection (wick, engulfing)
+      3. RSI_EXTREME — RSI confirms overextension
+      4. SNAP_BACK — Price starting to revert toward VWAP
+
+    Tuned parameters (Phase 2b):
+      - Selective entries (0.25% deviation threshold) — only the deepest oscillations
+      - 1 trade per day — avoids overtrading on flat days
+      - Quick holds (25 bars max) — exit before theta eats profits
+      - Wide stop (0.40%) — accommodate noise without premature stops
+      - Tight target (0.04% from VWAP) — take quick profits on snap-back
+      - Result: 37 trades, 43.2% WR, R:R=2.1:1, +$4,180 VM P&L
+    """
+    # ── Master Enable ───────────────────────────────────────────
+    enabled: bool = True
+
+    # ── Regime Requirement ─────────────────────────────────────
+    require_dead_flat: bool = True     # Only trade on DEAD_FLAT days
+
+    # ── VWAP Deviation Thresholds ──────────────────────────────
+    # Minimum deviation from VWAP to trigger a signal
+    # DEAD_FLAT avg max dev = 0.286%, so 0.25% catches only the deepest dips
+    min_vwap_deviation_pct: float = 0.25  # 0.25% = ~$14.25 on SPX $5700
+
+    # ── Entry Confirmations ────────────────────────────────────
+    min_confirmations: int = 2         # Need ≥2 of {VWAP_DEV, REVERSAL_BAR, RSI_EXTREME, SNAP_BACK}
+
+    # ── Entry Window ───────────────────────────────────────────
+    entry_start_bar: int = 30          # After VWAP establishes
+    entry_end_bar: int = 350           # Until ~15 min before close
+    eod_exit_minutes: int = 15         # Close before market close
+
+    # ── Exits ──────────────────────────────────────────────────
+    # Target: price snaps back toward VWAP (take quick profits)
+    target_vwap_return_pct: float = 0.04  # Target: deviation shrinks to ≤0.04% of VWAP
+    # Stop: deviation grows past 0.40% — breakout, not reverting
+    stop_deviation_pct: float = 0.40   # Wide stop — flat days have noise
+    max_hold_bars: int = 25            # Max 25 bars — quick in/out before theta
+
+    # ── Risk Management ────────────────────────────────────────
+    max_trades_per_day: int = 1        # 1 trade per day (avoids overtrading on flat days)
+    max_risk_per_trade: float = 300.0  # Moderate risk (flat days = smaller moves)
+    max_risk_pct: float = 0.03         # 3% of account per trade
+
+    # ── Budget ─────────────────────────────────────────────────
+    max_premium: float = 4.00          # Max per-contract premium (SPY scale)
+    min_premium: float = 0.30          # Minimum viable premium
+    max_contracts: int = 2             # Conservative sizing
+
+    # ── Strike Selection ───────────────────────────────────────
+    max_otm_pct: float = 0.001         # ATM: 0.1% OTM (need high delta for small moves)
+
+    # ── Priority ───────────────────────────────────────────────
+    only_when_no_momentum: bool = True  # Defer to momentum signals
+
+    # ── RSI Parameters ─────────────────────────────────────────
+    rsi_period: int = 14
+    rsi_overbought: float = 70.0       # Standard thresholds (selective deviation filters enough)
+    rsi_oversold: float = 30.0         # Standard thresholds
+
+    # ── VWAP Computation ───────────────────────────────────────
+    vwap_warmup_bars: int = 20         # Minimum bars for reliable VWAP
+
+
+@dataclass
 class EngineConfig:
     """Master engine configuration."""
     account: AccountConfig = field(default_factory=AccountConfig)
@@ -572,6 +655,7 @@ class EngineConfig:
     orb: ORBConfig = field(default_factory=ORBConfig)
     mean_reversion: MeanReversionConfig = field(default_factory=MeanReversionConfig)
     range_fade: RangeFadeConfig = field(default_factory=RangeFadeConfig)
+    vwap_mr: VWAPMRConfig = field(default_factory=VWAPMRConfig)
     data_dir: str = field(default_factory=lambda: os.path.join(
         os.path.dirname(os.path.dirname(__file__)), "data"
     ))
