@@ -50,7 +50,7 @@ class SafetyMonitor:
         self,
         state_manager=None,
         executor=None,
-        account_size: float = 50_000.0,
+        account_size: float = 10_000.0,
         webhook_url: Optional[str] = None,
     ):
         self.state = state_manager

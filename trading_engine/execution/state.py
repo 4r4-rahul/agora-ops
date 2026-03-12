@@ -47,7 +47,7 @@ class DailyState:
     trades_today: int = 0
     consecutive_losses: int = 0
     buying_power_used: float = 0.0
-    peak_equity: float = 50_000.0
+    peak_equity: float = 0.0  # Set from account_size at load(); 0 = uninitialized
     # Recovery mode
     in_recovery: bool = False
     recovery_size_reduction: float = 0.0     # 0.0 = none, 0.5 = half size
@@ -103,6 +103,11 @@ class StateManager:
             )
             return self.state
 
+        # ── P0-6: Fix peak_equity if it was never initialized ──
+        if self.state.peak_equity <= 0:
+            self.state.peak_equity = self.account_size
+            logger.info(f"Initialized peak_equity to account_size: ${self.account_size:,.0f}")
+
         # ── Day rollover ──
         today = str(date.today())
         if self.state.date != today:
@@ -141,12 +146,39 @@ class StateManager:
         return self.state
 
     def save(self):
-        """Persist state to disk."""
-        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+        """Persist current state to disk (atomic write to prevent corruption)."""
+        import tempfile
+        dir_path = os.path.dirname(self.path) or "."
+        os.makedirs(dir_path, exist_ok=True)
         data = asdict(self.state)
-        with open(self.path, "w") as f:
-            json.dump(data, f, indent=2, default=str)
-        logger.debug(f"State saved to {self.path}")
+
+        # Write to temp file, then atomic rename — survives crashes mid-write
+        try:
+            fd, tmp_path = tempfile.mkstemp(
+                dir=dir_path, prefix=".state_", suffix=".tmp"
+            )
+            with os.fdopen(fd, "w") as f:
+                json.dump(data, f, indent=2, default=str)
+
+            # Keep one backup of the previous state
+            backup_path = self.path + ".bak"
+            if os.path.exists(self.path):
+                try:
+                    os.replace(self.path, backup_path)
+                except OSError:
+                    pass  # Non-critical if backup fails
+
+            # Atomic on POSIX (same filesystem)
+            os.replace(tmp_path, self.path)
+            logger.debug(f"State saved to {self.path}")
+        except Exception as e:
+            logger.error(f"Failed to save state: {e}")
+            # Clean up temp file if it exists
+            try:
+                os.unlink(tmp_path)
+            except (OSError, UnboundLocalError):
+                pass
+            raise
 
     # ─── Trade Recording ─────────────────────────────────────────
 

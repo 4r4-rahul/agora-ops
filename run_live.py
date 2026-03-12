@@ -392,6 +392,7 @@ class LiveTradingLoop:
                 entry_underlying=pos_data.get("entry_underlying", 0.0),
                 entry_premium=pos_data.get("entry_premium", 0.0),
                 num_contracts=pos_data.get("num_contracts", 1),
+                entry_commission=pos_data.get("entry_commission", 0.0),
                 atr_at_entry=pos_data.get("atr_at_entry", 0.30),
                 stop_price=pos_data.get("stop_price", 0.0),
                 target_price=pos_data.get("target_price", 0.0),

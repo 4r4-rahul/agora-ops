@@ -129,6 +129,25 @@ class IBKRDataProvider:
         if self.is_connected():
             return True
 
+        # ── P0-2: Paper vs live port guard ─────────────────────
+        trading_mode = os.getenv("TRADING_MODE", "").lower()  # "paper" or "live"
+        _PAPER_PORTS = {7497, 4001}
+        _LIVE_PORTS = {7496, 4002}
+
+        if trading_mode == "paper" and self.port in _LIVE_PORTS:
+            raise RuntimeError(
+                f"SAFETY ABORT: TRADING_MODE=paper but port {self.port} is a LIVE port.\n"
+                f"  Paper ports: {_PAPER_PORTS}\n"
+                f"  Set IBKR_PORT=7497 or IBKR_PORT=4001 for paper trading."
+            )
+        if trading_mode == "live" and self.port in _PAPER_PORTS:
+            logger.warning(
+                f"TRADING_MODE=live but port {self.port} is a PAPER port. "
+                f"Set IBKR_PORT=7496 or IBKR_PORT=4002 for live trading."
+            )
+        if trading_mode == "live" and self.port in _LIVE_PORTS:
+            print(f"  ⚠️  LIVE TRADING MODE on port {self.port}")
+
         try:
             self._ib = ib_insync.IB()
             self._ib.connect(
@@ -137,13 +156,66 @@ class IBKRDataProvider:
                 timeout=10,
             )
 
-            # Request delayed data as fallback when live subscription is absent.
-            # Type 3 = "delayed" (15-min delay, free).
-            # IBKR still returns live data for any subscribed instruments;
-            # this only kicks in when live isn't available.
-            self._ib.reqMarketDataType(3)
+            # ── P0-1: Request LIVE data first, delayed as fallback ──
+            # Type 1 = live streaming (requires market data subscription).
+            # Type 3 = delayed (15-min lag, free). NEVER acceptable for
+            #          0DTE trading — only used as dev/testing fallback.
+            self._ib.reqMarketDataType(1)  # Try live first
+            logger.info("Requested LIVE market data (Type 1)")
 
+            # Verify live data is actually flowing by fetching a quick quote
+            _live_ok = False
+            try:
+                _test_contract = ib_insync.Stock("SPY", "SMART", "USD")
+                self._ib.qualifyContracts(_test_contract)
+                _test_ticker = self._ib.reqMktData(_test_contract, "", True, False)
+                self._ib.sleep(3)
+                _price = _test_ticker.marketPrice()
+                self._ib.cancelMktData(_test_contract)
+                if _price and not math.isnan(_price) and _price > 0:
+                    _live_ok = True
+            except Exception as e:
+                logger.debug(f"Live data probe failed: {e}")
+
+            if _live_ok:
+                print(f"  📡 Market data: LIVE (Type 1) ✅")
+            else:
+                # Fall back to delayed — but warn loudly
+                self._ib.reqMarketDataType(3)
+                logger.warning(
+                    "LIVE market data unavailable — falling back to DELAYED (Type 3). "
+                    "Subscribe to IBKR US Equity/Options bundle ($4.50/mo) for live data."
+                )
+                print(f"  ⚠️  Market data: DELAYED (Type 3) — 15min lag!")
+                print(f"       Subscribe to IBKR market data for live quotes.")
+                if trading_mode == "live":
+                    raise RuntimeError(
+                        "SAFETY ABORT: TRADING_MODE=live but only DELAYED data available.\n"
+                        "  Subscribe to US Equity & Options data on IBKR, or set "
+                        "TRADING_MODE=paper to continue with delayed data."
+                    )
+
+            # ── P0-3: Validate IBKR account ID ─────────────────────
             acct = self._ib.managedAccounts()
+            expected_account = os.getenv("IBKR_ACCOUNT", "").strip()
+            if expected_account and acct:
+                if expected_account not in acct:
+                    self._ib.disconnect()
+                    self._ib = None
+                    raise RuntimeError(
+                        f"SAFETY ABORT: IBKR_ACCOUNT={expected_account} not found "
+                        f"in managed accounts {acct}.\n"
+                        f"  Connected account(s): {', '.join(acct)}\n"
+                        f"  Fix IBKR_ACCOUNT env var or log into the correct account."
+                    )
+                print(f"  🔐 Account verified: {expected_account}")
+            elif not expected_account:
+                logger.info(
+                    f"IBKR_ACCOUNT not set — trading on default account: "
+                    f"{acct[0] if acct else 'unknown'}. "
+                    f"Set IBKR_ACCOUNT for explicit validation."
+                )
+
             print(f"  ✅ Connected to IBKR at {self.host}:{self.port}")
             print(f"     Account(s): {', '.join(acct) if acct else 'unknown'}")
             print(f"     Server time: {self._ib.reqCurrentTime()}")

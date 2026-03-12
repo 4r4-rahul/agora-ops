@@ -86,6 +86,9 @@ class LiveScalpPosition:
     num_contracts: int = 1
     atr_at_entry: float = 0.0
 
+    # Commission tracking (entry commission deducted from realized P&L at exit)
+    entry_commission: float = 0.0
+
     # Pre-computed exit levels (underlying price)
     stop_price: float = 0.0
     target_price: float = 0.0
@@ -125,6 +128,7 @@ class LiveScalpPosition:
             "entry_underlying": self.entry_underlying,
             "entry_premium": self.entry_premium,
             "num_contracts": self.num_contracts,
+            "entry_commission": self.entry_commission,
             "atr_at_entry": self.atr_at_entry,
             "stop_price": self.stop_price,
             "target_price": self.target_price,
@@ -805,7 +809,8 @@ class LiveScalpEngine:
         if fill.status == OrderStatus.FILLED:
             actual_exit = abs(fill.avg_fill_price)
             realized_pnl = (actual_exit - pos.entry_premium) * pos.num_contracts * 100
-            realized_pnl -= fill.commission
+            realized_pnl -= fill.commission            # Exit commission
+            realized_pnl -= pos.entry_commission        # Entry commission (P0-5)
         elif exit_premium > 0:
             # Estimate even if not filled
             realized_pnl = (exit_premium - pos.entry_premium) * pos.num_contracts * 100
@@ -981,11 +986,12 @@ class LiveScalpEngine:
                 confirmations=confirmations, confidence=confidence,
                 entry_time=datetime.now(), entry_underlying=price,
                 entry_premium=entry_price, num_contracts=fill.num_filled,
+                entry_commission=fill.commission,
                 atr_at_entry=atr,
                 stop_price=stop_price, target_price=target_price,
                 best_favorable_underlying=price,
             )
-            print(f"  ✅ {tier.upper()} FILLED: {fill.num_filled}x @ ${entry_price:.2f}")
+            print(f"  ✅ {tier.upper()} FILLED: {fill.num_filled}x @ ${entry_price:.2f} (comm=${fill.commission:.2f})")
             return pos
 
         # Handle partial fills — track whatever got filled
@@ -997,6 +1003,7 @@ class LiveScalpEngine:
                 confirmations=confirmations, confidence=confidence,
                 entry_time=datetime.now(), entry_underlying=price,
                 entry_premium=entry_price, num_contracts=fill.num_filled,
+                entry_commission=fill.commission,
                 atr_at_entry=atr,
                 stop_price=stop_price, target_price=target_price,
                 best_favorable_underlying=price,
