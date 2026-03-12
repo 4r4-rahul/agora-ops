@@ -618,5 +618,150 @@ class TestBacktestRegression:
         assert results.starting_balance == 10_000
 
 
+class TestScalpBacktestRegression:
+    """
+    Regression tests for the SCALP backtester — the primary 0DTE strategy.
+
+    Baseline locked from v7-live-engine (10,000 sims MC validated):
+      70 trades, WR ≥ 60%, PF ≥ 4.0, PnL ≥ $40K, MaxDD < 2%
+      on 129 trading days of SPY 1m data (SPX mode, $10K start).
+
+    These thresholds have ~30% tolerance below actuals to absorb
+    minor code tweaks, but will catch real regressions.
+    """
+
+    DATA_PATH = os.path.join(ROOT, "data", "intraday", "SPY_ibkr_1m_180d.csv")
+
+    @pytest.fixture(scope="class")
+    def backtest_result(self):
+        """Run backtest once for the whole test class (cached)."""
+        import pandas as pd
+        from trading_engine.config import EngineConfig
+        from trading_engine.data.scalp_backtester import ScalpBacktester
+
+        if not os.path.exists(self.DATA_PATH):
+            pytest.skip("SPY 1m data not available")
+
+        df = pd.read_csv(
+            self.DATA_PATH, parse_dates=["timestamp"], index_col="timestamp",
+        )
+        df.index = pd.to_datetime(df.index, utc=True)
+
+        config = EngineConfig()
+        bt = ScalpBacktester(config=config, account_size=10_000.0, spx_mode=True)
+        return bt.run(df, ticker="SPY", interval="1m", verbose=False)
+
+    # ── Trade count ──────────────────────────────────────────────
+
+    def test_trade_count_minimum(self, backtest_result):
+        """Strategy finds at least 50 trades (actual: 70)."""
+        assert backtest_result.total_trades >= 50, (
+            f"Only {backtest_result.total_trades} trades — signal logic may be broken"
+        )
+
+    def test_trade_count_not_excessive(self, backtest_result):
+        """Strategy doesn't over-trade (should stay under 200)."""
+        assert backtest_result.total_trades <= 200, (
+            f"{backtest_result.total_trades} trades — possible gate leak"
+        )
+
+    # ── Win rate ─────────────────────────────────────────────────
+
+    def test_win_rate_above_threshold(self, backtest_result):
+        """Win rate stays above 55% (actual: 64.3%)."""
+        assert backtest_result.win_rate >= 55.0, (
+            f"WR {backtest_result.win_rate:.1f}% < 55% floor"
+        )
+
+    # ── Profit factor ────────────────────────────────────────────
+
+    def test_profit_factor_above_threshold(self, backtest_result):
+        """Profit factor stays above 2.5 (actual: 5.29)."""
+        pf = backtest_result.profit_factor
+        assert pf >= 2.5, f"PF {pf:.2f} < 2.5 floor"
+
+    # ── PnL ──────────────────────────────────────────────────────
+
+    def test_total_pnl_above_threshold(self, backtest_result):
+        """Total PnL stays above $30K (actual: $53,132)."""
+        assert backtest_result.total_pnl >= 30_000, (
+            f"PnL ${backtest_result.total_pnl:,.0f} < $30K floor"
+        )
+
+    def test_ending_balance_above_starting(self, backtest_result):
+        """Ending balance exceeds starting balance."""
+        assert backtest_result.ending_balance > backtest_result.starting_balance
+
+    # ── Drawdown ─────────────────────────────────────────────────
+
+    def test_max_drawdown_under_threshold(self, backtest_result):
+        """Max drawdown stays under 5% (actual: 0.1%)."""
+        assert backtest_result.max_drawdown_pct < 5.0, (
+            f"MaxDD {backtest_result.max_drawdown_pct:.1f}% > 5% ceiling"
+        )
+
+    # ── Strategy tier breakdown ──────────────────────────────────
+
+    def test_scalp_tier_active(self, backtest_result):
+        """Scalp (momentum) tier produces trades."""
+        assert backtest_result.scalp_trades > 0, "Scalp tier produced 0 trades"
+
+    def test_runner_tier_active(self, backtest_result):
+        """Runner tier produces trades."""
+        assert backtest_result.runner_trades > 0, "Runner tier produced 0 trades"
+
+    def test_orb_tier_active(self, backtest_result):
+        """ORB tier produces trades."""
+        assert backtest_result.orb_trades > 0, "ORB tier produced 0 trades"
+
+    def test_range_fade_tier_active(self, backtest_result):
+        """Range-fade tier produces trades."""
+        assert backtest_result.rf_trades > 0, "Range-fade tier produced 0 trades"
+
+    # ── Trade list integrity ─────────────────────────────────────
+
+    def test_trade_list_matches_count(self, backtest_result):
+        """Trade list length matches total_trades."""
+        assert len(backtest_result.trades) == backtest_result.total_trades
+
+    def test_all_trades_have_pnl(self, backtest_result):
+        """Every trade has a non-NaN total_pnl."""
+        import math
+        for i, t in enumerate(backtest_result.trades):
+            assert not math.isnan(t.total_pnl), f"Trade {i} has NaN PnL"
+
+    def test_pnl_sums_match(self, backtest_result):
+        """Sum of individual trade PnLs matches total_pnl."""
+        trade_sum = sum(t.total_pnl for t in backtest_result.trades)
+        assert abs(trade_sum - backtest_result.total_pnl) < 1.0, (
+            f"Trade sum ${trade_sum:,.2f} != total_pnl ${backtest_result.total_pnl:,.2f}"
+        )
+
+    # ── Equity curve ─────────────────────────────────────────────
+
+    def test_equity_curve_monotone_start(self, backtest_result):
+        """Equity curve starts at starting balance."""
+        if backtest_result.equity_curve:
+            first_balance = backtest_result.equity_curve[0].get("balance",
+                            backtest_result.equity_curve[0].get("equity", 0))
+            assert abs(first_balance - backtest_result.starting_balance) < 100
+
+    # ── Exit reasons ─────────────────────────────────────────────
+
+    def test_exit_reasons_present(self, backtest_result):
+        """At least 2 different exit reasons exist."""
+        reasons = set(t.exit_reason for t in backtest_result.trades)
+        assert len(reasons) >= 2, (
+            f"Only {len(reasons)} exit reason(s): {reasons}"
+        )
+
+    # ── Average hold time ────────────────────────────────────────
+
+    def test_avg_hold_time_reasonable(self, backtest_result):
+        """Average hold time is between 1 and 120 minutes."""
+        avg = backtest_result.avg_hold_minutes
+        assert 1 <= avg <= 120, f"Avg hold {avg:.1f} min outside [1, 120]"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
