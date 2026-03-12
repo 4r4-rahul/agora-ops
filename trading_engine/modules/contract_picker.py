@@ -30,8 +30,8 @@ Integration:
 
 import logging
 import math
-from dataclasses import dataclass
-from typing import Optional, Dict, Tuple
+from dataclasses import dataclass, field
+from typing import Optional, Dict, Tuple, List
 
 from ..black_scholes import (
     bs_call_price,
@@ -59,6 +59,19 @@ class FeasibilityResult:
     gamma_premium_ratio: float        # Gamma / entry_premium (higher = faster acceleration)
     delta_at_entry: float             # Delta at entry
     reject_reason: str = ""           # Why rejected (if not feasible)
+
+    # ── Premium time surface insights (populated when surface is built) ──
+    pnl_at_5m: float = 0.0           # PnL if target hit in 5 min
+    pnl_at_10m: float = 0.0          # PnL if target hit in 10 min
+    pnl_at_15m: float = 0.0          # PnL if target hit in 15 min
+    pnl_at_30m: float = 0.0          # PnL if target hit in 30 min
+    optimal_exit_minutes: float = 0.0  # Time with best PnL at target
+    theta_kill_minutes: float = 999.0  # When theta eats 50% of gain
+    recommended_time_stop: float = 0.0  # Suggested time stop (minutes)
+
+    # ── S/R-adjusted target (if level detector provided one) ─────
+    sr_adjusted_target: float = 0.0   # Target adjusted to nearest S/R
+    sr_source: str = ""               # Where the S/R came from
 
 
 class SmartContractPicker:
@@ -329,3 +342,95 @@ class SmartContractPicker:
             return 15.0          # Mean reversion: ~15 min
         else:
             return 30.0          # Default
+
+    # ─────────────────────────────────────────────────────────────
+    # Enhanced: Check with Premium Time Surface
+    # ─────────────────────────────────────────────────────────────
+
+    def check_feasibility_with_surface(
+        self,
+        underlying_price: float,
+        strike: float,
+        right: str,
+        iv: float,
+        time_to_expiry: float,
+        target_price: float,
+        stop_price: float,
+        expected_hold_minutes: float = 30.0,
+        entry_premium: Optional[float] = None,
+    ) -> FeasibilityResult:
+        """
+        Enhanced feasibility check that also builds a premium time surface.
+
+        Same as check_feasibility() but additionally:
+        1. Projects option premium at target across multiple time horizons
+        2. Finds optimal exit time (when PnL at target is maximized)
+        3. Computes theta kill time (when theta eats 50% of the gain)
+        4. Recommends a time stop based on the surface
+
+        Use this for live trading where the extra computation is worth it.
+        For backtesting, the basic check_feasibility() is faster.
+        """
+        from .premium_surface import PremiumTimeSurface
+
+        # First, run the standard feasibility check
+        result = self.check_feasibility(
+            underlying_price=underlying_price,
+            strike=strike,
+            right=right,
+            iv=iv,
+            time_to_expiry=time_to_expiry,
+            target_price=target_price,
+            stop_price=stop_price,
+            expected_hold_minutes=expected_hold_minutes,
+            entry_premium=entry_premium,
+        )
+
+        # If not feasible, no need to build surface
+        if not result.feasible:
+            return result
+
+        # Build the premium time surface
+        try:
+            surface_engine = PremiumTimeSurface(
+                risk_free_rate=self.r,
+                entry_slippage_pct=self.entry_slippage_pct,
+                exit_slippage_pct=self.exit_slippage_pct,
+            )
+            surface = surface_engine.build_surface(
+                underlying_price=underlying_price,
+                strike=strike,
+                right=right,
+                iv=iv,
+                time_to_expiry=time_to_expiry,
+                target_price=target_price,
+                stop_price=stop_price,
+                entry_premium=result.entry_premium,
+            )
+
+            # Enrich the result with surface insights
+            result.pnl_at_5m = surface.pnl_at_target_5m
+            result.pnl_at_10m = surface.pnl_at_target_10m
+            result.pnl_at_15m = surface.pnl_at_target_15m
+            result.pnl_at_30m = surface.pnl_at_target_30m
+            result.optimal_exit_minutes = surface.optimal_exit_minutes
+            result.theta_kill_minutes = surface.theta_kill_minutes
+
+            # Compute recommended time stop from surface
+            result.recommended_time_stop = surface_engine.compute_optimal_time_stop(
+                surface, min_acceptable_pnl_pct=0.10,
+            )
+
+            logger.debug(
+                f"  Surface: target@5m=${surface.pnl_at_target_5m:+.2f}, "
+                f"@15m=${surface.pnl_at_target_15m:+.2f}, "
+                f"@30m=${surface.pnl_at_target_30m:+.2f} | "
+                f"optimal_exit={surface.optimal_exit_minutes:.0f}m, "
+                f"theta_kill={surface.theta_kill_minutes:.0f}m, "
+                f"time_stop={result.recommended_time_stop:.0f}m"
+            )
+
+        except Exception as e:
+            logger.warning(f"Surface build failed (non-fatal): {e}")
+
+        return result

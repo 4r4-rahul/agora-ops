@@ -1,0 +1,15 @@
+{
+  "date": "2026-03-12",
+  "daily_pnl": 0.0,
+  "weekly_pnl": 0.0,
+  "monthly_pnl": 0.0,
+  "trades_today": 0,
+  "consecutive_losses": 0,
+  "buying_power_used": 0.0,
+  "peak_equity": 10000.0,
+  "in_recovery": false,
+  "recovery_size_reduction": 0.0,
+  "recovery_days_remaining": 0,
+  "open_positions": [],
+  "closed_trades": []
+}
