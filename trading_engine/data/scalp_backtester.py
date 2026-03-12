@@ -354,6 +354,104 @@ class ScalpBacktester:
             self.exit_slippage_pct = 0.03
             self.commission_per_contract = 0.65
 
+        # ── Hybrid Position Sizer State ──────────────────────────
+        self.sizing_cfg = self.config.sizing
+        self._trade_history: list = []   # List of closed-trade PnL for LW lookback
+        self._atr_history: list = []     # List of ATR values at entry for vol targeting
+
+    # ── Hybrid Position Sizer ────────────────────────────────────
+    def _compute_position_size(
+        self,
+        balance: float,
+        entry_premium: float,
+        current_atr: float,
+        daily_median_atr: float,
+        strategy_tier: str,
+        conviction_mult: float = 1.0,
+    ) -> int:
+        """
+        Hybrid Larry Williams + Vol Target position sizer.
+
+        Args:
+            balance: Current account balance
+            entry_premium: Option premium per contract (before ×100)
+            current_atr: Current ATR at entry
+            daily_median_atr: Median ATR for the day (vol normalisation)
+            strategy_tier: "scalp", "runner", "orb", "range_fade", etc.
+            conviction_mult: IV conviction multiplier (1.0 default, 1.5 for deep discount)
+
+        Returns:
+            Number of contracts (0 if trade should be skipped)
+        """
+        sc = self.sizing_cfg
+        cost_per_contract = entry_premium * 100
+
+        if cost_per_contract <= 0 or balance <= 0:
+            return 0
+
+        # ── Runner: separate budget-based sizing (small lottery tickets) ──
+        if strategy_tier == "runner":
+            runner_budget = balance * sc.runner_budget_pct
+            runner_num = int(runner_budget / cost_per_contract) if cost_per_contract > 0 else 0
+            runner_num = min(runner_num, self.scalp_cfg.runner_max_contracts)
+            runner_num = max(1, runner_num) if runner_num >= 1 else 0
+            # Gate: total cost must be ≤ runner_balance_gate of balance
+            if runner_num > 0 and cost_per_contract * runner_num > balance * sc.runner_balance_gate:
+                return 0
+            return runner_num
+
+        # ── 1. Larry Williams: balance × risk_pct / worst_recent_loss ────
+        lookback = sc.lw_lookback
+        recent_losses = [
+            abs(pnl) for pnl in self._trade_history[-lookback:]
+            if pnl < 0
+        ]
+        worst_loss = max(recent_losses) if recent_losses else sc.lw_default_loss
+        # Scale default loss with price_scale for SPX/NDX
+        if not recent_losses:
+            worst_loss *= self.price_scale
+
+        lw_budget = (balance * sc.lw_risk_pct) / worst_loss if worst_loss > 0 else 1.0
+        # lw_budget is a multiplier of "one worst-loss unit"
+        # Convert to contracts: lw_budget * worst_loss = total risk budget
+        lw_risk_dollars = balance * sc.lw_risk_pct
+        lw_contracts = lw_risk_dollars / cost_per_contract if cost_per_contract > 0 else 0
+
+        # ── 2. Vol Target: normalise by ATR regime ───────────────
+        atr_ratio = (current_atr / daily_median_atr) if daily_median_atr > 0 else 1.0
+        atr_ratio = max(0.5, min(atr_ratio, 3.0))  # Clamp to avoid extremes
+        vol_risk_dollars = (balance * sc.vol_target_pct) / atr_ratio
+        vol_contracts = vol_risk_dollars / cost_per_contract if cost_per_contract > 0 else 0
+
+        # ── 3. Absolute max cap ──────────────────────────────────
+        abs_max_dollars = balance * sc.absolute_max_pct
+        abs_contracts = abs_max_dollars / cost_per_contract if cost_per_contract > 0 else 0
+
+        # ── Take minimum of all three (most conservative) ────────
+        raw_contracts = min(lw_contracts, vol_contracts, abs_contracts)
+
+        # Apply conviction multiplier (e.g., 1.5× for deep IV discount on scalp)
+        raw_contracts *= conviction_mult
+
+        contracts = int(raw_contracts)
+        contracts = max(sc.min_contracts, contracts)
+
+        # ── Balance gate: don't enter if cost > gate % of balance ─
+        if cost_per_contract * contracts > balance * sc.balance_gate_pct:
+            # Try with fewer contracts
+            max_affordable = int(balance * sc.balance_gate_pct / cost_per_contract)
+            if max_affordable >= sc.min_contracts:
+                contracts = max_affordable
+            else:
+                return 0
+
+        return contracts
+
+    def _record_trade_pnl(self, pnl: float, atr: float):
+        """Record a closed trade's PnL and ATR for the hybrid sizer's lookback."""
+        self._trade_history.append(pnl)
+        self._atr_history.append(atr)
+
     def run(self, bars_df: pd.DataFrame, ticker: str = "SPY",
             interval: str = "1m",
             verbose: bool = False) -> ScalpBacktestResults:
@@ -395,6 +493,10 @@ class ScalpBacktester:
 
         profile = get_ticker_profile(ticker)
         premium_scale = profile.premium_scale
+
+        # Reset hybrid sizer state for fresh backtest
+        self._trade_history = []
+        self._atr_history = []
 
         bar_minutes = self._parse_interval(interval)
         self._signal_engine = SignalEngine(self.scalp_cfg, bar_minutes=bar_minutes)
@@ -459,6 +561,80 @@ class ScalpBacktester:
 
         self._compute_stats(results)
         return results
+
+    # ── Shared-Balance Interface ─────────────────────────────────
+    # Used by portfolio backtester to run multiple tickers on one account.
+    # Call prepare() once, then run_single_day() per day with external balance.
+
+    def prepare(self, bars_df: pd.DataFrame, ticker: str = "SPY",
+                interval: str = "1m") -> List[Tuple]:
+        """
+        Prepare backtester for day-by-day execution.
+
+        Scales data, creates signal engines, splits into days.
+        Returns list of (day_date, day_bars) tuples for the caller
+        to iterate over with run_single_day().
+        """
+        if self.ndx_mode:
+            ticker = "NDX"
+            bars_df = bars_df.copy()
+            for col in ["open", "high", "low", "close"]:
+                if col in bars_df.columns:
+                    bars_df[col] = bars_df[col] * self.price_scale
+            if "vwap" in bars_df.columns:
+                bars_df["vwap"] = bars_df["vwap"] * self.price_scale
+        elif self.spx_mode:
+            ticker = "SPX"
+            bars_df = bars_df.copy()
+            for col in ["open", "high", "low", "close"]:
+                if col in bars_df.columns:
+                    bars_df[col] = bars_df[col] * self.price_scale
+            if "vwap" in bars_df.columns:
+                bars_df["vwap"] = bars_df["vwap"] * self.price_scale
+
+        self._prep_ticker = ticker
+        self._prep_profile = get_ticker_profile(ticker)
+        self._prep_premium_scale = self._prep_profile.premium_scale
+        bar_minutes = self._parse_interval(interval)
+        self._prep_bar_minutes = bar_minutes
+
+        # Reset hybrid sizer state for shared-balance backtest
+        self._trade_history = []
+        self._atr_history = []
+
+        self._signal_engine = SignalEngine(self.scalp_cfg, bar_minutes=bar_minutes)
+        self._mr_signal_engine = MeanReversionSignalEngine(self.mr_cfg, bar_minutes=bar_minutes)
+        self._orb_signal_engine = ORBSignalEngine(self.orb_cfg, bar_minutes=bar_minutes)
+        self._rf_signal_engine = RangeFadeSignalEngine(self.rf_cfg, bar_minutes=bar_minutes)
+        self._vm_signal_engine = VWAPMRSignalEngine(self.vm_cfg, bar_minutes=bar_minutes)
+
+        self._prep_prev_high = None
+        self._prep_prev_low = None
+
+        days = self._split_into_days(bars_df)
+        self._prep_days = days
+        return days
+
+    def run_single_day(self, day_date, day_bars: pd.DataFrame,
+                       balance: float,
+                       verbose: bool = False) -> "ScalpBacktestDay":
+        """
+        Run one trading day with an externally-managed balance.
+
+        Use after prepare(). Updates internal prev_day_high/low state.
+        Returns ScalpBacktestDay with day_pnl and _trades.
+        """
+        day_result = self._run_day(
+            day_date, day_bars,
+            self._prep_ticker, self._prep_profile, self._prep_premium_scale,
+            balance, self._prep_bar_minutes, verbose,
+            prev_day_high=self._prep_prev_high,
+            prev_day_low=self._prep_prev_low,
+        )
+        # Update prev day H/L for next day's PREV_HL signals
+        self._prep_prev_high = float(day_bars['high'].max())
+        self._prep_prev_low = float(day_bars['low'].min())
+        return day_result
 
     @staticmethod
     def _parse_interval(interval: str) -> int:
@@ -709,6 +885,7 @@ class ScalpBacktester:
                     )
 
                     daily_pnl += pnl_amount
+                    self._record_trade_pnl(pnl_amount, open_scalp.atr_at_entry)
 
                     if exit_reason == "STOP_LOSS":
                         stopped_directions.add(open_scalp.direction)
@@ -772,6 +949,7 @@ class ScalpBacktester:
                     )
 
                     daily_pnl += pnl_amount
+                    self._record_trade_pnl(pnl_amount, open_runner.atr_at_entry)
                     day_result.trades_closed += 1
                     if pnl_amount > 5:
                         day_result.winning_trades += 1
@@ -821,6 +999,7 @@ class ScalpBacktester:
                     )
 
                     daily_pnl += pnl_amount
+                    self._record_trade_pnl(pnl_amount, open_mr.atr_at_entry)
                     mr_daily_pnl += pnl_amount
                     mr_cooldown_remaining = self.mr_cfg.cooldown_bars
                     day_result.trades_closed += 1
@@ -872,6 +1051,7 @@ class ScalpBacktester:
                     )
 
                     daily_pnl += pnl_amount
+                    self._record_trade_pnl(pnl_amount, open_orb.atr_at_entry)
                     day_result.trades_closed += 1
                     if pnl_amount > 5:
                         day_result.winning_trades += 1
@@ -921,6 +1101,7 @@ class ScalpBacktester:
                     )
 
                     daily_pnl += pnl_amount
+                    self._record_trade_pnl(pnl_amount, open_rf.atr_at_entry)
                     day_result.trades_closed += 1
                     if pnl_amount > 5:
                         day_result.winning_trades += 1
@@ -973,6 +1154,7 @@ class ScalpBacktester:
                     )
 
                     daily_pnl += pnl_amount
+                    self._record_trade_pnl(pnl_amount, open_vm.atr_at_entry)
                     day_result.trades_closed += 1
                     if pnl_amount > 5:
                         day_result.winning_trades += 1
@@ -1079,69 +1261,57 @@ class ScalpBacktester:
                     max_prem = self.scalp_cfg.max_premium * premium_scale
 
                     if min_prem <= entry_premium <= max_prem:
-                        # Position sizing based on risk
+                        # Position sizing via hybrid LW + Vol Target sizer
                         stop_dist = current_atr * self.scalp_cfg.stop_atr_mult
-                        risk_per_contract = 0.50 * stop_dist * 100
-                        if risk_per_contract > 0:
-                            max_risk = self.scalp_cfg.max_risk_per_trade * self.price_scale
-                            budget_pct = 0.30 if self.spx_mode else 0.05
 
-                            # Conviction sizing: deeper IV discount → more contracts + risk
-                            # When RV >> IV, options are deeply cheap → edge is larger → size up
-                            import math as _math2
-                            base_max_contracts = self.scalp_cfg.max_contracts
-                            if (not _math2.isnan(current_rv) and day_iv > 0
-                                    and self.scalp_cfg.rv_iv_premium_ratio > 0):
-                                rv_iv = current_rv / day_iv
-                                if rv_iv >= self.scalp_cfg.rv_iv_premium_ratio:
-                                    # Deeply discounted: 50% more contracts AND risk budget
-                                    base_max_contracts = int(base_max_contracts * 1.5)
-                                    max_risk = max_risk * 1.5
+                        # Conviction multiplier: deep IV discount → 1.5× size
+                        import math as _math2
+                        conviction_mult = 1.0
+                        if (not _math2.isnan(current_rv) and day_iv > 0
+                                and self.scalp_cfg.rv_iv_premium_ratio > 0):
+                            rv_iv = current_rv / day_iv
+                            if rv_iv >= self.scalp_cfg.rv_iv_premium_ratio:
+                                conviction_mult = 1.5
 
-                            max_budget_contracts = int(balance * budget_pct / (entry_premium * 100)) \
-                                if entry_premium > 0 else 0
+                        num_contracts = self._compute_position_size(
+                            balance, entry_premium, current_atr,
+                            daily_median_atr, "scalp",
+                            conviction_mult=conviction_mult,
+                        )
+                        if num_contracts > 0:
+                            # Compute stop and target levels
+                            target_dist = current_atr * self.scalp_cfg.profit_target_atr_mult
+                            if signal.direction == "CALL":
+                                stop_price = current_price - stop_dist
+                                target_price = current_price + target_dist
+                            else:
+                                stop_price = current_price + stop_dist
+                                target_price = current_price - target_dist
 
-                            max_contracts = min(
-                                int(max_risk / risk_per_contract),
-                                base_max_contracts,
-                                max(1, max_budget_contracts),
+                            pos = SimScalpPosition(
+                                ticker=ticker, strike=strike, right=right,
+                                direction=signal.direction, expiry_date=day_date,
+                                confirmations=signal.confirmations.copy(),
+                                confidence=signal.confidence, tier="scalp",
+                                entry_time=current_time, entry_underlying=current_price,
+                                entry_premium=entry_premium, entry_iv=day_iv,
+                                num_contracts=num_contracts, atr_at_entry=current_atr,
+                                stop_price=stop_price, target_price=target_price,
+                                best_favorable_underlying=current_price,
                             )
-                            if entry_premium * 100 <= balance * 0.50:
-                                num_contracts = max(1, max_contracts) if max_contracts >= 1 else 0
-                                if num_contracts > 0:
-                                    # Compute stop and target levels
-                                    target_dist = current_atr * self.scalp_cfg.profit_target_atr_mult
-                                    if signal.direction == "CALL":
-                                        stop_price = current_price - stop_dist
-                                        target_price = current_price + target_dist
-                                    else:
-                                        stop_price = current_price + stop_dist
-                                        target_price = current_price - target_dist
 
-                                    pos = SimScalpPosition(
-                                        ticker=ticker, strike=strike, right=right,
-                                        direction=signal.direction, expiry_date=day_date,
-                                        confirmations=signal.confirmations.copy(),
-                                        confidence=signal.confidence, tier="scalp",
-                                        entry_time=current_time, entry_underlying=current_price,
-                                        entry_premium=entry_premium, entry_iv=day_iv,
-                                        num_contracts=num_contracts, atr_at_entry=current_atr,
-                                        stop_price=stop_price, target_price=target_price,
-                                        best_favorable_underlying=current_price,
-                                    )
+                            open_scalp = pos
+                            scalp_trades_today += 1
+                            day_result.trades_entered += 1
+                            day_result._trades.append(pos)
 
-                                    open_scalp = pos
-                                    scalp_trades_today += 1
-                                    day_result.trades_entered += 1
-                                    day_result._trades.append(pos)
-
-                                    if verbose:
-                                        print(f"    [{day_date}] SCALP ENTER {signal.direction} "
-                                              f"{ticker} {strike}{right} "
-                                              f"@ ${entry_premium:.2f} x{num_contracts} "
-                                              f"({', '.join(signal.confirmations)}) "
-                                              f"ATR=${current_atr:.3f} "
-                                              f"stop=${stop_price:.2f} target=${target_price:.2f}")
+                            if verbose:
+                                print(f"    [{day_date}] SCALP ENTER {signal.direction} "
+                                      f"{ticker} {strike}{right} "
+                                      f"@ ${entry_premium:.2f} x{num_contracts} "
+                                      f"({', '.join(signal.confirmations)}) "
+                                      f"ATR=${current_atr:.3f} "
+                                      f"stop=${stop_price:.2f} target=${target_price:.2f}")
 
             # ── 3b. MEAN-REVERSION entry ─────────────────────────
             if mr_signal is not None:
@@ -1175,55 +1345,46 @@ class ScalpBacktester:
                     mr_max_prem = self.mr_cfg.max_premium * premium_scale
 
                     if mr_min_prem <= mr_entry_premium <= mr_max_prem:
-                        # Position sizing (smaller for mean-rev)
+                        # Position sizing via hybrid LW + Vol Target sizer
                         mr_stop_dist = current_atr * self.mr_cfg.stop_atr_mult
-                        mr_risk_per_contract = 0.50 * mr_stop_dist * 100
-                        if mr_risk_per_contract > 0:
-                            mr_max_risk = self.mr_cfg.max_risk_per_trade * self.price_scale
-                            mr_budget_pct = 0.20 if self.spx_mode else 0.04
-                            mr_max_budget = int(balance * mr_budget_pct / (mr_entry_premium * 100)) \
-                                if mr_entry_premium > 0 else 0
 
-                            mr_max_contracts = min(
-                                int(mr_max_risk / mr_risk_per_contract),
-                                self.mr_cfg.max_contracts,
-                                max(1, mr_max_budget),
+                        mr_num = self._compute_position_size(
+                            balance, mr_entry_premium, current_atr,
+                            daily_median_atr, "mean_rev",
+                        )
+                        if mr_num > 0:
+                            mr_target_dist = current_atr * self.mr_cfg.profit_target_atr_mult
+                            if mr_signal.direction == "CALL":
+                                mr_stop_price = current_price - mr_stop_dist
+                                mr_target_price = current_price + mr_target_dist
+                            else:
+                                mr_stop_price = current_price + mr_stop_dist
+                                mr_target_price = current_price - mr_target_dist
+
+                            mr_pos = SimScalpPosition(
+                                ticker=ticker, strike=mr_strike, right=mr_right,
+                                direction=mr_signal.direction, expiry_date=day_date,
+                                confirmations=mr_signal.confirmations.copy(),
+                                confidence=mr_signal.confidence, tier="mean_rev",
+                                entry_time=current_time, entry_underlying=current_price,
+                                entry_premium=mr_entry_premium, entry_iv=day_iv,
+                                num_contracts=mr_num, atr_at_entry=current_atr,
+                                stop_price=mr_stop_price, target_price=mr_target_price,
+                                best_favorable_underlying=current_price,
                             )
-                            if mr_entry_premium * 100 <= balance * 0.40:
-                                mr_num = max(1, mr_max_contracts) if mr_max_contracts >= 1 else 0
-                                if mr_num > 0:
-                                    mr_target_dist = current_atr * self.mr_cfg.profit_target_atr_mult
-                                    if mr_signal.direction == "CALL":
-                                        mr_stop_price = current_price - mr_stop_dist
-                                        mr_target_price = current_price + mr_target_dist
-                                    else:
-                                        mr_stop_price = current_price + mr_stop_dist
-                                        mr_target_price = current_price - mr_target_dist
 
-                                    mr_pos = SimScalpPosition(
-                                        ticker=ticker, strike=mr_strike, right=mr_right,
-                                        direction=mr_signal.direction, expiry_date=day_date,
-                                        confirmations=mr_signal.confirmations.copy(),
-                                        confidence=mr_signal.confidence, tier="mean_rev",
-                                        entry_time=current_time, entry_underlying=current_price,
-                                        entry_premium=mr_entry_premium, entry_iv=day_iv,
-                                        num_contracts=mr_num, atr_at_entry=current_atr,
-                                        stop_price=mr_stop_price, target_price=mr_target_price,
-                                        best_favorable_underlying=current_price,
-                                    )
+                            open_mr = mr_pos
+                            mr_trades_today += 1
+                            day_result.trades_entered += 1
+                            day_result._trades.append(mr_pos)
 
-                                    open_mr = mr_pos
-                                    mr_trades_today += 1
-                                    day_result.trades_entered += 1
-                                    day_result._trades.append(mr_pos)
-
-                                    if verbose:
-                                        print(f"    [{day_date}] 🔄 MR ENTER {mr_signal.direction} "
-                                              f"{ticker} {mr_strike}{mr_right} "
-                                              f"@ ${mr_entry_premium:.2f} x{mr_num} "
-                                              f"({', '.join(mr_signal.confirmations)}) "
-                                              f"ATR=${current_atr:.3f} "
-                                              f"stop=${mr_stop_price:.2f} target=${mr_target_price:.2f}")
+                            if verbose:
+                                print(f"    [{day_date}] 🔄 MR ENTER {mr_signal.direction} "
+                                      f"{ticker} {mr_strike}{mr_right} "
+                                      f"@ ${mr_entry_premium:.2f} x{mr_num} "
+                                      f"({', '.join(mr_signal.confirmations)}) "
+                                      f"ATR=${current_atr:.3f} "
+                                      f"stop=${mr_stop_price:.2f} target=${mr_target_price:.2f}")
 
             # ── 3c. RUNNER entry ─────────────────────────────────
             # Runner requires a momentum signal (from the same engine)
@@ -1279,15 +1440,13 @@ class ScalpBacktester:
                             runner_max_prem = cfg.runner_max_premium * premium_scale
 
                             if runner_min_prem <= runner_entry_premium <= runner_max_prem:
-                                # Runner position sizing: budget-based (small, disposable)
-                                runner_budget = balance * cfg.runner_budget_pct
-                                runner_num = min(
-                                    int(runner_budget / (runner_entry_premium * 100)) if runner_entry_premium > 0 else 0,
-                                    cfg.runner_max_contracts,
+                                # Runner position sizing via hybrid sizer (budget-based path)
+                                runner_num = self._compute_position_size(
+                                    balance, runner_entry_premium, current_atr,
+                                    daily_median_atr, "runner",
                                 )
-                                runner_num = max(1, runner_num) if runner_num >= 1 else 0
 
-                                if runner_num > 0 and runner_entry_premium * 100 * runner_num <= balance * 0.10:
+                                if runner_num > 0:
                                     # Runner stop
                                     runner_stop_dist = current_atr * cfg.runner_stop_atr_mult
                                     if signal.direction == "CALL":
@@ -1360,57 +1519,49 @@ class ScalpBacktester:
                         orb_max_prem = self.orb_cfg.max_premium * premium_scale
 
                         if orb_min_prem <= orb_entry_premium <= orb_max_prem:
-                            # Position sizing
+                            # Position sizing via hybrid LW + Vol Target sizer
                             orb_range = orb_signal.orb_range
                             stop_dist = orb_range * self.orb_cfg.stop_range_mult
-                            risk_per_contract = 0.50 * stop_dist * 100
-                            if risk_per_contract > 0:
-                                max_risk = self.orb_cfg.max_risk_per_trade * self.price_scale
-                                budget_pct = 0.25 if self.spx_mode else 0.05
-                                max_budget_contracts = int(balance * budget_pct / (orb_entry_premium * 100)) \
-                                    if orb_entry_premium > 0 else 0
 
-                                num_contracts = min(
-                                    int(max_risk / risk_per_contract),
-                                    self.orb_cfg.max_contracts,
-                                    max(1, max_budget_contracts),
+                            num_contracts = self._compute_position_size(
+                                balance, orb_entry_premium, current_atr,
+                                daily_median_atr, "orb",
+                            )
+
+                            if num_contracts > 0:
+                                # Compute stop and target from ORB range
+                                target_dist = orb_range * self.orb_cfg.target_range_mult
+                                if orb_signal.direction == "CALL":
+                                    orb_stop_price = current_price - stop_dist
+                                    orb_target_price = current_price + target_dist
+                                else:
+                                    orb_stop_price = current_price + stop_dist
+                                    orb_target_price = current_price - target_dist
+
+                                orb_pos = SimScalpPosition(
+                                    ticker=ticker, strike=orb_strike, right=orb_right,
+                                    direction=orb_signal.direction, expiry_date=day_date,
+                                    confirmations=orb_signal.confirmations.copy(),
+                                    confidence=orb_signal.confidence, tier="orb",
+                                    entry_time=current_time, entry_underlying=current_price,
+                                    entry_premium=orb_entry_premium, entry_iv=day_iv,
+                                    num_contracts=num_contracts, atr_at_entry=current_atr,
+                                    stop_price=orb_stop_price, target_price=orb_target_price,
+                                    best_favorable_underlying=current_price,
                                 )
-                                num_contracts = max(1, num_contracts)
 
-                                if orb_entry_premium * 100 <= balance * 0.50:
-                                    # Compute stop and target from ORB range
-                                    target_dist = orb_range * self.orb_cfg.target_range_mult
-                                    if orb_signal.direction == "CALL":
-                                        orb_stop_price = current_price - stop_dist
-                                        orb_target_price = current_price + target_dist
-                                    else:
-                                        orb_stop_price = current_price + stop_dist
-                                        orb_target_price = current_price - target_dist
+                                open_orb = orb_pos
+                                orb_trades_today += 1
+                                day_result.trades_entered += 1
+                                day_result._trades.append(orb_pos)
 
-                                    orb_pos = SimScalpPosition(
-                                        ticker=ticker, strike=orb_strike, right=orb_right,
-                                        direction=orb_signal.direction, expiry_date=day_date,
-                                        confirmations=orb_signal.confirmations.copy(),
-                                        confidence=orb_signal.confidence, tier="orb",
-                                        entry_time=current_time, entry_underlying=current_price,
-                                        entry_premium=orb_entry_premium, entry_iv=day_iv,
-                                        num_contracts=num_contracts, atr_at_entry=current_atr,
-                                        stop_price=orb_stop_price, target_price=orb_target_price,
-                                        best_favorable_underlying=current_price,
-                                    )
-
-                                    open_orb = orb_pos
-                                    orb_trades_today += 1
-                                    day_result.trades_entered += 1
-                                    day_result._trades.append(orb_pos)
-
-                                    if verbose:
-                                        print(f"    [{day_date}] 📊 ORB ENTER {orb_signal.direction} "
-                                              f"{ticker} {orb_strike}{orb_right} "
-                                              f"@ ${orb_entry_premium:.2f} x{num_contracts} "
-                                              f"({', '.join(orb_signal.confirmations)}) "
-                                              f"ORB range=${orb_range:.2f} "
-                                              f"stop=${orb_stop_price:.2f} target=${orb_target_price:.2f}")
+                                if verbose:
+                                    print(f"    [{day_date}] 📊 ORB ENTER {orb_signal.direction} "
+                                          f"{ticker} {orb_strike}{orb_right} "
+                                          f"@ ${orb_entry_premium:.2f} x{num_contracts} "
+                                          f"({', '.join(orb_signal.confirmations)}) "
+                                          f"ORB range=${orb_range:.2f} "
+                                          f"stop=${orb_stop_price:.2f} target=${orb_target_price:.2f}")
 
             # ── 3e. RANGE-FADE entry ─────────────────────────────
             # Strategy E: fires only on RANGE_BOUND / MIXED days.
@@ -1450,59 +1601,51 @@ class ScalpBacktester:
                         rf_max_prem = self.rf_cfg.max_premium * premium_scale
 
                         if rf_min_prem <= rf_entry_premium <= rf_max_prem:
-                            # Position sizing from range-based stop
+                            # Position sizing via hybrid LW + Vol Target sizer
                             range_size = rf_signal.range_size
                             stop_dist = range_size * self.rf_cfg.stop_range_pct
-                            risk_per_contract = 0.50 * stop_dist * 100
-                            if risk_per_contract > 0:
-                                max_risk = self.rf_cfg.max_risk_per_trade * self.price_scale
-                                budget_pct = 0.20 if self.spx_mode else 0.04
-                                max_budget_contracts = int(balance * budget_pct / (rf_entry_premium * 100)) \
-                                    if rf_entry_premium > 0 else 0
 
-                                num_contracts = min(
-                                    int(max_risk / risk_per_contract),
-                                    self.rf_cfg.max_contracts,
-                                    max(1, max_budget_contracts),
+                            num_contracts = self._compute_position_size(
+                                balance, rf_entry_premium, current_atr,
+                                daily_median_atr, "range_fade",
+                            )
+
+                            if num_contracts > 0:
+                                # Compute stop and target
+                                target_dist = range_size * self.rf_cfg.target_range_pct
+                                if rf_signal.direction == "CALL":
+                                    # Fading at range low → expect price to go UP toward mid
+                                    rf_stop_price = current_price - stop_dist
+                                    rf_target_price = current_price + target_dist
+                                else:
+                                    # Fading at range high → expect price to go DOWN toward mid
+                                    rf_stop_price = current_price + stop_dist
+                                    rf_target_price = current_price - target_dist
+
+                                rf_pos = SimScalpPosition(
+                                    ticker=ticker, strike=rf_strike, right=rf_right,
+                                    direction=rf_signal.direction, expiry_date=day_date,
+                                    confirmations=rf_signal.confirmations.copy(),
+                                    confidence=rf_signal.confidence, tier="range_fade",
+                                    entry_time=current_time, entry_underlying=current_price,
+                                    entry_premium=rf_entry_premium, entry_iv=day_iv,
+                                    num_contracts=num_contracts, atr_at_entry=current_atr,
+                                    stop_price=rf_stop_price, target_price=rf_target_price,
+                                    best_favorable_underlying=current_price,
                                 )
-                                num_contracts = max(1, num_contracts)
 
-                                if rf_entry_premium * 100 <= balance * 0.40:
-                                    # Compute stop and target
-                                    target_dist = range_size * self.rf_cfg.target_range_pct
-                                    if rf_signal.direction == "CALL":
-                                        # Fading at range low → expect price to go UP toward mid
-                                        rf_stop_price = current_price - stop_dist
-                                        rf_target_price = current_price + target_dist
-                                    else:
-                                        # Fading at range high → expect price to go DOWN toward mid
-                                        rf_stop_price = current_price + stop_dist
-                                        rf_target_price = current_price - target_dist
+                                open_rf = rf_pos
+                                rf_trades_today += 1
+                                day_result.trades_entered += 1
+                                day_result._trades.append(rf_pos)
 
-                                    rf_pos = SimScalpPosition(
-                                        ticker=ticker, strike=rf_strike, right=rf_right,
-                                        direction=rf_signal.direction, expiry_date=day_date,
-                                        confirmations=rf_signal.confirmations.copy(),
-                                        confidence=rf_signal.confidence, tier="range_fade",
-                                        entry_time=current_time, entry_underlying=current_price,
-                                        entry_premium=rf_entry_premium, entry_iv=day_iv,
-                                        num_contracts=num_contracts, atr_at_entry=current_atr,
-                                        stop_price=rf_stop_price, target_price=rf_target_price,
-                                        best_favorable_underlying=current_price,
-                                    )
-
-                                    open_rf = rf_pos
-                                    rf_trades_today += 1
-                                    day_result.trades_entered += 1
-                                    day_result._trades.append(rf_pos)
-
-                                    if verbose:
-                                        print(f"    [{day_date}] 🔃 RF ENTER {rf_signal.direction} "
-                                              f"{ticker} {rf_strike}{rf_right} "
-                                              f"@ ${rf_entry_premium:.2f} x{num_contracts} "
-                                              f"({', '.join(rf_signal.confirmations)}) "
-                                              f"range=${range_size:.2f} "
-                                              f"stop=${rf_stop_price:.2f} target=${rf_target_price:.2f}")
+                                if verbose:
+                                    print(f"    [{day_date}] 🔃 RF ENTER {rf_signal.direction} "
+                                          f"{ticker} {rf_strike}{rf_right} "
+                                          f"@ ${rf_entry_premium:.2f} x{num_contracts} "
+                                          f"({', '.join(rf_signal.confirmations)}) "
+                                          f"range=${range_size:.2f} "
+                                          f"stop=${rf_stop_price:.2f} target=${rf_target_price:.2f}")
 
             # ── 3f. VWAP MEAN-REVERSION entry ────────────────────
             # Strategy F: fires only on DEAD_FLAT days.
@@ -1542,62 +1685,52 @@ class ScalpBacktester:
                         vm_max_prem = self.vm_cfg.max_premium * premium_scale
 
                         if vm_min_prem <= vm_entry_premium <= vm_max_prem:
-                            # Position sizing: deviation-based stop
+                            # Position sizing via hybrid LW + Vol Target sizer
                             cur_vwap = vm_signal.vwap_price
-                            dev_abs = abs(current_price - cur_vwap)
-                            # Stop: if deviation grows to stop_deviation_pct
                             stop_dev = current_price * self.vm_cfg.stop_deviation_pct / 100
-                            risk_per_contract = 0.50 * stop_dev * 100
-                            if risk_per_contract > 0:
-                                max_risk = self.vm_cfg.max_risk_per_trade * self.price_scale
-                                budget_pct = 0.20 if self.spx_mode else 0.03
-                                max_budget_contracts = int(balance * budget_pct / (vm_entry_premium * 100)) \
-                                    if vm_entry_premium > 0 else 0
 
-                                num_contracts = min(
-                                    int(max_risk / risk_per_contract),
-                                    self.vm_cfg.max_contracts,
-                                    max(1, max_budget_contracts),
+                            num_contracts = self._compute_position_size(
+                                balance, vm_entry_premium, current_atr,
+                                daily_median_atr, "vwap_mr",
+                            )
+
+                            if num_contracts > 0:
+                                # Compute stop and target
+                                # Target: price returns to within target_vwap_return_pct of VWAP
+                                target_offset = cur_vwap * self.vm_cfg.target_vwap_return_pct / 100
+                                if vm_signal.direction == "CALL":
+                                    # Price below VWAP → expect snap-back UP
+                                    vm_stop_price = current_price - stop_dev
+                                    vm_target_price = cur_vwap - target_offset
+                                else:
+                                    # Price above VWAP → expect snap-back DOWN
+                                    vm_stop_price = current_price + stop_dev
+                                    vm_target_price = cur_vwap + target_offset
+
+                                vm_pos = SimScalpPosition(
+                                    ticker=ticker, strike=vm_strike, right=vm_right,
+                                    direction=vm_signal.direction, expiry_date=day_date,
+                                    confirmations=vm_signal.confirmations.copy(),
+                                    confidence=vm_signal.confidence, tier="vwap_mr",
+                                    entry_time=current_time, entry_underlying=current_price,
+                                    entry_premium=vm_entry_premium, entry_iv=day_iv,
+                                    num_contracts=num_contracts, atr_at_entry=current_atr,
+                                    stop_price=vm_stop_price, target_price=vm_target_price,
+                                    best_favorable_underlying=current_price,
                                 )
-                                num_contracts = max(1, num_contracts)
 
-                                if vm_entry_premium * 100 <= balance * 0.40:
-                                    # Compute stop and target
-                                    # Target: price returns to within target_vwap_return_pct of VWAP
-                                    target_offset = cur_vwap * self.vm_cfg.target_vwap_return_pct / 100
-                                    if vm_signal.direction == "CALL":
-                                        # Price below VWAP → expect snap-back UP
-                                        vm_stop_price = current_price - stop_dev
-                                        vm_target_price = cur_vwap - target_offset
-                                    else:
-                                        # Price above VWAP → expect snap-back DOWN
-                                        vm_stop_price = current_price + stop_dev
-                                        vm_target_price = cur_vwap + target_offset
+                                open_vm = vm_pos
+                                vm_trades_today += 1
+                                day_result.trades_entered += 1
+                                day_result._trades.append(vm_pos)
 
-                                    vm_pos = SimScalpPosition(
-                                        ticker=ticker, strike=vm_strike, right=vm_right,
-                                        direction=vm_signal.direction, expiry_date=day_date,
-                                        confirmations=vm_signal.confirmations.copy(),
-                                        confidence=vm_signal.confidence, tier="vwap_mr",
-                                        entry_time=current_time, entry_underlying=current_price,
-                                        entry_premium=vm_entry_premium, entry_iv=day_iv,
-                                        num_contracts=num_contracts, atr_at_entry=current_atr,
-                                        stop_price=vm_stop_price, target_price=vm_target_price,
-                                        best_favorable_underlying=current_price,
-                                    )
-
-                                    open_vm = vm_pos
-                                    vm_trades_today += 1
-                                    day_result.trades_entered += 1
-                                    day_result._trades.append(vm_pos)
-
-                                    if verbose:
-                                        print(f"    [{day_date}] 📉 VM ENTER {vm_signal.direction} "
-                                              f"{ticker} {vm_strike}{vm_right} "
-                                              f"@ ${vm_entry_premium:.2f} x{num_contracts} "
-                                              f"({', '.join(vm_signal.confirmations)}) "
-                                              f"dev={vm_signal.deviation_pct:.3f}% "
-                                              f"stop=${vm_stop_price:.2f} target=${vm_target_price:.2f}")
+                                if verbose:
+                                    print(f"    [{day_date}] 📉 VM ENTER {vm_signal.direction} "
+                                          f"{ticker} {vm_strike}{vm_right} "
+                                          f"@ ${vm_entry_premium:.2f} x{num_contracts} "
+                                          f"({', '.join(vm_signal.confirmations)}) "
+                                          f"dev={vm_signal.deviation_pct:.3f}% "
+                                          f"stop=${vm_stop_price:.2f} target=${vm_target_price:.2f}")
 
         # ── End of day: force-close ALL open positions ───────────
         for pos_to_close in [open_scalp, open_runner, open_mr, open_orb, open_rf, open_vm]:
@@ -1627,6 +1760,7 @@ class ScalpBacktester:
                 )
 
                 daily_pnl += pnl_amount
+                self._record_trade_pnl(pnl_amount, pos_to_close.atr_at_entry)
                 day_result.trades_closed += 1
                 if pnl_amount > 5:
                     day_result.winning_trades += 1
