@@ -50,7 +50,6 @@ from .config import (
     PositionSizingConfig, ContractPickerConfig, get_ticker_profile, TickerProfile,
 )
 from .modules.contract_picker import SmartContractPicker, FeasibilityResult
-from .modules.level_detector import MultiTFLevelDetector
 from .scalper import (
     SignalEngine, ScalpExitEngine, RunnerExitEngine,
     ORBSignalEngine, ORBExitEngine,
@@ -976,7 +975,7 @@ class LiveScalpEngine:
                 if minutes_since_open >= self._cp_cfg.late_cutoff_minutes:
                     picker.max_theta_pct = self._cp_cfg.max_theta_pct_late
 
-            feasibility = picker.check_feasibility_with_surface(
+            feasibility = picker.check_feasibility(
                 underlying_price=price,
                 strike=strike,
                 right=right,
@@ -987,42 +986,6 @@ class LiveScalpEngine:
                 expected_hold_minutes=expected_hold,
                 entry_premium=ask,
             )
-
-            # ── S/R-adjusted target (enrich feasibility with level data) ──
-            if self._last_bars is not None and len(self._last_bars) >= 20:
-                try:
-                    detector = MultiTFLevelDetector()
-                    precomp = getattr(self, '_precomp', {}) or {}
-                    level_map = detector.detect_levels(
-                        day_bars_1m=self._last_bars,
-                        current_idx=len(self._last_bars) - 1,
-                        vwap_arr=precomp.get('vwap'),
-                        prev_day_high=getattr(self, 'prev_day_high', None),
-                        prev_day_low=getattr(self, 'prev_day_low', None),
-                        prev_day_close=None,
-                        orb_high=precomp.get('orb_high'),
-                        orb_low=precomp.get('orb_low'),
-                    )
-                    sr_target_price = detector.get_realistic_target(
-                        level_map=level_map,
-                        direction=signal_direction,
-                        atr=atr,
-                    )
-                    if sr_target_price is not None:
-                        # Find matching level for source info
-                        source = "s/r"
-                        for lvl in level_map.levels:
-                            if abs(lvl.price - sr_target_price) < 0.01:
-                                source = lvl.source
-                                break
-                        feasibility.sr_adjusted_target = sr_target_price
-                        feasibility.sr_source = source
-                        logger.info(
-                            f"  S/R target: ${sr_target_price:.2f} "
-                            f"(source={source})"
-                        )
-                except Exception as e:
-                    logger.debug(f"S/R detection skipped: {e}")
 
             if not feasibility.feasible:
                 logger.info(
@@ -1036,32 +999,12 @@ class LiveScalpEngine:
                 return None
 
             # Log feasibility details
-            surface_info = ""
-            if feasibility.pnl_at_5m is not None:
-                surface_info = (
-                    f" | surface: @5m=${feasibility.pnl_at_5m:+.2f}, "
-                    f"@15m=${feasibility.pnl_at_15m:+.2f}, "
-                    f"@30m=${feasibility.pnl_at_30m:+.2f}, "
-                    f"opt_exit={feasibility.optimal_exit_minutes:.0f}m, "
-                    f"θ_kill={feasibility.theta_kill_minutes:.0f}m"
-                )
-            sr_info = ""
-            if feasibility.sr_adjusted_target is not None:
-                sr_info = (
-                    f" | SR_tgt=${feasibility.sr_adjusted_target:.2f} "
-                    f"({feasibility.sr_source})"
-                )
             logger.info(
                 f"✅ CONTRACT OK [{tier}] {strike}{right}: "
                 f"R:R={feasibility.expected_rr:.2f}, "
                 f"gain=${feasibility.expected_gain:.3f} ({feasibility.net_gain_after_costs/ask*100:.0f}%), "
                 f"theta=${feasibility.theta_cost:.3f} ({feasibility.theta_cost/ask*100:.0f}%), "
                 f"Δ={feasibility.delta_at_entry:.3f}, γ/prem={feasibility.gamma_premium_ratio:.4f}"
-                f"{surface_info}{sr_info}"
-            )
-            print(
-                f"  ✅ {tier.upper()} CONTRACT OK: {strike}{right} @ ${ask:.2f}"
-                f"{surface_info}{sr_info}"
             )
 
         # ── Position sizing via hybrid sizer ─────────────────────

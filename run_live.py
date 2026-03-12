@@ -292,22 +292,22 @@ class LiveTradingLoop:
             print(f"\n  ❌ CANNOT TRADE TODAY: {reason}")
             return False
 
-        # 2. Connect to IBKR (always — we need data even in dry-run)
+        # 2. Connect to IBKR
         print("\n  🔌 Connecting to IBKR...")
-        from trading_engine.data.ibkr_provider import IBKRDataProvider
-        self.provider = IBKRDataProvider()
-        if not self.provider.connect():
-            print("  ❌ Failed to connect to IBKR")
-            return False
-
         if not self.dry_run:
+            from trading_engine.data.ibkr_provider import IBKRDataProvider
+            self.provider = IBKRDataProvider()
+            if not self.provider.connect():
+                print("  ❌ Failed to connect to IBKR")
+                return False
+
             self.executor = OrderExecutor(
                 ibkr_provider=self.provider,
                 require_confirmation=self.require_confirmation,
             )
             self.executor.connect()
         else:
-            print("  🧪 DRY RUN — connected for data, orders will be simulated")
+            print("  🧪 DRY RUN — no IBKR connection needed")
 
         # 3. Safety monitor
         webhook_url = os.getenv("ALERT_WEBHOOK_URL")
