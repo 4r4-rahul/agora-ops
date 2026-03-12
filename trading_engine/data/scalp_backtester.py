@@ -41,6 +41,7 @@ from ..config import EngineConfig, ScalpConfig, MeanReversionConfig, ORBConfig, 
 from ..black_scholes import (
     bs_call_price, bs_put_price, bs_delta, bs_gamma, bs_theta, bs_vega,
 )
+from ..modules.contract_picker import SmartContractPicker, FeasibilityResult
 from ..scalper import (
     SignalEngine, ScalpExitEngine, RunnerExitEngine,
     MeanReversionSignalEngine, MeanReversionExitEngine,
@@ -1288,30 +1289,43 @@ class ScalpBacktester:
                                 stop_price = current_price + stop_dist
                                 target_price = current_price - target_dist
 
-                            pos = SimScalpPosition(
-                                ticker=ticker, strike=strike, right=right,
-                                direction=signal.direction, expiry_date=day_date,
-                                confirmations=signal.confirmations.copy(),
-                                confidence=signal.confidence, tier="scalp",
-                                entry_time=current_time, entry_underlying=current_price,
-                                entry_premium=entry_premium, entry_iv=day_iv,
-                                num_contracts=num_contracts, atr_at_entry=current_atr,
-                                stop_price=stop_price, target_price=target_price,
-                                best_favorable_underlying=current_price,
-                            )
+                            # Pre-trade feasibility check
+                            if not self._check_contract_feasibility(
+                                current_price, strike, right, entry_premium,
+                                day_iv, T, target_price, stop_price,
+                                "scalp", minutes_since_open,
+                            ):
+                                if verbose:
+                                    print(f"    [{day_date}] SCALP REJECTED: "
+                                          f"{strike}{right} @ ${entry_premium:.2f} "
+                                          f"(contract can't reach target)")
+                                pass  # Fall through, don't enter
+                            else:
 
-                            open_scalp = pos
-                            scalp_trades_today += 1
-                            day_result.trades_entered += 1
-                            day_result._trades.append(pos)
+                                pos = SimScalpPosition(
+                                    ticker=ticker, strike=strike, right=right,
+                                    direction=signal.direction, expiry_date=day_date,
+                                    confirmations=signal.confirmations.copy(),
+                                    confidence=signal.confidence, tier="scalp",
+                                    entry_time=current_time, entry_underlying=current_price,
+                                    entry_premium=entry_premium, entry_iv=day_iv,
+                                    num_contracts=num_contracts, atr_at_entry=current_atr,
+                                    stop_price=stop_price, target_price=target_price,
+                                    best_favorable_underlying=current_price,
+                                )
 
-                            if verbose:
-                                print(f"    [{day_date}] SCALP ENTER {signal.direction} "
-                                      f"{ticker} {strike}{right} "
-                                      f"@ ${entry_premium:.2f} x{num_contracts} "
-                                      f"({', '.join(signal.confirmations)}) "
-                                      f"ATR=${current_atr:.3f} "
-                                      f"stop=${stop_price:.2f} target=${target_price:.2f}")
+                                open_scalp = pos
+                                scalp_trades_today += 1
+                                day_result.trades_entered += 1
+                                day_result._trades.append(pos)
+
+                                if verbose:
+                                    print(f"    [{day_date}] SCALP ENTER {signal.direction} "
+                                          f"{ticker} {strike}{right} "
+                                          f"@ ${entry_premium:.2f} x{num_contracts} "
+                                          f"({', '.join(signal.confirmations)}) "
+                                          f"ATR=${current_atr:.3f} "
+                                          f"stop=${stop_price:.2f} target=${target_price:.2f}")
 
             # ── 3b. MEAN-REVERSION entry ─────────────────────────
             if mr_signal is not None:
@@ -1456,30 +1470,47 @@ class ScalpBacktester:
                                         runner_stop_price = current_price + runner_stop_dist
                                         runner_target_price = 0
 
-                                    runner_pos = SimScalpPosition(
-                                        ticker=ticker, strike=runner_strike, right=runner_right,
-                                        direction=signal.direction, expiry_date=day_date,
-                                        confirmations=signal.confirmations.copy(),
-                                        confidence=signal.confidence, tier="runner",
-                                        entry_time=current_time, entry_underlying=current_price,
-                                        entry_premium=runner_entry_premium, entry_iv=day_iv,
-                                        num_contracts=runner_num, atr_at_entry=current_atr,
-                                        stop_price=runner_stop_price, target_price=runner_target_price,
-                                        best_favorable_underlying=current_price,
+                                    # Feasibility check: runners have no fixed target,
+                                    # use 1.5× stop distance as synthetic target for validation
+                                    # (modest bar — actual trailing can capture much more)
+                                    synth_target = (
+                                        current_price + 1.5 * runner_stop_dist
+                                        if signal.direction == "CALL"
+                                        else current_price - 1.5 * runner_stop_dist
                                     )
+                                    if not self._check_contract_feasibility(
+                                        current_price, runner_strike, runner_right,
+                                        runner_entry_premium, day_iv, T,
+                                        synth_target, runner_stop_price,
+                                        "runner", minutes_since_open,
+                                    ):
+                                        pass  # Rejected — don't enter
+                                    else:
 
-                                    open_runner = runner_pos
-                                    runner_trades_today += 1
-                                    day_result.trades_entered += 1
-                                    day_result._trades.append(runner_pos)
+                                        runner_pos = SimScalpPosition(
+                                            ticker=ticker, strike=runner_strike, right=runner_right,
+                                            direction=signal.direction, expiry_date=day_date,
+                                            confirmations=signal.confirmations.copy(),
+                                            confidence=signal.confidence, tier="runner",
+                                            entry_time=current_time, entry_underlying=current_price,
+                                            entry_premium=runner_entry_premium, entry_iv=day_iv,
+                                            num_contracts=runner_num, atr_at_entry=current_atr,
+                                            stop_price=runner_stop_price, target_price=runner_target_price,
+                                            best_favorable_underlying=current_price,
+                                        )
 
-                                    if verbose:
-                                        print(f"    [{day_date}] 🏃 RUNNER ENTER {signal.direction} "
-                                              f"{ticker} {runner_strike}{runner_right} "
-                                              f"@ ${runner_entry_premium:.2f} x{runner_num} "
-                                              f"({', '.join(signal.confirmations)}) "
-                                              f"ATR=${current_atr:.3f} (ATR ratio: {atr_ratio:.2f}x) "
-                                              f"stop=${runner_stop_price:.2f}")
+                                        open_runner = runner_pos
+                                        runner_trades_today += 1
+                                        day_result.trades_entered += 1
+                                        day_result._trades.append(runner_pos)
+
+                                        if verbose:
+                                            print(f"    [{day_date}] 🏃 RUNNER ENTER {signal.direction} "
+                                                  f"{ticker} {runner_strike}{runner_right} "
+                                                  f"@ ${runner_entry_premium:.2f} x{runner_num} "
+                                                  f"({', '.join(signal.confirmations)}) "
+                                                  f"ATR=${current_atr:.3f} (ATR ratio: {atr_ratio:.2f}x) "
+                                                  f"stop=${runner_stop_price:.2f}")
 
             # ── 3d. ORB BREAKOUT entry ───────────────────────────
             # Strategy D: fires ONLY when momentum engine has no signal this day.
@@ -1538,30 +1569,40 @@ class ScalpBacktester:
                                     orb_stop_price = current_price + stop_dist
                                     orb_target_price = current_price - target_dist
 
-                                orb_pos = SimScalpPosition(
-                                    ticker=ticker, strike=orb_strike, right=orb_right,
-                                    direction=orb_signal.direction, expiry_date=day_date,
-                                    confirmations=orb_signal.confirmations.copy(),
-                                    confidence=orb_signal.confidence, tier="orb",
-                                    entry_time=current_time, entry_underlying=current_price,
-                                    entry_premium=orb_entry_premium, entry_iv=day_iv,
-                                    num_contracts=num_contracts, atr_at_entry=current_atr,
-                                    stop_price=orb_stop_price, target_price=orb_target_price,
-                                    best_favorable_underlying=current_price,
-                                )
+                                # Pre-trade feasibility check
+                                if not self._check_contract_feasibility(
+                                    current_price, orb_strike, orb_right,
+                                    orb_entry_premium, day_iv, T,
+                                    orb_target_price, orb_stop_price,
+                                    "orb", minutes_since_open,
+                                ):
+                                    pass  # Rejected — don't enter
+                                else:
 
-                                open_orb = orb_pos
-                                orb_trades_today += 1
-                                day_result.trades_entered += 1
-                                day_result._trades.append(orb_pos)
+                                    orb_pos = SimScalpPosition(
+                                        ticker=ticker, strike=orb_strike, right=orb_right,
+                                        direction=orb_signal.direction, expiry_date=day_date,
+                                        confirmations=orb_signal.confirmations.copy(),
+                                        confidence=orb_signal.confidence, tier="orb",
+                                        entry_time=current_time, entry_underlying=current_price,
+                                        entry_premium=orb_entry_premium, entry_iv=day_iv,
+                                        num_contracts=num_contracts, atr_at_entry=current_atr,
+                                        stop_price=orb_stop_price, target_price=orb_target_price,
+                                        best_favorable_underlying=current_price,
+                                    )
 
-                                if verbose:
-                                    print(f"    [{day_date}] 📊 ORB ENTER {orb_signal.direction} "
-                                          f"{ticker} {orb_strike}{orb_right} "
-                                          f"@ ${orb_entry_premium:.2f} x{num_contracts} "
-                                          f"({', '.join(orb_signal.confirmations)}) "
-                                          f"ORB range=${orb_range:.2f} "
-                                          f"stop=${orb_stop_price:.2f} target=${orb_target_price:.2f}")
+                                    open_orb = orb_pos
+                                    orb_trades_today += 1
+                                    day_result.trades_entered += 1
+                                    day_result._trades.append(orb_pos)
+
+                                    if verbose:
+                                        print(f"    [{day_date}] 📊 ORB ENTER {orb_signal.direction} "
+                                              f"{ticker} {orb_strike}{orb_right} "
+                                              f"@ ${orb_entry_premium:.2f} x{num_contracts} "
+                                              f"({', '.join(orb_signal.confirmations)}) "
+                                              f"ORB range=${orb_range:.2f} "
+                                              f"stop=${orb_stop_price:.2f} target=${orb_target_price:.2f}")
 
             # ── 3e. RANGE-FADE entry ─────────────────────────────
             # Strategy E: fires only on RANGE_BOUND / MIXED days.
@@ -1622,30 +1663,40 @@ class ScalpBacktester:
                                     rf_stop_price = current_price + stop_dist
                                     rf_target_price = current_price - target_dist
 
-                                rf_pos = SimScalpPosition(
-                                    ticker=ticker, strike=rf_strike, right=rf_right,
-                                    direction=rf_signal.direction, expiry_date=day_date,
-                                    confirmations=rf_signal.confirmations.copy(),
-                                    confidence=rf_signal.confidence, tier="range_fade",
-                                    entry_time=current_time, entry_underlying=current_price,
-                                    entry_premium=rf_entry_premium, entry_iv=day_iv,
-                                    num_contracts=num_contracts, atr_at_entry=current_atr,
-                                    stop_price=rf_stop_price, target_price=rf_target_price,
-                                    best_favorable_underlying=current_price,
-                                )
+                                # Pre-trade feasibility check
+                                if not self._check_contract_feasibility(
+                                    current_price, rf_strike, rf_right,
+                                    rf_entry_premium, day_iv, T,
+                                    rf_target_price, rf_stop_price,
+                                    "range_fade", minutes_since_open,
+                                ):
+                                    pass  # Rejected — don't enter
+                                else:
 
-                                open_rf = rf_pos
-                                rf_trades_today += 1
-                                day_result.trades_entered += 1
-                                day_result._trades.append(rf_pos)
+                                    rf_pos = SimScalpPosition(
+                                        ticker=ticker, strike=rf_strike, right=rf_right,
+                                        direction=rf_signal.direction, expiry_date=day_date,
+                                        confirmations=rf_signal.confirmations.copy(),
+                                        confidence=rf_signal.confidence, tier="range_fade",
+                                        entry_time=current_time, entry_underlying=current_price,
+                                        entry_premium=rf_entry_premium, entry_iv=day_iv,
+                                        num_contracts=num_contracts, atr_at_entry=current_atr,
+                                        stop_price=rf_stop_price, target_price=rf_target_price,
+                                        best_favorable_underlying=current_price,
+                                    )
 
-                                if verbose:
-                                    print(f"    [{day_date}] 🔃 RF ENTER {rf_signal.direction} "
-                                          f"{ticker} {rf_strike}{rf_right} "
-                                          f"@ ${rf_entry_premium:.2f} x{num_contracts} "
-                                          f"({', '.join(rf_signal.confirmations)}) "
-                                          f"range=${range_size:.2f} "
-                                          f"stop=${rf_stop_price:.2f} target=${rf_target_price:.2f}")
+                                    open_rf = rf_pos
+                                    rf_trades_today += 1
+                                    day_result.trades_entered += 1
+                                    day_result._trades.append(rf_pos)
+
+                                    if verbose:
+                                        print(f"    [{day_date}] 🔃 RF ENTER {rf_signal.direction} "
+                                              f"{ticker} {rf_strike}{rf_right} "
+                                              f"@ ${rf_entry_premium:.2f} x{num_contracts} "
+                                              f"({', '.join(rf_signal.confirmations)}) "
+                                              f"range=${range_size:.2f} "
+                                              f"stop=${rf_stop_price:.2f} target=${rf_target_price:.2f}")
 
             # ── 3f. VWAP MEAN-REVERSION entry ────────────────────
             # Strategy F: fires only on DEAD_FLAT days.
@@ -1784,6 +1835,82 @@ class ScalpBacktester:
         """Check if in valid MEAN-REVERSION trading window (midday chop)."""
         cfg = self.mr_cfg
         return cfg.window_start <= minutes_since_open <= cfg.window_end
+
+    def _check_contract_feasibility(
+        self,
+        current_price: float,
+        strike: float,
+        right: str,
+        entry_premium: float,
+        day_iv: float,
+        T: float,
+        target_price: float,
+        stop_price: float,
+        tier: str,
+        minutes_since_open: int = 0,
+    ) -> bool:
+        """
+        Pre-trade option feasibility check.
+
+        Forward-prices the option at the target underlying price to verify
+        the premium can realistically achieve the profit target after
+        theta decay and slippage.
+
+        Returns True if feasible, False if the contract should be rejected.
+        """
+        cp_cfg = self.config.contract_picker
+        if not cp_cfg.enabled:
+            return True
+
+        # Per-tier enable check
+        tier_map = {
+            "scalp": cp_cfg.scalp_enabled,
+            "runner": cp_cfg.runner_enabled,
+            "orb": cp_cfg.orb_enabled,
+            "range_fade": cp_cfg.range_fade_enabled,
+        }
+        if not tier_map.get(tier, True):
+            return True
+
+        # Create picker with tier-appropriate thresholds
+        if tier == "runner":
+            picker = SmartContractPicker(
+                min_expected_rr=cp_cfg.min_expected_rr_runner,
+                min_net_gain_pct=cp_cfg.min_net_gain_pct_runner,
+                max_theta_pct=cp_cfg.max_theta_pct_runner,
+                entry_slippage_pct=self.entry_slippage_pct,
+                exit_slippage_pct=self.exit_slippage_pct,
+            )
+            # Runners are always late-day momentum plays — no additional
+            # theta tightening (their threshold already accounts for 0DTE reality)
+        else:
+            picker = SmartContractPicker(
+                min_expected_rr=cp_cfg.min_expected_rr,
+                min_net_gain_pct=cp_cfg.min_net_gain_pct,
+                max_theta_pct=cp_cfg.max_theta_pct,
+                entry_slippage_pct=self.entry_slippage_pct,
+                exit_slippage_pct=self.exit_slippage_pct,
+            )
+
+            # Late-day theta tightening for non-runner tiers
+            if minutes_since_open >= cp_cfg.late_cutoff_minutes:
+                picker.max_theta_pct = cp_cfg.max_theta_pct_late
+
+        expected_hold = SmartContractPicker.expected_hold_for_tier(tier, minutes_since_open)
+
+        result = picker.check_feasibility(
+            underlying_price=current_price,
+            strike=strike,
+            right=right,
+            iv=day_iv,
+            time_to_expiry=T,
+            target_price=target_price,
+            stop_price=stop_price,
+            expected_hold_minutes=expected_hold,
+            entry_premium=entry_premium,
+        )
+
+        return result.feasible
 
     @staticmethod
     def _round_strike(price: float, profile: TickerProfile) -> float:

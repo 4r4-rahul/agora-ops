@@ -47,8 +47,9 @@ import pandas as pd
 
 from .config import (
     EngineConfig, ScalpConfig, ORBConfig, RangeFadeConfig,
-    PositionSizingConfig, get_ticker_profile, TickerProfile,
+    PositionSizingConfig, ContractPickerConfig, get_ticker_profile, TickerProfile,
 )
+from .modules.contract_picker import SmartContractPicker, FeasibilityResult
 from .scalper import (
     SignalEngine, ScalpExitEngine, RunnerExitEngine,
     ORBSignalEngine, ORBExitEngine,
@@ -199,6 +200,17 @@ class LiveScalpEngine:
 
         # ── Regime Detector ──────────────────────────────────────
         self._regime = RegimeDetector()
+
+        # ── Smart Contract Picker (pre-trade feasibility) ────────
+        cp_cfg = config.contract_picker
+        self._contract_picker = SmartContractPicker(
+            min_expected_rr=cp_cfg.min_expected_rr,
+            min_net_gain_pct=cp_cfg.min_net_gain_pct,
+            max_theta_pct=cp_cfg.max_theta_pct,
+            entry_slippage_pct=cp_cfg.entry_slippage_pct,
+            exit_slippage_pct=cp_cfg.exit_slippage_pct,
+        )
+        self._cp_cfg = cp_cfg
 
         # ── Per-Day State (reset each morning) ───────────────────
         self.open_scalp: Optional[LiveScalpPosition] = None
@@ -925,6 +937,75 @@ class LiveScalpEngine:
         strike = strike_info["strike"]
         ask = strike_info["ask"]
         delta = strike_info["delta"]
+
+        # ── Pre-trade feasibility check ──────────────────────────
+        # Forward-price the option at target to verify it can deliver
+        tier_enabled_map = {
+            "scalp": self._cp_cfg.scalp_enabled,
+            "runner": self._cp_cfg.runner_enabled,
+            "orb": self._cp_cfg.orb_enabled,
+            "range_fade": self._cp_cfg.range_fade_enabled,
+        }
+        if self._cp_cfg.enabled and tier_enabled_map.get(tier, True):
+            # Compute time to expiry (0DTE → close at 4:00 PM ET)
+            now = datetime.now()
+            minutes_to_close = max(1, (16 * 60) - (now.hour * 60 + now.minute))
+            T = minutes_to_close / (252 * 390)
+
+            # Estimate IV from recent bars
+            iv = strike_info.get("iv", 0) or self._estimate_iv(self._last_bars)
+
+            # Expected hold time depends on tier
+            minutes_since_open = max(0, (now.hour * 60 + now.minute) - (9 * 60 + 30))
+            expected_hold = SmartContractPicker.expected_hold_for_tier(tier, minutes_since_open)
+
+            # Use tier-specific thresholds for runners
+            picker = self._contract_picker
+            if tier == "runner":
+                picker = SmartContractPicker(
+                    min_expected_rr=self._cp_cfg.min_expected_rr_runner,
+                    min_net_gain_pct=self._cp_cfg.min_net_gain_pct_runner,
+                    max_theta_pct=self._cp_cfg.max_theta_pct_runner,
+                    entry_slippage_pct=self._cp_cfg.entry_slippage_pct,
+                    exit_slippage_pct=self._cp_cfg.exit_slippage_pct,
+                )
+                # Runners are late-day momentum plays — no additional theta tightening
+            else:
+                # Late-day theta tightening for non-runner tiers
+                if minutes_since_open >= self._cp_cfg.late_cutoff_minutes:
+                    picker.max_theta_pct = self._cp_cfg.max_theta_pct_late
+
+            feasibility = picker.check_feasibility(
+                underlying_price=price,
+                strike=strike,
+                right=right,
+                iv=iv,
+                time_to_expiry=T,
+                target_price=target_price,
+                stop_price=stop_price,
+                expected_hold_minutes=expected_hold,
+                entry_premium=ask,
+            )
+
+            if not feasibility.feasible:
+                logger.info(
+                    f"🚫 CONTRACT REJECTED [{tier}] {strike}{right} @ ${ask:.2f}: "
+                    f"{feasibility.reject_reason}"
+                )
+                print(
+                    f"  🚫 {tier.upper()} CONTRACT REJECTED: {strike}{right} @ ${ask:.2f}\n"
+                    f"     {feasibility.reject_reason}"
+                )
+                return None
+
+            # Log feasibility details
+            logger.info(
+                f"✅ CONTRACT OK [{tier}] {strike}{right}: "
+                f"R:R={feasibility.expected_rr:.2f}, "
+                f"gain=${feasibility.expected_gain:.3f} ({feasibility.net_gain_after_costs/ask*100:.0f}%), "
+                f"theta=${feasibility.theta_cost:.3f} ({feasibility.theta_cost/ask*100:.0f}%), "
+                f"Δ={feasibility.delta_at_entry:.3f}, γ/prem={feasibility.gamma_premium_ratio:.4f}"
+            )
 
         # ── Position sizing via hybrid sizer ─────────────────────
         num_contracts = self._compute_position_size(

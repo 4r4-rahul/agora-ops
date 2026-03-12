@@ -691,6 +691,57 @@ class PositionSizingConfig:
 
 
 @dataclass
+class ContractPickerConfig:
+    """
+    Smart Contract Picker — pre-trade option feasibility validation.
+
+    Before entering any trade, forward-prices the option at the target
+    underlying price to verify the option premium can realistically
+    achieve the profit target after theta decay and slippage.
+
+    This closes the critical gap where stops/targets are in underlying
+    price space but we trade options — whose premium movement depends
+    on delta, gamma, theta, and time remaining.
+
+    Backtested impact: filters out trades where premium can't deliver,
+    especially late-day entries where theta overwhelms small moves.
+    """
+    # ── Master Enable ───────────────────────────────────────────
+    enabled: bool = True                 # Enable pre-trade feasibility check
+
+    # ── Minimum R:R Thresholds ──────────────────────────────────
+    # Expected option gain / expected option loss at target vs stop
+    min_expected_rr: float = 1.0         # Require at least 1:1 option R:R
+    min_expected_rr_runner: float = 0.5  # Runners: lower bar (big gamma leverage)
+
+    # ── Minimum Net Gain ────────────────────────────────────────
+    # Net gain (after slippage) as % of entry premium
+    min_net_gain_pct: float = 0.15       # Require 15% net gain potential
+    min_net_gain_pct_runner: float = 0.10  # Runners: lower bar
+
+    # ── Theta Cost Limits ───────────────────────────────────────
+    # Max acceptable theta decay as % of entry premium over expected hold
+    # NOTE: 0DTE options naturally have very high theta/premium ratios
+    # in the afternoon (50%+ is normal for ATM at 2 PM). Thresholds
+    # must accommodate this reality.
+    max_theta_pct: float = 0.40          # Reject if theta > 40% of premium
+    max_theta_pct_runner: float = 0.60   # Runners: lenient (momentum plays, fast resolution)
+    max_theta_pct_late: float = 0.35     # After 2:30 PM: slightly tighter for scalps
+    late_cutoff_minutes: int = 300       # 300 min after open = 2:30 PM
+
+    # ── Slippage Assumptions ────────────────────────────────────
+    entry_slippage_pct: float = 0.0125   # 1.25% above mid on entry
+    exit_slippage_pct: float = 0.0125    # 1.25% below mid on exit
+
+    # ── Per-Tier Overrides ──────────────────────────────────────
+    # Each tier can bypass with different thresholds
+    scalp_enabled: bool = True
+    runner_enabled: bool = True
+    orb_enabled: bool = True
+    range_fade_enabled: bool = True
+
+
+@dataclass
 class EngineConfig:
     """Master engine configuration."""
     account: AccountConfig = field(default_factory=AccountConfig)
@@ -704,6 +755,7 @@ class EngineConfig:
     range_fade: RangeFadeConfig = field(default_factory=RangeFadeConfig)
     vwap_mr: VWAPMRConfig = field(default_factory=VWAPMRConfig)
     sizing: PositionSizingConfig = field(default_factory=PositionSizingConfig)
+    contract_picker: ContractPickerConfig = field(default_factory=ContractPickerConfig)
     data_dir: str = field(default_factory=lambda: os.path.join(
         os.path.dirname(os.path.dirname(__file__)), "data"
     ))
