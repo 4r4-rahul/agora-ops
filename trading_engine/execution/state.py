@@ -199,12 +199,12 @@ class StateManager:
         self.state.open_positions.append(position_data)
         self.save()
 
-    def remove_position(self, ticker: str, short_strike: float, right: str):
+    def remove_position(self, ticker: str, strike: float, right: str):
         """Remove a closed position from tracking."""
         self.state.open_positions = [
             p for p in self.state.open_positions
             if not (p.get("ticker") == ticker and
-                    p.get("short_strike") == short_strike and
+                    p.get("strike", p.get("short_strike")) == strike and
                     p.get("right") == right)
         ]
         self.save()
@@ -248,7 +248,8 @@ class StateManager:
         matched = []
         stale = []
         for pos in self.state.open_positions:
-            key = (f"{pos.get('ticker', '')}_{pos.get('short_strike', 0)}_"
+            strike_val = pos.get('strike', pos.get('short_strike', 0))
+            key = (f"{pos.get('ticker', '')}_{strike_val}_"
                    f"{pos.get('right', '')}_{pos.get('expiry', '')}")
             if key in ibkr_lookup:
                 matched.append(pos)
@@ -274,11 +275,11 @@ class StateManager:
                 logger.warning(f"  Untracked: {u}")
                 self.state.open_positions.append({
                     "ticker": u["symbol"],
-                    "short_strike": u["strike"],
+                    "strike": u["strike"],
                     "right": u["right"],
                     "expiry": u["expiry"],
-                    "quantity": u["position"],
-                    "avg_cost": u["avg_cost"],
+                    "num_contracts": u["position"],
+                    "entry_premium": u["avg_cost"] / 100.0,
                     "source": "ibkr_sync",
                 })
 

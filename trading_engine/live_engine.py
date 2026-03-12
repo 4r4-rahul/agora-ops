@@ -164,11 +164,13 @@ class LiveScalpEngine:
         executor: OrderExecutor,
         config: EngineConfig,
         account_size: float = 10_000.0,
+        state_manager=None,     # StateManager for P&L persistence
     ):
         self.provider = provider
         self.executor = executor
         self.config = config
         self.account_size = account_size
+        self.state_manager = state_manager  # Wired to persist P&L
 
         # Strategy configs
         self.scalp_cfg = config.scalp
@@ -820,6 +822,14 @@ class LiveScalpEngine:
         self.daily_pnl += realized_pnl
         self._record_trade_pnl(realized_pnl, pos.atr_at_entry)
 
+        # Persist to StateManager (daily/weekly/monthly P&L limits)
+        if self.state_manager:
+            self.state_manager.record_fill(fill, realized_pnl)
+            logger.info(
+                f"State updated: daily=${self.state_manager.state.daily_pnl:+.2f} "
+                f"weekly=${self.state_manager.state.weekly_pnl:+.2f}"
+            )
+
         if exit_reason == "STOP_LOSS" and pos.tier == "scalp":
             self.stopped_directions.add(pos.direction)
 
@@ -976,6 +986,26 @@ class LiveScalpEngine:
                 best_favorable_underlying=price,
             )
             print(f"  ✅ {tier.upper()} FILLED: {fill.num_filled}x @ ${entry_price:.2f}")
+            return pos
+
+        # Handle partial fills — track whatever got filled
+        if fill.status == OrderStatus.PARTIAL and fill.num_filled > 0:
+            entry_price = abs(fill.avg_fill_price)
+            pos = LiveScalpPosition(
+                ticker=ticker, strike=strike, right=right,
+                direction=signal_direction, expiry=expiry, tier=tier,
+                confirmations=confirmations, confidence=confidence,
+                entry_time=datetime.now(), entry_underlying=price,
+                entry_premium=entry_price, num_contracts=fill.num_filled,
+                atr_at_entry=atr,
+                stop_price=stop_price, target_price=target_price,
+                best_favorable_underlying=price,
+            )
+            logger.warning(
+                f"Partial fill: {fill.num_filled}/{num_contracts} @ ${entry_price:.2f}"
+            )
+            print(f"  ⚠️  {tier.upper()} PARTIAL FILL: {fill.num_filled}/{num_contracts} "
+                  f"@ ${entry_price:.2f}")
             return pos
 
         print(f"  ❌ Not filled: {fill.status.value}")

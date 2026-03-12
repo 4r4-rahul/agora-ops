@@ -103,6 +103,29 @@ def market_is_open() -> bool:
     if now.weekday() >= 5:
         return False
 
+    # NYSE holidays (update annually)
+    # Covers 2025–2027. Add years as needed.
+    _NYSE_HOLIDAYS = {
+        # 2025
+        date(2025, 1, 1), date(2025, 1, 20), date(2025, 2, 17),
+        date(2025, 4, 18), date(2025, 5, 26), date(2025, 6, 19),
+        date(2025, 7, 4), date(2025, 9, 1), date(2025, 11, 27),
+        date(2025, 12, 25),
+        # 2026
+        date(2026, 1, 1), date(2026, 1, 19), date(2026, 2, 16),
+        date(2026, 4, 3), date(2026, 5, 25), date(2026, 6, 19),
+        date(2026, 7, 3), date(2026, 9, 7), date(2026, 11, 26),
+        date(2026, 12, 25),
+        # 2027
+        date(2027, 1, 1), date(2027, 1, 18), date(2027, 2, 15),
+        date(2027, 3, 26), date(2027, 5, 31), date(2027, 6, 18),
+        date(2027, 7, 5), date(2027, 9, 6), date(2027, 11, 25),
+        date(2027, 12, 24),
+    }
+
+    if now.date() in _NYSE_HOLIDAYS:
+        return False
+
     # Market hours: 9:30 AM - 4:00 PM ET
     open_time = now.replace(hour=9, minute=30, second=0, microsecond=0)
     close_time = now.replace(hour=16, minute=0, second=0, microsecond=0)
@@ -316,6 +339,7 @@ class LiveTradingLoop:
             executor=self.executor,
             config=engine_config,
             account_size=self.account_size,
+            state_manager=self.state,
         )
         print(f"  ⚡ Multi-strategy engine: ENABLED")
         print(f"     Scalp(A): {'ON' if True else 'OFF'}")
@@ -328,8 +352,82 @@ class LiveTradingLoop:
             print("\n  🔄 Syncing positions with IBKR...")
             self.state.sync_positions(self.provider)
 
+        # 6. Restore open positions into scalp engine from state
+        if self.scalp_engine:
+            self._restore_positions()
+
         print("\n  ✅ Setup complete — ready for trading")
         return True
+
+    def _restore_positions(self):
+        """
+        Restore open positions from StateManager into LiveScalpEngine slots.
+
+        This ensures that if the engine restarts mid-day, surviving IBKR
+        positions are monitored for exits instead of becoming orphans.
+        """
+        from trading_engine.live_engine import LiveScalpPosition
+
+        persisted = self.state.state.open_positions
+        if not persisted:
+            return
+
+        restored = 0
+        for pos_data in persisted:
+            tier = pos_data.get("tier", "scalp")
+            is_open = pos_data.get("is_open", True)
+            if not is_open:
+                continue
+
+            # Build a LiveScalpPosition from persisted dict
+            pos = LiveScalpPosition(
+                ticker=pos_data.get("ticker", ""),
+                strike=pos_data.get("strike", 0.0),
+                right=pos_data.get("right", ""),
+                direction=pos_data.get("direction", ""),
+                expiry=pos_data.get("expiry", ""),
+                tier=tier,
+                confirmations=pos_data.get("confirmations", []),
+                confidence=pos_data.get("confidence", 0.0),
+                entry_underlying=pos_data.get("entry_underlying", 0.0),
+                entry_premium=pos_data.get("entry_premium", 0.0),
+                num_contracts=pos_data.get("num_contracts", 1),
+                atr_at_entry=pos_data.get("atr_at_entry", 0.30),
+                stop_price=pos_data.get("stop_price", 0.0),
+                target_price=pos_data.get("target_price", 0.0),
+                best_favorable_underlying=pos_data.get("best_favorable_underlying", 0.0),
+                is_open=True,
+            )
+
+            # Parse entry_time if present
+            et = pos_data.get("entry_time")
+            if et:
+                try:
+                    pos.entry_time = datetime.fromisoformat(str(et))
+                except (ValueError, TypeError):
+                    pass
+
+            # Slot into the correct tier
+            slot_map = {
+                "scalp": "open_scalp",
+                "runner": "open_runner",
+                "orb": "open_orb",
+                "range_fade": "open_rf",
+            }
+            attr = slot_map.get(tier, "open_scalp")
+            if getattr(self.scalp_engine, attr) is None:
+                setattr(self.scalp_engine, attr, pos)
+                restored += 1
+                print(f"  🔁 Restored {tier.upper()}: {pos.ticker} {pos.strike}{pos.right}")
+            else:
+                logger.warning(
+                    f"Cannot restore {tier} position — slot already occupied"
+                )
+
+        if restored:
+            print(f"  ✅ Restored {restored} position(s) from previous session")
+        else:
+            print(f"  📭 No positions to restore")
 
     # ─── Entry Logic ─────────────────────────────────────────────
 
@@ -439,6 +537,43 @@ class LiveTradingLoop:
 
     # ─── Monitoring Loop ─────────────────────────────────────────
 
+    def _attempt_reconnect(self):
+        """Try to reconnect to IBKR after a connection drop."""
+        if self.dry_run or not self.provider:
+            return
+
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            delay = 5 * attempt  # 5s, 10s, 15s exponential-ish backoff
+            print(f"  🔌 Reconnect attempt {attempt}/{max_retries} in {delay}s...")
+            time.sleep(delay)
+            try:
+                self.provider.disconnect()
+            except Exception:
+                pass
+            try:
+                if self.provider.connect():
+                    # Re-wire executor
+                    if self.executor:
+                        self.executor._ib = self.provider._ib
+                    print(f"  ✅ Reconnected to IBKR")
+                    if self.safety:
+                        self.safety.send_alert(
+                            f"🔌 Reconnected to IBKR (attempt {attempt})",
+                            AlertLevel.WARNING,
+                        )
+                    return
+            except Exception as e:
+                logger.error(f"Reconnect attempt {attempt} failed: {e}")
+
+        print(f"  🚨 Failed to reconnect after {max_retries} attempts")
+        if self.safety:
+            self.safety.send_alert(
+                f"🚨 IBKR reconnection FAILED after {max_retries} attempts — engine stopping",
+                AlertLevel.EMERGENCY,
+            )
+        self._running = False
+
     def monitor_positions(self):
         """Check all open scalp-engine positions for exit triggers."""
         if not self.scalp_engine:
@@ -524,27 +659,50 @@ class LiveTradingLoop:
                 # ── Entry scan (every scan_interval_sec) ──
                 if now - last_scan >= self.scan_interval_sec:
                     if msopen >= 10:  # Need ≥10 bars for indicators
-                        self.scan_entry()
+                        try:
+                            self.scan_entry()
+                        except (ConnectionError, TimeoutError, OSError) as e:
+                            logger.error(f"Connection error during scan: {e}")
+                            print(f"  ⚠️  Connection error: {e}")
+                            self._attempt_reconnect()
+                        except Exception as e:
+                            logger.error(f"Unexpected error in scan_entry: {e}", exc_info=True)
+                            print(f"  ❌ Scan error (non-fatal): {e}")
                     last_scan = now
 
                 # ── Safety + position monitoring ──
                 if now - last_monitor >= self.monitor_interval_sec:
                     # Safety monitor
                     if self.safety:
-                        safe, alerts = self.safety.check()
+                        try:
+                            safe, alerts = self.safety.check()
+                        except Exception as e:
+                            logger.error(f"Safety check error: {e}")
+                            safe, alerts = True, []  # Fail-open for safety check itself
                         if not safe:
                             print(f"\n  🚨 SAFETY: Kill switch triggered")
                             self._running = False
                             break
 
                         if self.provider:
-                            current_vix = get_current_vix(self.provider)
-                            spike = self.safety.check_vix_spike(current_vix)
-                            if spike:
-                                print(f"\n  {spike}")
+                            try:
+                                current_vix = get_current_vix(self.provider)
+                                spike = self.safety.check_vix_spike(current_vix)
+                                if spike:
+                                    print(f"\n  {spike}")
+                            except Exception:
+                                pass  # VIX fetch failure is non-critical
 
                     # Strategy exit monitoring
-                    self.monitor_positions()
+                    try:
+                        self.monitor_positions()
+                    except (ConnectionError, TimeoutError, OSError) as e:
+                        logger.error(f"Connection error during monitoring: {e}")
+                        print(f"  ⚠️  Connection error: {e}")
+                        self._attempt_reconnect()
+                    except Exception as e:
+                        logger.error(f"Unexpected error in monitor: {e}", exc_info=True)
+                        print(f"  ❌ Monitor error (non-fatal): {e}")
                     last_monitor = now
 
                 # ── Approaching close — force check ──
