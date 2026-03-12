@@ -1,61 +1,63 @@
 #!/usr/bin/env python3
 """
-Live Trading Loop — 0DTE Options Engine on IBKR
-=================================================
-Buy-first execution loop for small accounts:
+Live Trading Loop — 0DTE Multi-Strategy Engine on IBKR
+========================================================
+Executes the proven backtested strategies in real-time:
 
-  MODE A — BUY (primary — long calls & puts):
-    Momentum-triggered option buying.
-    5 triggers × 2 tiers (sniper + momentum).
-    $500/day budget on $10K. This is where we grow.
+  Strategy A — MOMENTUM SCALP:
+    ATM options, 3+ confirmation signals, morning + power hour.
+    Hybrid LW/VolTarget position sizing.
 
-  MODE B — INCOME (secondary — put credit spreads):
-    Put credit spreads in GREEN/YELLOW regime.
-    High win-rate, steady income. Secondary income stream.
+  Strategy C — RUNNER:
+    OTM power-hour plays. Piggyback on momentum signals.
+    Trailing stop, let winners run.
 
-Production execution loop that:
+  Strategy D — ORB BREAKOUT:
+    Opening range breakout, regime-filtered (trending days only).
+    Defers to momentum when it fires.
+
+  Strategy E — RANGE FADE:
+    Fade range boundaries on RANGE_BOUND / MIXED days.
+    Mean-reversion targets.
+
+Validated: 169 trades, PF=4.21, PnL=$192,220, MaxDD=23.8%.
+
+Production execution loop:
   1. Connects to IBKR
-  2. Classifies market regime (VIX-based)
-  3. Runs production filter stack (ATR sizing)
-  4. Scans options chains for optimal strikes (income)
-  5. Scans momentum triggers for lotto entries
-  6. Passes through risk manager pre-trade checks
-  7. Executes via OrderExecutor with human confirmation
-  8. Monitors BOTH position types for exit triggers
-  9. Persists all state to survive restarts
+  2. Classifies day regime (DEAD_FLAT / RANGE_BOUND / TRENDING / etc.)
+  3. Runs ATR production filters
+  4. Evaluates all 4 signal engines per tick
+  5. Sizes via hybrid Larry Williams + Vol Target sizer
+  6. Executes via OrderExecutor with human confirmation
+  7. Monitors positions with strategy-specific exit engines
+  8. Persists all state to survive restarts
 
 Safety layers:
   ┌──────────────────────────────────────────────────────────┐
-  │  Layer 1: VIX Regime Gate      (RED = no trading)        │
-  │  Layer 2: ATR Position Sizing  (>2% = skip day)          │
+  │  Layer 1: VIX Regime Gate      (RED = no entry scans)    │
+  │  Layer 2: ATR Production Filter (>2% = skip day)         │
   │  Layer 3: StateManager limits  (daily/weekly/monthly)    │
-  │  Layer 4: RiskManager checks   (7 pre-trade rules)       │
+  │  Layer 4: IV Discount Gate     (RV > IV = cheap options) │
   │  Layer 5: Human Confirmation   (y/N prompt before order)  │
   │  Layer 6: Kill Switch          (flatten_all on demand)    │
-  │  Layer 7: Lotto Budget Cap     ($100/day hard limit)      │
+  │  Layer 7: Daily Loss Limit     ($500 hard stop)           │
   └──────────────────────────────────────────────────────────┘
 
 Usage:
-    # Paper trading (default, $10K account)
+    # Live trading (default, $10K account)
     python run_live.py
 
-    # Income only (no buying)
-    python run_live.py --no-buy
-
-    # Buy only (no credit spreads) — RECOMMENDED for small accounts
-    python run_live.py --buy-only
+    # Dry run (simulate without placing orders) — RECOMMENDED first
+    python run_live.py --dry-run
 
     # Skip confirmation gate (automated mode)
     python run_live.py --no-confirm
 
-    # Specific tickers
+    # Specific tickers (SPY and/or QQQ)
     python run_live.py --tickers SPY QQQ
 
     # Kill switch (flatten everything NOW)
     python run_live.py --kill
-
-    # Dry run (simulate without placing orders)
-    python run_live.py --dry-run
 
     # Status check only
     python run_live.py --status
@@ -74,12 +76,12 @@ import pandas as pd
 import numpy as np
 
 # ── Project imports ──
-from trading_engine.config import EngineConfig, AdaptiveConfig, AccountConfig
+from trading_engine.config import EngineConfig
 from trading_engine.filters import ProductionFilters, FilterDecision
-from trading_engine.execution import OrderExecutor, OrderStatus, FillResult, LivePosition
+from trading_engine.execution import OrderExecutor
 from trading_engine.execution.state import StateManager
 from trading_engine.execution.safety import SafetyMonitor, AlertLevel
-from trading_engine.lotto import LottoScanner, LottoTrigger
+from trading_engine.live_engine import LiveScalpEngine
 
 logger = logging.getLogger(__name__)
 
@@ -196,229 +198,6 @@ def classify_regime(vix: float) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────
-# Strike Selection
-# ─────────────────────────────────────────────────────────────────
-
-def find_optimal_strikes(
-    chain: List[Dict],
-    right: str,
-    target_delta: float,
-    spread_width: float,
-    underlying_price: float,
-) -> Optional[Dict]:
-    """
-    Find optimal short + long strikes from a live options chain.
-
-    Args:
-        chain:            Options chain from ibkr_provider.get_options_chain()
-        right:            "C" for calls, "P" for puts
-        target_delta:     Target delta for short strike (e.g., 0.15)
-        spread_width:     Desired width in dollars (e.g., 2.0)
-        underlying_price: Current price of underlying
-
-    Returns:
-        Dict with short_strike, long_strike, credit, delta, etc.
-        or None if no suitable strikes found.
-    """
-    # Filter to the right side
-    options = [o for o in chain if o.get("right") == right.upper()]
-    if not options:
-        return None
-
-    # Sort by strike
-    options.sort(key=lambda o: o["strike"])
-
-    # Find the short strike closest to target delta
-    best_short = None
-    best_delta_diff = float("inf")
-
-    for opt in options:
-        delta = abs(opt.get("delta", 0))
-        if delta <= 0:
-            continue
-
-        diff = abs(delta - target_delta)
-        if diff < best_delta_diff:
-            best_delta_diff = diff
-            best_short = opt
-
-    if not best_short:
-        return None
-
-    short_strike = best_short["strike"]
-
-    # Find the long strike (further OTM by spread_width)
-    if right.upper() == "P":
-        long_strike = short_strike - spread_width
-    else:
-        long_strike = short_strike + spread_width
-
-    # Find actual contract for the long leg
-    best_long = None
-    best_strike_diff = float("inf")
-    for opt in options:
-        diff = abs(opt["strike"] - long_strike)
-        if diff < best_strike_diff:
-            best_strike_diff = diff
-            best_long = opt
-
-    if not best_long:
-        return None
-
-    # Estimate credit (short bid - long ask, conservative)
-    credit = best_short.get("bid", 0) - best_long.get("ask", 0)
-    if credit <= 0:
-        credit = (best_short.get("mid", 0) - best_long.get("mid", 0)) * 0.85
-
-    actual_width = abs(best_short["strike"] - best_long["strike"])
-    max_loss = actual_width - credit if credit > 0 else actual_width
-
-    return {
-        "short_strike": best_short["strike"],
-        "long_strike": best_long["strike"],
-        "credit": round(credit, 2),
-        "max_loss": round(max_loss, 2),
-        "short_delta": abs(best_short.get("delta", 0)),
-        "short_gamma": abs(best_short.get("gamma", 0)),
-        "short_iv": best_short.get("iv", 0),
-        "short_bid": best_short.get("bid", 0),
-        "short_ask": best_short.get("ask", 0),
-        "long_bid": best_long.get("bid", 0),
-        "long_ask": best_long.get("ask", 0),
-        "width": actual_width,
-    }
-
-
-# ─────────────────────────────────────────────────────────────────
-# Position Monitor
-# ─────────────────────────────────────────────────────────────────
-
-class PositionMonitor:
-    """
-    Monitors open positions and triggers exits.
-
-    Exit conditions (from backtester validation):
-      1. Stop-loss:     spread value > entry_credit × stop_mult
-      2. Profit target: spread value < entry_credit × (1 - profit_target)
-      3. Gamma blowup:  gamma > gamma_limit (0.15)
-      4. Time exit:     < 15 min to close
-    """
-
-    def __init__(self, executor: OrderExecutor, state: StateManager, safety: Optional[SafetyMonitor] = None):
-        self.executor = executor
-        self.state = state
-        self._safety_ref = safety
-        self.positions: List[Dict] = []
-
-    def add_position(self, pos_data: Dict):
-        """Track a new position for monitoring."""
-        self.positions.append(pos_data)
-
-    def check_exits(self, ibkr_provider, regime_params) -> List[Dict]:
-        """
-        Check all open positions for exit triggers.
-
-        Returns list of positions that were closed.
-        """
-        if not self.positions:
-            return []
-
-        closed = []
-        remaining = []
-
-        for pos in self.positions:
-            exit_reason = self._check_single_exit(pos, ibkr_provider, regime_params)
-
-            if exit_reason:
-                # Execute the exit
-                fill = self.executor.close_credit_spread(
-                    ticker=pos["ticker"],
-                    expiry=pos["expiry"],
-                    short_strike=pos["short_strike"],
-                    long_strike=pos["long_strike"],
-                    right=pos["right"],
-                    num_contracts=pos["num_contracts"],
-                )
-
-                realized_pnl = 0.0
-                if fill.status == OrderStatus.FILLED:
-                    entry_credit = pos.get("entry_credit", 0)
-                    exit_debit = abs(fill.avg_fill_price)
-                    realized_pnl = (entry_credit - exit_debit) * fill.num_filled * 100
-                    realized_pnl -= fill.commission
-
-                    print(f"  📊 Closed: {pos['ticker']} {pos['short_strike']}/{pos['long_strike']}"
-                          f"{pos['right']} → {exit_reason} | P&L: ${realized_pnl:+.2f}")
-
-                    self.state.record_fill(fill, realized_pnl)
-                    self.state.remove_position(
-                        pos["ticker"], pos["short_strike"], pos["right"]
-                    )
-
-                    # Notify via safety webhook
-                    if self._safety_ref:
-                        strike_str = f"{pos['short_strike']}/{pos['long_strike']}{pos['right']}"
-                        self._safety_ref.send_trade_alert(
-                            "CLOSE", pos["ticker"], strike_str,
-                            0.0, realized_pnl,
-                        )
-
-                pos["exit_reason"] = exit_reason
-                pos["realized_pnl"] = realized_pnl
-                closed.append(pos)
-            else:
-                remaining.append(pos)
-
-        self.positions = remaining
-        return closed
-
-    def _check_single_exit(self, pos: Dict, ibkr_provider, regime_params) -> Optional[str]:
-        """Check if a single position should be closed."""
-        # 1. Time exit: < 15 min to close
-        ttc = minutes_to_close()
-        if ttc <= 15:
-            return f"TIME_EXIT ({ttc}min to close)"
-
-        # 2. Get current spread value
-        try:
-            chain = ibkr_provider.get_options_chain(
-                pos["ticker"],
-                expiry=pos["expiry"],
-                right=pos["right"],
-                strikes_around_atm=20,
-            )
-            short_opt = next((o for o in chain if abs(o["strike"] - pos["short_strike"]) < 0.01), None)
-            long_opt = next((o for o in chain if abs(o["strike"] - pos["long_strike"]) < 0.01), None)
-
-            if short_opt and long_opt:
-                current_spread = short_opt.get("mid", 0) - long_opt.get("mid", 0)
-                entry_credit = pos.get("entry_credit", 0)
-
-                # Stop-loss
-                stop_mult = getattr(regime_params, "stop_mult", 2.5)
-                stop_price = entry_credit * stop_mult
-                if current_spread >= stop_price:
-                    return f"STOP_LOSS (spread={current_spread:.2f} >= {stop_price:.2f})"
-
-                # Profit target
-                profit_target = getattr(regime_params, "profit_target", 0.75)
-                target_value = entry_credit * (1.0 - profit_target)
-                if current_spread <= target_value:
-                    return f"PROFIT_TARGET (spread={current_spread:.2f} <= {target_value:.2f})"
-
-                # Gamma blowup
-                gamma_limit = getattr(regime_params, "gamma_limit", 0.15)
-                short_gamma = abs(short_opt.get("gamma", 0))
-                if short_gamma > gamma_limit:
-                    return f"GAMMA_EXIT (γ={short_gamma:.4f} > {gamma_limit})"
-
-        except Exception as e:
-            logger.warning(f"Could not check exit for {pos['ticker']}: {e}")
-
-        return None
-
-
-# ─────────────────────────────────────────────────────────────────
 # Main Live Loop
 # ─────────────────────────────────────────────────────────────────
 
@@ -440,60 +219,43 @@ class LiveTradingLoop:
         dry_run: bool = False,
         require_confirmation: bool = True,
         account_size: float = 10_000.0,
-        enable_lotto: bool = True,
-        enable_income: bool = True,
     ):
         self.tickers = tickers or os.getenv("TRADE_TICKERS", "SPY").split(",")
         self.config = config or EngineConfig()
         self.dry_run = dry_run
         self.account_size = account_size
-        self.enable_lotto = enable_lotto
-        self.enable_income = enable_income
 
         # Components
-        self.adaptive = AdaptiveConfig()
         self.filters = ProductionFilters()
         self.state = StateManager(account_size=account_size)
         self.executor = None
         self.provider = None
-        self.monitor = None
         self.safety: Optional[SafetyMonitor] = None
-        self.lotto: Optional[LottoScanner] = None  # Momentum lotto scanner
+        self.scalp_engine: Optional[LiveScalpEngine] = None  # Multi-strategy engine
 
         # Confirmation gate
         self.require_confirmation = require_confirmation
 
         # Loop control
         self._running = False
-        self._entry_placed_today = set()  # Track tickers we've entered (income)
 
         # Timing
-        self.scan_interval_sec = 60       # Scan for income entries every 60s
-        self.lotto_scan_interval_sec = 20 # Scan for buy triggers every 20s
+        self.scan_interval_sec = 30       # Scan for entries every 30s
         self.monitor_interval_sec = 30    # Check exits every 30s
 
     # ─── Setup ───────────────────────────────────────────────────
 
     def setup(self) -> bool:
         """Initialize all components. Returns True if ready."""
-        mode_parts = []
-        if self.enable_income:
-            mode_parts.append("INCOME (put credit spreads)")
-        if self.enable_lotto:
-            mode_parts.append("BUY (long calls & puts)")
-        mode_str = " + ".join(mode_parts) or "NONE"
-
         print("\n" + "═" * 60)
-        print("  0DTE LIVE TRADING ENGINE")
+        print("  0DTE MULTI-STRATEGY LIVE ENGINE")
         print("═" * 60)
-        print(f"  Mode:         {mode_str}")
+        print(f"  Strategies:   Scalp (A) + Runner (C) + ORB (D) + RangeFade (E)")
         print(f"  Tickers:      {', '.join(self.tickers)}")
         print(f"  Account:      ${self.account_size:,.0f}")
         print(f"  Dry Run:      {'YES ⚠️' if self.dry_run else 'NO — LIVE ORDERS'}")
         print(f"  Confirmation: {'Required' if self.require_confirmation else 'Auto'}")
-        if self.enable_lotto:
-            lotto_budget = self.account_size * self.config.account.lotto_daily_budget_pct
-            print(f"  Lotto budget: ${lotto_budget:,.0f}/day")
+        print(f"  Sizer:        Hybrid LW(10%) + VolTarget(15%)")
         print("═" * 60)
 
         # 1. Load persisted state
@@ -524,7 +286,7 @@ class LiveTradingLoop:
         else:
             print("  🧪 DRY RUN — no IBKR connection needed")
 
-        # 3. Safety monitor (before position monitor so it can be passed in)
+        # 3. Safety monitor
         webhook_url = os.getenv("ALERT_WEBHOOK_URL")
         self.safety = SafetyMonitor(
             state_manager=self.state,
@@ -535,40 +297,36 @@ class LiveTradingLoop:
         if webhook_url:
             print(f"  🔔 Webhook alerts: ENABLED")
             self.safety.send_alert(
-                f"🟢 Trading engine starting — {', '.join(self.tickers)} | "
+                f"🟢 Multi-strategy engine starting — {', '.join(self.tickers)} | "
                 f"${self.account_size:,.0f} | {'DRY RUN' if self.dry_run else 'LIVE'}",
                 AlertLevel.INFO,
             )
         else:
             print(f"  🔔 Webhook alerts: OFF (set ALERT_WEBHOOK_URL to enable)")
 
-        # 4. Lotto scanner
-        if self.enable_lotto:
-            self.lotto = LottoScanner(
-                provider=self.provider,
-                executor=self.executor,
-                config=self.config,
-                account_size=self.account_size,
-            )
-            print(f"  🎰 Lotto scanner: ENABLED")
+        # 4. Multi-strategy scalp engine (replaces old LottoScanner)
+        # Use QQQ config for QQQ ticker, default for SPY
+        if len(self.tickers) == 1 and self.tickers[0].upper() == "QQQ":
+            engine_config = EngineConfig.for_qqq()
         else:
-            print(f"  🎰 Lotto scanner: OFF")
+            engine_config = self.config
 
-        # 5. Position monitor
-        self.monitor = PositionMonitor(
+        self.scalp_engine = LiveScalpEngine(
+            provider=self.provider,
             executor=self.executor,
-            state=self.state,
-            safety=self.safety,
+            config=engine_config,
+            account_size=self.account_size,
         )
+        print(f"  ⚡ Multi-strategy engine: ENABLED")
+        print(f"     Scalp(A): {'ON' if True else 'OFF'}")
+        print(f"     Runner(C): {'ON' if engine_config.scalp.runner_enabled else 'OFF'}")
+        print(f"     ORB(D): {'ON' if engine_config.orb.enabled else 'OFF'}")
+        print(f"     RangeFade(E): {'ON' if engine_config.range_fade.enabled else 'OFF'}")
 
-        # 6. Sync with IBKR positions
+        # 5. Sync with IBKR positions
         if self.provider and not self.dry_run:
             print("\n  🔄 Syncing positions with IBKR...")
-            sync = self.state.sync_positions(self.provider)
-
-            # Load existing positions into monitor
-            for pos in self.state.state.open_positions:
-                self.monitor.add_position(pos)
+            self.state.sync_positions(self.provider)
 
         print("\n  ✅ Setup complete — ready for trading")
         return True
@@ -577,15 +335,15 @@ class LiveTradingLoop:
 
     def scan_entry(self):
         """
-        Scan for new trade entries.
+        Scan for new trade entries via the multi-strategy engine.
 
         Flow:
-          VIX → regime → ATR filter → options chain → strike selection
-          → risk check → order placement
+          Safety check → VIX gate → ATR filter → LiveScalpEngine.scan()
+          (engine handles: signal evaluation → strike selection → sizing → execution)
         """
         now = eastern_now()
         msopen = minutes_since_open()
-        print(f"\n  🔍 Entry Scan [{now.strftime('%H:%M:%S')} ET, {msopen}min since open]")
+        print(f"\n  🔍 Strategy Scan [{now.strftime('%H:%M:%S')} ET, {msopen}min since open]")
 
         # 0. Safety pre-check
         if self.safety:
@@ -598,10 +356,9 @@ class LiveTradingLoop:
                 if "[WARNING]" in a:
                     print(f"  ⚠️  {a}")
 
-        # 1. Get VIX and classify regime
+        # 1. Get VIX and check for RED regime (no trading)
         vix = get_current_vix(self.provider) if self.provider else 18.0
         regime = classify_regime(vix)
-        params = self.adaptive.for_regime(regime)
 
         # VIX spike detection
         if self.safety:
@@ -613,42 +370,51 @@ class LiveTradingLoop:
 
         print(f"  VIX: {vix:.1f} → Regime: {regime}")
 
-        # RED regime = no trading
-        if not params.trade_enabled:
-            print(f"  🔴 {regime} regime — trading disabled")
+        if regime == "RED":
+            print(f"  🔴 RED regime — no new entries")
             return
 
-        # 2. Check entry window
-        if msopen < params.entry_start_min:
-            print(f"  ⏳ Too early: {msopen}min < {params.entry_start_min}min window start")
-            return
-        if msopen > params.entry_end_min:
-            print(f"  ⏳ Too late: {msopen}min > {params.entry_end_min}min window end")
-            return
-
-        # 3. ATR filter (need recent daily bars)
+        # 2. ATR production filter
         filter_decision = self._run_atr_filter()
         if filter_decision and filter_decision.skip:
             print(f"  📊 ATR filter: SKIP — {filter_decision.reason}")
             return
 
-        # Compound size multipliers: regime × ATR × recovery
-        size_mult = params.position_size_mult
-        if filter_decision:
-            size_mult *= filter_decision.size_multiplier
-        size_mult *= self.state.get_size_multiplier()
+        # 3. Can the engine accept entries?
+        if self.scalp_engine:
+            can, reason = self.scalp_engine.can_enter()
+            if not can:
+                print(f"  ⛔ Engine gate: {reason}")
+                return
 
-        if size_mult <= 0:
-            print(f"  📊 Combined size multiplier = 0 — skipping")
-            return
-
-        # 4. Scan each ticker
+        # 4. Scan each ticker through all strategy tiers
         for ticker in self.tickers:
-            if ticker in self._entry_placed_today:
-                print(f"  {ticker}: Already entered today — skip")
+            if not self.scalp_engine:
                 continue
 
-            self._try_entry(ticker, params, vix, size_mult)
+            print(f"\n  🎯 {ticker}: Scanning strategies "
+                  f"[A=Scalp, C=Runner, D=ORB, E=RangeFade]...")
+
+            entered = self.scalp_engine.scan(
+                ticker=ticker,
+                minutes_since_open=msopen,
+                dry_run=self.dry_run,
+            )
+
+            if entered:
+                # Track in state manager
+                pos_data = entered.to_dict()
+                self.state.add_position(pos_data)
+
+                # Send webhook alert
+                if self.safety:
+                    strike_str = f"{entered.strike}{entered.right}"
+                    self.safety.send_trade_alert(
+                        "OPEN", entered.ticker, strike_str,
+                        entered.entry_premium,
+                    )
+            else:
+                print(f"  {ticker}: No signals fired")
 
     def _run_atr_filter(self) -> Optional[FilterDecision]:
         """Run ATR filter using cached or fresh daily bars."""
@@ -671,291 +437,48 @@ class LiveTradingLoop:
 
         return None
 
-    def _try_entry(self, ticker: str, params, vix: float, size_mult: float):
-        """Attempt to enter a trade for one ticker."""
-        print(f"\n  🎯 {ticker}: Scanning for {params.preferred_strategy}...")
-
-        if self.dry_run:
-            print(f"  🧪 DRY RUN — would scan {ticker} options chain")
-            print(f"     Strategy:  {params.preferred_strategy}")
-            print(f"     Delta:     {params.delta}")
-            print(f"     Width:     ${params.width}")
-            print(f"     Size mult: {size_mult:.2f}")
-            self._entry_placed_today.add(ticker)
-            return
-
-        # Get today's expiry (0DTE)
-        expiry = date.today().strftime("%Y%m%d")
-
-        # Get options chain
-        try:
-            chain = self.provider.get_options_chain(
-                ticker, expiry=expiry, strikes_around_atm=15,
-            )
-        except Exception as e:
-            print(f"  ⚠️  Failed to get options chain for {ticker}: {e}")
-            return
-
-        if not chain:
-            print(f"  ⚠️  Empty options chain for {ticker}")
-            return
-
-        # Determine trade direction
-        strategy = params.preferred_strategy
-        if strategy == "call_credit":
-            right = "C"
-        elif strategy == "put_credit":
-            right = "P"
-        elif strategy == "iron_condor":
-            self._try_iron_condor(ticker, chain, params, vix, size_mult, expiry)
-            return
-        else:
-            print(f"  ⚠️  Unknown strategy: {strategy}")
-            return
-
-        # Find optimal strikes
-        # Get underlying price
-        underlying_price = chain[0].get("underlying_price", 0) if chain else 0
-        if underlying_price <= 0:
-            # Fetch from IBKR
-            try:
-                bars = self.provider.get_historical_bars(ticker, days=1, interval="1m")
-                underlying_price = bars["close"].iloc[-1]
-            except Exception:
-                print(f"  ⚠️  Cannot determine {ticker} price")
-                return
-
-        strikes = find_optimal_strikes(
-            chain, right, params.delta, params.width, underlying_price,
-        )
-
-        if not strikes:
-            print(f"  ⚠️  No suitable strikes found for {ticker} {right}")
-            return
-
-        if strikes["credit"] < 0.20:
-            print(f"  ⚠️  Credit too low: ${strikes['credit']:.2f} < $0.20 minimum")
-            return
-
-        # Calculate position size
-        base_contracts = max(1, int(self.account_size * 0.03 /
-                                    (strikes["width"] * 100)))
-        num_contracts = max(1, int(base_contracts * size_mult))
-
-        total_risk = strikes["width"] * num_contracts * 100
-        total_credit = strikes["credit"] * num_contracts * 100
-
-        print(f"  Strike Selection:")
-        print(f"    Short: {strikes['short_strike']} (Δ={strikes['short_delta']:.3f})")
-        print(f"    Long:  {strikes['long_strike']}")
-        print(f"    Credit: ${strikes['credit']:.2f}/contract")
-        print(f"    Contracts: {num_contracts} (base={base_contracts}, mult={size_mult:.2f})")
-        print(f"    Total credit: ${total_credit:.2f}")
-        print(f"    Total risk:   ${total_risk:.2f}")
-
-        # Pre-trade risk check via state manager
-        can_trade, reason = self.state.can_trade()
-        if not can_trade:
-            print(f"  ❌ Risk check failed: {reason}")
-            return
-
-        # Place the order
-        fill = self.executor.place_credit_spread(
-            ticker=ticker,
-            expiry=expiry,
-            short_strike=strikes["short_strike"],
-            long_strike=strikes["long_strike"],
-            right=right,
-            num_contracts=num_contracts,
-            limit_credit=strikes["credit"],
-        )
-
-        if fill.status == OrderStatus.FILLED:
-            print(f"  ✅ FILLED: {fill.num_filled}x @ ${abs(fill.avg_fill_price):.2f}")
-
-            # Track in state + monitor
-            pos_data = {
-                "ticker": ticker,
-                "short_strike": strikes["short_strike"],
-                "long_strike": strikes["long_strike"],
-                "right": right,
-                "expiry": expiry,
-                "num_contracts": fill.num_filled,
-                "entry_credit": abs(fill.avg_fill_price),
-                "entry_time": datetime.now().isoformat(),
-                "vix_at_entry": vix,
-                "regime": classify_regime(vix),
-            }
-            self.state.add_position(pos_data)
-            self.monitor.add_position(pos_data)
-            self.state.record_fill(fill, 0.0)  # Entry, no realized PnL yet
-            self._entry_placed_today.add(ticker)
-
-            # Send webhook alert
-            if self.safety:
-                strike_str = f"{strikes['short_strike']}/{strikes['long_strike']}{right}"
-                self.safety.send_trade_alert(
-                    "OPEN", ticker, strike_str, abs(fill.avg_fill_price)
-                )
-
-        elif fill.status == OrderStatus.PARTIAL:
-            print(f"  ⚠️  Partial fill: {fill.num_filled}/{fill.num_contracts}")
-        else:
-            print(f"  ❌ Not filled: {fill.status.value} — {fill.error_msg}")
-
-    # ─── Lotto Entry Logic ────────────────────────────────────────
-
-    def scan_lotto(self):
-        """
-        Scan for momentum lotto triggers.
-
-        Runs independently from income scan. Checks momentum
-        triggers every 30s during the lotto scan window
-        (16 min to 180 min after open).
-        """
-        if not self.lotto:
-            return
-
-        now = eastern_now()
-        msopen = minutes_since_open()
-        lotto_cfg = self.config.lotto
-
-        # Check scan window
-        if msopen < lotto_cfg.scan_start_min:
-            return
-        if msopen > lotto_cfg.scan_end_min:
-            return
-
-        # Budget check
-        can, reason = self.lotto.can_enter()
-        if not can:
-            return
-
-        print(f"\n  🎰 Lotto Scan [{now.strftime('%H:%M:%S')} ET, "
-              f"${self.lotto.budget_remaining:.0f} budget remaining]")
-
-        for ticker in self.tickers:
-            triggers = self.lotto.scan(ticker)
-
-            if not triggers:
-                print(f"  🎰 {ticker}: No triggers")
-                continue
-
-            # Take the best trigger (highest confidence)
-            best = triggers[0]
-            print(f"  🎰 {ticker}: {best.trigger_type} {best.direction} "
-                  f"(confidence={best.confidence:.0%})")
-
-            # Require minimum confidence
-            if best.confidence < 0.3:
-                print(f"  🎰 Confidence too low ({best.confidence:.0%} < 30%) — skip")
-                continue
-
-            # Select strike from live chain
-            strike_info = self.lotto.select_strike(best)
-            if not strike_info:
-                print(f"  🎰 No suitable strike found")
-                continue
-
-            # Execute
-            self.lotto.execute_lotto(best, strike_info, dry_run=self.dry_run)
-
-            # Only one lotto entry per scan cycle
-            break
-
-    def _try_iron_condor(self, ticker, chain, params, vix, size_mult, expiry):
-        """Try to enter an iron condor."""
-        underlying_price = chain[0].get("underlying_price", 0) if chain else 0
-
-        put_strikes = find_optimal_strikes(
-            chain, "P", params.delta, params.width, underlying_price
-        )
-        call_strikes = find_optimal_strikes(
-            chain, "C", params.delta, params.width, underlying_price
-        )
-
-        if not put_strikes or not call_strikes:
-            print(f"  ⚠️  Cannot build iron condor — missing strikes")
-            return
-
-        total_credit = put_strikes["credit"] + call_strikes["credit"]
-        if total_credit < 0.40:
-            print(f"  ⚠️  IC credit too low: ${total_credit:.2f}")
-            return
-
-        base_contracts = max(1, int(self.account_size * 0.03 /
-                                    (max(put_strikes["width"], call_strikes["width"]) * 100)))
-        num_contracts = max(1, int(base_contracts * size_mult))
-
-        print(f"  Iron Condor:")
-        print(f"    Put spread:  {put_strikes['short_strike']}/{put_strikes['long_strike']}P "
-              f"(${put_strikes['credit']:.2f})")
-        print(f"    Call spread: {call_strikes['short_strike']}/{call_strikes['long_strike']}C "
-              f"(${call_strikes['credit']:.2f})")
-        print(f"    Contracts:   {num_contracts}")
-        print(f"    Total credit: ${total_credit * num_contracts * 100:.2f}")
-
-        put_fill, call_fill = self.executor.place_iron_condor(
-            ticker=ticker, expiry=expiry,
-            put_short=put_strikes["short_strike"],
-            put_long=put_strikes["long_strike"],
-            call_short=call_strikes["short_strike"],
-            call_long=call_strikes["long_strike"],
-            num_contracts=num_contracts,
-            limit_credit=total_credit,
-        )
-
-        # Track filled legs
-        for fill, strikes, right in [
-            (put_fill, put_strikes, "P"),
-            (call_fill, call_strikes, "C"),
-        ]:
-            if fill.status == OrderStatus.FILLED:
-                pos_data = {
-                    "ticker": ticker,
-                    "short_strike": strikes["short_strike"],
-                    "long_strike": strikes["long_strike"],
-                    "right": right,
-                    "expiry": expiry,
-                    "num_contracts": fill.num_filled,
-                    "entry_credit": abs(fill.avg_fill_price),
-                    "entry_time": datetime.now().isoformat(),
-                    "vix_at_entry": vix,
-                }
-                self.state.add_position(pos_data)
-                self.monitor.add_position(pos_data)
-
-        self._entry_placed_today.add(ticker)
-
     # ─── Monitoring Loop ─────────────────────────────────────────
 
     def monitor_positions(self):
-        """Check all positions for exit triggers."""
-        if not self.monitor or not self.monitor.positions:
+        """Check all open scalp-engine positions for exit triggers."""
+        if not self.scalp_engine:
             return
 
-        vix = get_current_vix(self.provider) if self.provider else 18.0
-        regime = classify_regime(vix)
-        params = self.adaptive.for_regime(regime)
+        positions = self.scalp_engine.open_positions
+        if not positions:
+            return
 
-        closed = self.monitor.check_exits(self.provider, params)
+        ttc = minutes_to_close()
+        closed = self.scalp_engine.check_exits(ttc)
+
         if closed:
             print(f"\n  📊 Closed {len(closed)} position(s)")
-            for c in closed:
-                print(f"    {c['ticker']} {c['short_strike']}/{c['long_strike']}{c['right']}"
-                      f" → {c['exit_reason']} (${c.get('realized_pnl', 0):+.2f})")
+            for pos in closed:
+                # Update state manager
+                self.state.remove_position(
+                    pos.ticker, pos.strike, pos.right
+                )
+                # Send webhook
+                if self.safety:
+                    strike_str = f"{pos.strike}{pos.right}"
+                    self.safety.send_trade_alert(
+                        "CLOSE", pos.ticker, strike_str,
+                        0.0, pos.total_pnl,
+                    )
 
     # ─── Main Loop ───────────────────────────────────────────────
 
     def run(self):
         """
-        Main trading loop. Runs until market close or interrupted.
+        Main trading loop.  Runs until market close or interrupted.
 
-        Timeline:
-          9:30 → 10:00:  Wait (let opening volatility settle)
-          10:00 → 10:30: Entry window (scan for trades)
-          10:30 → 15:45: Monitor positions
-          15:45 → 16:00: Time-exit any remaining positions
+        Timeline (all 4 strategy windows overlap):
+          9:30           Market open — accumulate bars
+          9:30 + 16 min  Scalp window starts (A/C)
+          9:30 + 30 min  ORB / RangeFade windows open
+          15:15          Runner power-hour window
+          15:45          Hard time-exit begins
+          16:00          Market close → shutdown
         """
         if not self.setup():
             return
@@ -973,93 +496,62 @@ class LiveTradingLoop:
         print(f"\n  🚀 Live loop starting...")
         print(f"  Press Ctrl+C to stop gracefully\n")
 
-        last_scan = 0
-        last_lotto_scan = 0
-        last_monitor = 0
-        income_entry_done = False
+        last_scan = 0.0
+        last_monitor = 0.0
+        entered_trading = False
 
         try:
             while self._running:
                 if not market_is_open():
-                    if income_entry_done or (self.lotto and self.lotto.trades_today > 0):
-                        # Market closed after we were trading
+                    if entered_trading:
                         print(f"\n  🏁 Market closed")
                         break
                     else:
-                        print(f"  ⏳ Waiting for market open... ({eastern_now().strftime('%H:%M')} ET)")
+                        print(f"  ⏳ Waiting for market open... "
+                              f"({eastern_now().strftime('%H:%M')} ET)")
                         time.sleep(30)
                         continue
 
+                entered_trading = True
                 now = time.time()
                 msopen = minutes_since_open()
                 ttc = minutes_to_close()
 
-                # ── Income entry scan (during entry window, once per scan_interval) ──
-                if (self.enable_income and not income_entry_done
-                        and now - last_scan >= self.scan_interval_sec):
-                    if msopen >= 30:  # At least 30 min after open
+                # ── Reset engine at day start (once) ──
+                if self.scalp_engine and msopen < 2:
+                    self.scalp_engine.reset_daily()
+
+                # ── Entry scan (every scan_interval_sec) ──
+                if now - last_scan >= self.scan_interval_sec:
+                    if msopen >= 10:  # Need ≥10 bars for indicators
                         self.scan_entry()
-                        last_scan = now
-
-                        # Check if we've passed the entry window for all tickers
-                        params = self.adaptive.for_regime(
-                            classify_regime(
-                                get_current_vix(self.provider) if self.provider else 18.0
-                            )
-                        )
-                        if msopen > params.entry_end_min:
-                            income_entry_done = True
-                            remaining = [t for t in self.tickers
-                                         if t not in self._entry_placed_today]
-                            if remaining:
-                                print(f"\n  ⏰ Income entry window closed. No entry for: {', '.join(remaining)}")
-                            else:
-                                print(f"\n  ✅ All income entries placed.")
-
-                # ── Lotto scan (runs continuously during lotto window) ──
-                if (self.enable_lotto and self.lotto
-                        and now - last_lotto_scan >= self.lotto_scan_interval_sec):
-                    self.scan_lotto()
-                    last_lotto_scan = now
+                    last_scan = now
 
                 # ── Safety + position monitoring ──
                 if now - last_monitor >= self.monitor_interval_sec:
+                    # Safety monitor
                     if self.safety:
                         safe, alerts = self.safety.check()
                         if not safe:
-                            print(f"\n  🚨 SAFETY: Kill switch triggered during monitoring")
+                            print(f"\n  🚨 SAFETY: Kill switch triggered")
                             self._running = False
                             break
 
-                        # VIX spike check during monitoring phase
                         if self.provider:
                             current_vix = get_current_vix(self.provider)
                             spike = self.safety.check_vix_spike(current_vix)
                             if spike:
                                 print(f"\n  {spike}")
 
-                    # Income position monitoring
-                    if self.monitor and self.monitor.positions:
-                        self.monitor_positions()
-
-                    # Lotto position monitoring
-                    if self.lotto and self.lotto.open_positions:
-                        closed_lottos = self.lotto.check_exits(ttc)
-                        if closed_lottos:
-                            print(f"  🎰 Closed {len(closed_lottos)} lotto position(s)")
-
+                    # Strategy exit monitoring
+                    self.monitor_positions()
                     last_monitor = now
 
-                # Time exit warning
-                if ttc <= 20:
-                    if self.monitor and self.monitor.positions:
-                        print(f"\n  ⏱️  {ttc} min to close — checking income time exits...")
-                        self.monitor_positions()
-                    if self.lotto and self.lotto.open_positions:
-                        print(f"  🎰 {ttc} min to close — checking lotto time exits...")
-                        self.lotto.check_exits(ttc)
+                # ── Approaching close — force check ──
+                if ttc <= 20 and self.scalp_engine and self.scalp_engine.open_positions:
+                    print(f"\n  ⏱️  {ttc:.0f} min to close — checking time exits...")
+                    self.monitor_positions()
 
-                # Sleep between iterations
                 time.sleep(5)
 
         except Exception as e:
@@ -1068,6 +560,8 @@ class LiveTradingLoop:
 
         finally:
             self._shutdown()
+
+    # ─── Shutdown ────────────────────────────────────────────────
 
     def _shutdown(self):
         """Clean shutdown: save state, log summary, disconnect."""
@@ -1085,19 +579,21 @@ class LiveTradingLoop:
         # Print daily summary
         self.state.print_status()
 
-        # Lotto summary
-        if self.lotto:
-            self.lotto.print_status()
+        # Scalp engine summary
+        if self.scalp_engine:
+            self.scalp_engine.print_status()
 
         # Send daily summary alert
         if self.safety:
-            lotto_info = ""
-            if self.lotto:
-                lotto_info = (f" | Lotto: {self.lotto.trades_today} trades, "
-                              f"${self.lotto.daily_realized_pnl:+.2f}")
+            engine_info = ""
+            if self.scalp_engine:
+                t = self.scalp_engine.trades_today
+                pnl = self.scalp_engine.daily_realized_pnl
+                engine_info = f" | {t} trades, ${pnl:+.2f}"
             self.safety.send_daily_summary()
             self.safety.send_alert(
-                f"🔴 Trading engine shutting down{lotto_info}", AlertLevel.INFO
+                f"🔴 Trading engine shutting down{engine_info}",
+                AlertLevel.INFO,
             )
 
         # Disconnect
@@ -1112,37 +608,51 @@ class LiveTradingLoop:
 # ─────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="0DTE Live Trading Engine")
-    parser.add_argument("--tickers", nargs="+", default=["SPY"],
-                        help="Tickers to trade (default: SPY)")
-    parser.add_argument("--account-size", type=float,
-                        default=float(os.getenv("ACCOUNT_SIZE", "10000")),
-                        help="Account size in dollars (default: $10,000)")
-    parser.add_argument("--no-confirm", action="store_true",
-                        help="Skip order confirmation prompts")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Simulate without placing real orders")
-    parser.add_argument("--no-lotto", "--no-buy", action="store_true",
-                        help="Disable long options (buy calls/puts) scanner")
-    parser.add_argument("--lotto-only", "--buy-only", action="store_true",
-                        help="Only buy calls/puts (no credit spreads)")
-    parser.add_argument("--kill", action="store_true",
-                        help="KILL SWITCH: flatten all positions immediately")
-    parser.add_argument("--status", action="store_true",
-                        help="Show current state and exit")
-    parser.add_argument("--validate", action="store_true",
-                        help="Run end-to-end paper validation (1 cycle, then exit)")
-    parser.add_argument("--validate-dry", action="store_true",
-                        help="Validation without placing orders")
-    parser.add_argument("--verbose", action="store_true",
-                        help="Enable debug logging")
+    parser = argparse.ArgumentParser(
+        description="0DTE Multi-Strategy Live Trading Engine"
+    )
+    parser.add_argument(
+        "--tickers", nargs="+", default=["SPY"],
+        help="Tickers to trade (default: SPY)",
+    )
+    parser.add_argument(
+        "--account-size", type=float,
+        default=float(os.getenv("ACCOUNT_SIZE", "10000")),
+        help="Account size in dollars (default: $10,000)",
+    )
+    parser.add_argument(
+        "--no-confirm", action="store_true",
+        help="Skip order confirmation prompts",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Simulate without placing real orders",
+    )
+    parser.add_argument(
+        "--kill", action="store_true",
+        help="KILL SWITCH: flatten all positions immediately",
+    )
+    parser.add_argument(
+        "--status", action="store_true",
+        help="Show current state and exit",
+    )
+    parser.add_argument(
+        "--validate", action="store_true",
+        help="Run end-to-end paper validation (1 cycle, then exit)",
+    )
+    parser.add_argument(
+        "--validate-dry", action="store_true",
+        help="Validation without placing orders",
+    )
+    parser.add_argument(
+        "--verbose", action="store_true",
+        help="Enable debug logging",
+    )
 
     args = parser.parse_args()
 
     # Setup logging
     level = logging.DEBUG if args.verbose else logging.INFO
-
-    # Ensure log directory exists
     os.makedirs("logs", exist_ok=True)
 
     logging.basicConfig(
@@ -1179,7 +689,9 @@ def main():
         if not provider.connect():
             print("  ❌ Cannot connect to IBKR")
             return
-        executor = OrderExecutor(ibkr_provider=provider, require_confirmation=False)
+        executor = OrderExecutor(
+            ibkr_provider=provider, require_confirmation=False,
+        )
         executor.connect()
         executor.flatten_all(reason="Manual kill switch via CLI")
         executor.save_order_log()
@@ -1187,16 +699,11 @@ def main():
         return
 
     # ── Live trading mode ──
-    enable_lotto = not args.no_lotto
-    enable_income = not args.lotto_only
-
     loop = LiveTradingLoop(
         tickers=args.tickers,
         dry_run=args.dry_run,
         require_confirmation=not args.no_confirm,
         account_size=args.account_size,
-        enable_lotto=enable_lotto,
-        enable_income=enable_income,
     )
     loop.run()
 
