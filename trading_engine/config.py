@@ -202,7 +202,7 @@ class ScalpConfig:
     # ── Budget ──────────────────────────────────────────────────
     max_premium: float = 4.00           # Max per-contract premium (SPY scale)
     min_premium: float = 0.30           # Minimum viable premium
-    max_contracts: int = 3              # Max contracts per trade
+    max_contracts: int = 5              # Max contracts per trade (raised: capital concentrated)
 
     # ── Volatility Filter ────────────────────────────────────────
     min_atr: float = 0.15               # Min ATR to trade (skip dead-flat periods)
@@ -240,7 +240,7 @@ class ScalpConfig:
     # The "vacation fund": cheap OTM options that ride big moves.
     # Enters ONLY in power hour when momentum is confirmed.
     # Let winners run with trailing stop, no time stop.
-    runner_enabled: bool = True             # Enable runner tier
+    runner_enabled: bool = False            # PRUNED: 3 trades in 6 months = dead tier
     runner_max_per_day: int = 1             # Max 1 runner/day
     runner_budget_pct: float = 0.02         # 2% of account per runner ($200 on $10K)
     runner_max_premium: float = 2.00        # Max $2.00/contract (SPY scale, ×10 for SPX)
@@ -326,7 +326,7 @@ class ORBConfig:
     # ── Budget ──────────────────────────────────────────────────
     max_premium: float = 4.00            # Max per-contract premium (SPY scale)
     min_premium: float = 0.30            # Minimum viable premium
-    max_contracts: int = 3               # Max contracts per trade
+    max_contracts: int = 5               # Raised: capital concentrated on fewer tiers
 
     # ── Strike Selection ────────────────────────────────────────
     max_otm_pct: float = 0.001           # ATM: 0.1% OTM
@@ -519,8 +519,7 @@ class RangeFadeConfig:
       4. RSI_EXTREME — RSI > 70 at range high or RSI < 30 at range low
     """
     # ── Master Enable ───────────────────────────────────────────
-    enabled: bool = True
-
+    enabled: bool = True   # Keep: +$7.5K PnL + fuels compounding for ORB/Scalp
     # ── Range Formation ────────────────────────────────────────
     formation_bars: int = 60           # 60 bars (1 hour) to establish range
     # Boundary zone: price must enter top/bottom X% of range to trigger

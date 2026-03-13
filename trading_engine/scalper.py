@@ -1449,6 +1449,19 @@ class MeanReversionExitEngine:
         if stop_hit:
             return ("MR_STOP_LOSS", stop)
 
+        # ── 1.5. Partial Take (half off at 50% of target) ────────
+        partial_done = getattr(pos, 'partial_exit_done', True)
+        remaining = getattr(pos, 'remaining_contracts', 1)
+        if not partial_done and remaining >= 2 and target > 0:
+            if pos.direction == "CALL":
+                half_target = entry + (target - entry) * 0.5
+                partial_hit = bar_high >= half_target
+            else:
+                half_target = entry - (entry - target) * 0.5
+                partial_hit = bar_low <= half_target
+            if partial_hit:
+                return ("PARTIAL_TAKE", half_target)
+
         # ── 2. Profit Target ─────────────────────────────────────
         if target_hit:
             return ("MR_PROFIT_TARGET", target)
@@ -1543,6 +1556,9 @@ class ScalpExitEngine:
         Uses bar HIGH and LOW (not just close) for realistic intrabar
         stop/target detection.
 
+        Supports partial exits: returns ("PARTIAL_TAKE", price) when
+        price reaches 50% of target and position has >= 2 contracts.
+
         Args:
             pos: Open position
             bar_high: Current bar's high price
@@ -1582,6 +1598,20 @@ class ScalpExitEngine:
 
         if stop_hit:
             return ("STOP_LOSS", stop)
+
+        # ── 1.5. Partial Take (half off at 50% of target) ────────
+        partial_done = getattr(pos, 'partial_exit_done', True)
+        remaining = getattr(pos, 'remaining_contracts', 1)
+        if not partial_done and remaining >= 2 and target > 0:
+            # Compute 50% of target distance
+            if pos.direction == "CALL":
+                half_target = entry + (target - entry) * 0.5
+                partial_hit = bar_high >= half_target
+            else:
+                half_target = entry - (entry - target) * 0.5
+                partial_hit = bar_low <= half_target
+            if partial_hit:
+                return ("PARTIAL_TAKE", half_target)
 
         # ── 2. Profit Target ─────────────────────────────────────
         if target_hit:
@@ -2332,6 +2362,19 @@ class ORBExitEngine:
         if stop_hit:
             return ("STOP_LOSS", stop)
 
+        # ── 1.5. Partial Take (half off at 50% of target) ────────
+        partial_done = getattr(pos, 'partial_exit_done', True)
+        remaining = getattr(pos, 'remaining_contracts', 1)
+        if not partial_done and remaining >= 2 and target > 0:
+            if pos.direction == "CALL":
+                half_target = entry + (target - entry) * 0.5
+                partial_hit = bar_high >= half_target
+            else:
+                half_target = entry - (entry - target) * 0.5
+                partial_hit = bar_low <= half_target
+            if partial_hit:
+                return ("PARTIAL_TAKE", half_target)
+
         # ── 2. Target ────────────────────────────────────────────
         if target_hit:
             return ("PROFIT_TARGET", target)
@@ -2659,6 +2702,20 @@ class RangeFadeExitEngine:
         if stop_hit:
             return ("STOP_LOSS", stop)
 
+        # ── 1.5. Partial Take (half off at 50% of target) ────────
+        partial_done = getattr(pos, 'partial_exit_done', True)
+        remaining = getattr(pos, 'remaining_contracts', 1)
+        if not partial_done and remaining >= 2 and target > 0:
+            entry = pos.entry_underlying
+            if pos.direction == "CALL":
+                half_target = entry + (target - entry) * 0.5
+                partial_hit = bar_high >= half_target
+            else:
+                half_target = entry - (entry - target) * 0.5
+                partial_hit = bar_low <= half_target
+            if partial_hit:
+                return ("PARTIAL_TAKE", half_target)
+
         # ── 2. Target ────────────────────────────────────────────
         if target_hit:
             return ("PROFIT_TARGET", target)
@@ -2937,6 +2994,20 @@ class VWAPMRExitEngine:
 
         if stop_hit:
             return ("STOP_LOSS", stop)
+
+        # ── 1.5. Partial Take (half off at 50% of target) ────────
+        partial_done = getattr(pos, 'partial_exit_done', True)
+        remaining = getattr(pos, 'remaining_contracts', 1)
+        if not partial_done and remaining >= 2 and target > 0:
+            entry = pos.entry_underlying
+            if pos.direction == "CALL":
+                half_target = entry + (target - entry) * 0.5
+                partial_hit = bar_high >= half_target
+            else:
+                half_target = entry - (entry - target) * 0.5
+                partial_hit = bar_low <= half_target
+            if partial_hit:
+                return ("PARTIAL_TAKE", half_target)
 
         # ── 2. Target (snap-back to VWAP) ────────────────────────
         if target_hit:
