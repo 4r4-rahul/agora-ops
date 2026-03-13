@@ -99,7 +99,7 @@ def run_portfolio(specs: List[TickerSpec], verbose: bool = False) -> PortfolioRe
         # Print per-ticker summary
         print(f"\n  {spec.ticker} Results:")
         print(f"    Trades: {r.total_trades}")
-        print(f"    Win Rate: {r.win_rate:.1%}")
+        print(f"    Win Rate: {r.win_rate:.1f}%")
         print(f"    Profit Factor: {r.profit_factor:.2f}")
         print(f"    Total PnL: ${r.total_pnl:+,.0f}")
         print(f"    MaxDD: {r.max_drawdown_pct:.1%}")
@@ -201,15 +201,15 @@ def print_portfolio_report(results: PortfolioResults):
     print(f"\n{'Ticker':>8} {'Trades':>7} {'WR':>6} {'PF':>6} {'PnL':>12} {'MaxDD':>7} {'Return':>8}")
     print("-" * 60)
     for ticker, r in results.ticker_results.items():
-        ret = r.total_pnl / r.starting_balance
-        print(f"{ticker:>8} {r.total_trades:>7} {r.win_rate:>6.1%} {r.profit_factor:>6.2f} "
-              f"${r.total_pnl:>+10,.0f} {r.max_drawdown_pct:>7.1%} {ret:>8.0%}")
+        ret = r.total_pnl / r.starting_balance * 100
+        print(f"{ticker:>8} {r.total_trades:>7} {r.win_rate:>5.1f}% {r.profit_factor:>6.2f} "
+              f"${r.total_pnl:>+10,.0f} {r.max_drawdown_pct*100:>6.1f}% {ret:>7.0f}%")
 
     # Portfolio summary
-    print(f"\n{'PORTFOLIO':>8} {results.total_trades:>7} {results.portfolio_wr:>6.1%} "
+    print(f"\n{'PORTFOLIO':>8} {results.total_trades:>7} {results.portfolio_wr*100:>5.1f}% "
           f"{results.portfolio_pf:>6.2f} ${results.total_pnl:>+10,.0f} "
-          f"{results.portfolio_max_dd_pct:>7.1%} "
-          f"{results.total_pnl/results.total_capital:>8.0%}")
+          f"{results.portfolio_max_dd_pct*100:>6.1f}% "
+          f"{results.total_pnl/results.total_capital*100:>7.0f}%")
 
     # Additional metrics
     print(f"\n  Capital deployed: ${results.total_capital:,.0f}")
@@ -258,6 +258,8 @@ def main():
                         help="Tickers to backtest (default: SPY QQQ)")
     parser.add_argument("--account", type=float, default=10_000.0,
                         help="Per-ticker account size (default: $10,000)")
+    parser.add_argument("--ndx", action="store_true",
+                        help="Use NDX index options for QQQ (needs $20K+, 60/40 tax)")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -274,13 +276,27 @@ def main():
                 spx_mode=True,
             ))
         elif ticker.upper() == "QQQ":
-            specs.append(TickerSpec(
-                ticker="QQQ",
-                data_file=os.path.join(data_dir, "QQQ_ibkr_1m_180d.csv"),
-                config=EngineConfig.for_qqq(),
-                account_size=args.account,
-                spx_mode=True,  # Use SPX-like pricing for QQQ
-            ))
+            if args.ndx:
+                # NDX index options: QQQ×40, premium_scale=40
+                # Requires $20K+ account for balance gate clearance
+                if args.account < 20_000:
+                    print(f"⚠️  NDX mode with ${args.account:,.0f} may hit balance gate. "
+                          f"Recommend --account 20000+ or remove --ndx for QQQ ETF options.")
+                specs.append(TickerSpec(
+                    ticker="QQQ",
+                    data_file=os.path.join(data_dir, "QQQ_ibkr_1m_180d.csv"),
+                    config=EngineConfig.for_qqq_ndx(),
+                    account_size=args.account,
+                    ndx_mode=True,
+                ))
+            else:
+                # QQQ ETF options: premium_scale=1, affordable from $10K
+                specs.append(TickerSpec(
+                    ticker="QQQ",
+                    data_file=os.path.join(data_dir, "QQQ_ibkr_1m_180d.csv"),
+                    config=EngineConfig.for_qqq_etf(),
+                    account_size=args.account,
+                ))
         else:
             print(f"Unknown ticker: {ticker}. Supported: SPY, QQQ")
             sys.exit(1)
