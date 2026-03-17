@@ -47,9 +47,8 @@ import pandas as pd
 
 from .config import (
     EngineConfig, ScalpConfig, ORBConfig, RangeFadeConfig,
-    PositionSizingConfig, ContractPickerConfig, get_ticker_profile, TickerProfile,
+    PositionSizingConfig, get_ticker_profile, TickerProfile,
 )
-from .modules.contract_picker import SmartContractPicker, FeasibilityResult
 from .scalper import (
     SignalEngine, ScalpExitEngine, RunnerExitEngine,
     ORBSignalEngine, ORBExitEngine,
@@ -200,17 +199,6 @@ class LiveScalpEngine:
 
         # ── Regime Detector ──────────────────────────────────────
         self._regime = RegimeDetector()
-
-        # ── Smart Contract Picker (pre-trade feasibility) ────────
-        cp_cfg = config.contract_picker
-        self._contract_picker = SmartContractPicker(
-            min_expected_rr=cp_cfg.min_expected_rr,
-            min_net_gain_pct=cp_cfg.min_net_gain_pct,
-            max_theta_pct=cp_cfg.max_theta_pct,
-            entry_slippage_pct=cp_cfg.entry_slippage_pct,
-            exit_slippage_pct=cp_cfg.exit_slippage_pct,
-        )
-        self._cp_cfg = cp_cfg
 
         # ── Per-Day State (reset each morning) ───────────────────
         self.open_scalp: Optional[LiveScalpPosition] = None
@@ -938,75 +926,6 @@ class LiveScalpEngine:
         ask = strike_info["ask"]
         delta = strike_info["delta"]
 
-        # ── Pre-trade feasibility check ──────────────────────────
-        # Forward-price the option at target to verify it can deliver
-        tier_enabled_map = {
-            "scalp": self._cp_cfg.scalp_enabled,
-            "runner": self._cp_cfg.runner_enabled,
-            "orb": self._cp_cfg.orb_enabled,
-            "range_fade": self._cp_cfg.range_fade_enabled,
-        }
-        if self._cp_cfg.enabled and tier_enabled_map.get(tier, True):
-            # Compute time to expiry (0DTE → close at 4:00 PM ET)
-            now = datetime.now()
-            minutes_to_close = max(1, (16 * 60) - (now.hour * 60 + now.minute))
-            T = minutes_to_close / (252 * 390)
-
-            # Estimate IV from recent bars
-            iv = strike_info.get("iv", 0) or self._estimate_iv(self._last_bars)
-
-            # Expected hold time depends on tier
-            minutes_since_open = max(0, (now.hour * 60 + now.minute) - (9 * 60 + 30))
-            expected_hold = SmartContractPicker.expected_hold_for_tier(tier, minutes_since_open)
-
-            # Use tier-specific thresholds for runners
-            picker = self._contract_picker
-            if tier == "runner":
-                picker = SmartContractPicker(
-                    min_expected_rr=self._cp_cfg.min_expected_rr_runner,
-                    min_net_gain_pct=self._cp_cfg.min_net_gain_pct_runner,
-                    max_theta_pct=self._cp_cfg.max_theta_pct_runner,
-                    entry_slippage_pct=self._cp_cfg.entry_slippage_pct,
-                    exit_slippage_pct=self._cp_cfg.exit_slippage_pct,
-                )
-                # Runners are late-day momentum plays — no additional theta tightening
-            else:
-                # Late-day theta tightening for non-runner tiers
-                if minutes_since_open >= self._cp_cfg.late_cutoff_minutes:
-                    picker.max_theta_pct = self._cp_cfg.max_theta_pct_late
-
-            feasibility = picker.check_feasibility(
-                underlying_price=price,
-                strike=strike,
-                right=right,
-                iv=iv,
-                time_to_expiry=T,
-                target_price=target_price,
-                stop_price=stop_price,
-                expected_hold_minutes=expected_hold,
-                entry_premium=ask,
-            )
-
-            if not feasibility.feasible:
-                logger.info(
-                    f"🚫 CONTRACT REJECTED [{tier}] {strike}{right} @ ${ask:.2f}: "
-                    f"{feasibility.reject_reason}"
-                )
-                print(
-                    f"  🚫 {tier.upper()} CONTRACT REJECTED: {strike}{right} @ ${ask:.2f}\n"
-                    f"     {feasibility.reject_reason}"
-                )
-                return None
-
-            # Log feasibility details
-            logger.info(
-                f"✅ CONTRACT OK [{tier}] {strike}{right}: "
-                f"R:R={feasibility.expected_rr:.2f}, "
-                f"gain=${feasibility.expected_gain:.3f} ({feasibility.net_gain_after_costs/ask*100:.0f}%), "
-                f"theta=${feasibility.theta_cost:.3f} ({feasibility.theta_cost/ask*100:.0f}%), "
-                f"Δ={feasibility.delta_at_entry:.3f}, γ/prem={feasibility.gamma_premium_ratio:.4f}"
-            )
-
         # ── Position sizing via hybrid sizer ─────────────────────
         num_contracts = self._compute_position_size(
             self.account_size + self.daily_pnl,
@@ -1168,7 +1087,7 @@ class LiveScalpEngine:
         return candidates[0]
 
     # ═════════════════════════════════════════════════════════════
-    # Hybrid Position Sizer (mirrors backtester exactly)
+    # Risk Parity + Phased Capital Scaling (mirrors backtester exactly)
     # ═════════════════════════════════════════════════════════════
 
     def _compute_position_size(
@@ -1181,7 +1100,12 @@ class LiveScalpEngine:
         conviction_mult: float = 1.0,
     ) -> int:
         """
-        Hybrid Larry Williams + Vol Target position sizer.
+        Risk Parity + Phased Capital Scaling position sizer.
+
+        Phase 1 ($10K–$25K): Risk Parity — inversely proportional to
+          strategy volatility. RAR=64.1, MedDD=13.7%, 0% blowup.
+        Phase 2 ($25K–$50K): Larry Williams 10%.
+        Phase 3 ($50K+):     Larry Williams 15%.
 
         Exactly mirrors ScalpBacktester._compute_position_size().
         """
@@ -1201,31 +1125,25 @@ class LiveScalpEngine:
                 return 0
             return runner_num
 
-        # ── 1. Larry Williams ────────────────────────────────────
-        lookback = sc.lw_lookback
-        recent_losses = [
-            abs(pnl) for pnl in self._trade_history[-lookback:]
-            if pnl < 0
-        ]
-        worst_loss = max(recent_losses) if recent_losses else sc.lw_default_loss
-        if not recent_losses:
-            worst_loss *= self._premium_scale  # Scale for SPX/NDX
+        # ── Determine phase based on capital level ───────────────
+        if balance >= sc.phase_3_balance:
+            risk_dollars = self._lw_risk_dollars(balance, sc.lw_risk_pct_full, sc)
+        elif balance >= sc.phase_2_balance:
+            risk_dollars = self._lw_risk_dollars(balance, sc.lw_risk_pct, sc)
+        else:
+            risk_dollars = self._risk_parity_dollars(balance, strategy_tier, sc)
 
-        lw_risk_dollars = balance * sc.lw_risk_pct
-        lw_contracts = lw_risk_dollars / cost_per_contract if cost_per_contract > 0 else 0
-
-        # ── 2. Vol Target ────────────────────────────────────────
+        # ── Vol Target: normalise by ATR regime ──────────────────
         atr_ratio = (current_atr / daily_median_atr) if daily_median_atr > 0 else 1.0
         atr_ratio = max(0.5, min(atr_ratio, 3.0))
         vol_risk_dollars = (balance * sc.vol_target_pct) / atr_ratio
-        vol_contracts = vol_risk_dollars / cost_per_contract if cost_per_contract > 0 else 0
 
-        # ── 3. Absolute max ──────────────────────────────────────
+        # ── Absolute max ─────────────────────────────────────────
         abs_max_dollars = balance * sc.absolute_max_pct
-        abs_contracts = abs_max_dollars / cost_per_contract if cost_per_contract > 0 else 0
 
-        # ── Minimum of all three ─────────────────────────────────
-        raw_contracts = min(lw_contracts, vol_contracts, abs_contracts)
+        # ── Minimum of all (most conservative wins) ──────────────
+        budget = min(risk_dollars, vol_risk_dollars, abs_max_dollars)
+        raw_contracts = budget / cost_per_contract if cost_per_contract > 0 else 0
         raw_contracts *= conviction_mult
 
         contracts = int(raw_contracts)
@@ -1241,8 +1159,45 @@ class LiveScalpEngine:
 
         return contracts
 
+    def _risk_parity_dollars(self, balance: float, strategy_tier: str,
+                             sc) -> float:
+        """Risk Parity: allocate risk inversely proportional to strategy vol."""
+        vols = sc.strategy_vols
+        tier_key = strategy_tier.lower()
+        if tier_key not in vols:
+            return balance * sc.base_risk_pct
+
+        inv_vols = {s: 1.0 / v for s, v in vols.items() if v > 0}
+        total_inv = sum(inv_vols.values())
+        weight = inv_vols.get(tier_key, 0.25) / total_inv if total_inv > 0 else 0.25
+
+        n_strategies = len(vols)
+        risk_for_tier = sc.base_risk_pct * weight * n_strategies
+        return balance * risk_for_tier
+
+    def _lw_risk_dollars(self, balance: float, risk_pct: float,
+                         sc) -> float:
+        """
+        Larry Williams: balance × risk_pct, adjusted by recent loss severity.
+        Anti-martingale: winning streaks → bigger positions.
+        """
+        lookback = sc.lw_lookback
+        recent_losses = [
+            abs(pnl) for pnl in self._trade_history[-lookback:]
+            if pnl < 0
+        ]
+
+        base_budget = balance * risk_pct
+
+        if recent_losses:
+            worst_loss = max(recent_losses)
+            if worst_loss > base_budget:
+                return base_budget * (base_budget / worst_loss)
+
+        return base_budget
+
     def _record_trade_pnl(self, pnl: float, atr: float):
-        """Record closed trade for hybrid sizer's lookback."""
+        """Record closed trade for sizer's lookback."""
         self._trade_history.append(pnl)
         self._atr_history.append(atr)
 

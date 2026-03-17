@@ -202,7 +202,7 @@ class ScalpConfig:
     # ── Budget ──────────────────────────────────────────────────
     max_premium: float = 4.00           # Max per-contract premium (SPY scale)
     min_premium: float = 0.30           # Minimum viable premium
-    max_contracts: int = 5              # Max contracts per trade (raised: capital concentrated)
+    max_contracts: int = 3              # Max contracts per trade
 
     # ── Volatility Filter ────────────────────────────────────────
     min_atr: float = 0.15               # Min ATR to trade (skip dead-flat periods)
@@ -240,7 +240,7 @@ class ScalpConfig:
     # The "vacation fund": cheap OTM options that ride big moves.
     # Enters ONLY in power hour when momentum is confirmed.
     # Let winners run with trailing stop, no time stop.
-    runner_enabled: bool = False            # PRUNED: 3 trades in 6 months = dead tier
+    runner_enabled: bool = True             # Enable runner tier
     runner_max_per_day: int = 1             # Max 1 runner/day
     runner_budget_pct: float = 0.02         # 2% of account per runner ($200 on $10K)
     runner_max_premium: float = 2.00        # Max $2.00/contract (SPY scale, ×10 for SPX)
@@ -326,7 +326,7 @@ class ORBConfig:
     # ── Budget ──────────────────────────────────────────────────
     max_premium: float = 4.00            # Max per-contract premium (SPY scale)
     min_premium: float = 0.30            # Minimum viable premium
-    max_contracts: int = 5               # Raised: capital concentrated on fewer tiers
+    max_contracts: int = 3               # Max contracts per trade
 
     # ── Strike Selection ────────────────────────────────────────
     max_otm_pct: float = 0.001           # ATM: 0.1% OTM
@@ -519,7 +519,8 @@ class RangeFadeConfig:
       4. RSI_EXTREME — RSI > 70 at range high or RSI < 30 at range low
     """
     # ── Master Enable ───────────────────────────────────────────
-    enabled: bool = True   # Keep: +$7.5K PnL + fuels compounding for ORB/Scalp
+    enabled: bool = True
+
     # ── Range Formation ────────────────────────────────────────
     formation_bars: int = 60           # 60 bars (1 hour) to establish range
     # Boundary zone: price must enter top/bottom X% of range to trigger
@@ -655,28 +656,51 @@ class VWAPMRConfig:
 @dataclass
 class PositionSizingConfig:
     """
-    Hybrid Larry Williams + Volatility Target position sizer.
+    Risk Parity + Phased Capital Scaling position sizer.
 
-    Methodology (proven on 168 historical trades):
-      1. Larry Williams (10%): size = balance × lw_risk_pct / worst_recent_loss
-         → Anti-martingale: sizes up after wins, down after losses
-      2. Vol Target (15%): size = balance × vol_target_pct / (ATR / median_ATR)
-         → Normalises exposure across volatility regimes
-      3. Absolute cap: never risk more than absolute_max_pct of balance
+    Tested on 167 trades (SPY+QQQ, 10K MC paths, 30% degradation):
+      Risk Parity 15%: RAR=64.1 (#1), MC Median=$118K, MedDD=13.7%
+      Under 30% degradation: Median=$40K, 0% blowup risk.
 
-    Final contracts = min(LW_contracts, VolTarget_contracts, AbsMax_contracts)
+    Methodology:
+      1. Risk Parity: allocate risk inversely proportional to strategy
+         volatility. Lower-vol strategies get bigger positions.
+         Weights derived from backtest: Runner 33%, RangeFade 31%,
+         Scalp 20%, ORB 17%. Rebalances via inverse-vol automatically.
+      2. Vol Target: normalise each trade by ATR / median_ATR so
+         every trade contributes ~equal dollar risk.
+      3. Phased scaling: as account grows, shift from conservative
+         (Risk Parity 15%) to aggressive (Larry Williams 15%):
+           Phase 1: $10K → $25K — Risk Parity 15% (survival)
+           Phase 2: $25K → $50K — Larry Williams 10% (accelerate)
+           Phase 3: $50K+       — Larry Williams 15% (full throttle)
 
-    Results (sequential sim on 168 trades):
-      Larry Williams 10%: RAR=115.7, PnL=$315K, MaxDD=27.3%
-      vs. old ad-hoc sizing: PnL=$162K, MaxDD=29.7%
+    Final contracts = min(strategy_budget, vol_adjusted, abs_cap)
     """
-    # ── Larry Williams parameters ──────────────────────────────
-    lw_risk_pct: float = 0.10           # 10% of balance / worst_recent_loss
+    # ── Risk Parity parameters ─────────────────────────────────
+    # Per-strategy volatilities ($ std of trade PnL from backtest).
+    # Used to compute inverse-vol weights at init time.
+    # Lower vol → higher allocation weight.
+    strategy_vols: dict = field(default_factory=lambda: {
+        "scalp": 1347.0,
+        "runner": 817.0,
+        "orb": 1629.0,
+        "range_fade": 875.0,
+    })
+    base_risk_pct: float = 0.15         # Total risk budget (Risk Parity phase)
+
+    # ── Larry Williams parameters (Phase 2-3) ─────────────────
+    lw_risk_pct: float = 0.10           # Phase 2: 10% of balance
+    lw_risk_pct_full: float = 0.15      # Phase 3: 15% of balance
     lw_lookback: int = 20               # Rolling window for worst loss
-    lw_default_loss: float = 500.0      # Default worst-loss when no history (conservative)
+    lw_default_loss: float = 500.0      # Default worst-loss when no history
 
     # ── Volatility Target parameters ───────────────────────────
-    vol_target_pct: float = 0.15        # 15% vol-normalised budget cap
+    vol_target_pct: float = 0.15        # Vol-normalised budget cap
+
+    # ── Phased capital scaling thresholds ──────────────────────
+    phase_2_balance: float = 25_000.0   # Switch to LW 10% above this
+    phase_3_balance: float = 50_000.0   # Switch to LW 15% above this
 
     # ── Hard caps ──────────────────────────────────────────────
     absolute_max_pct: float = 0.15      # Never risk more than 15% of balance
@@ -684,60 +708,8 @@ class PositionSizingConfig:
     balance_gate_pct: float = 0.50      # Don't enter if cost > 50% of balance
 
     # ── Runner override ────────────────────────────────────────
-    # Runners are small lottery tickets — keep separate budget sizing
     runner_budget_pct: float = 0.02     # 2% of balance for runners
     runner_balance_gate: float = 0.10   # Runner cost gate: 10% of balance
-
-
-@dataclass
-class ContractPickerConfig:
-    """
-    Smart Contract Picker — pre-trade option feasibility validation.
-
-    Before entering any trade, forward-prices the option at the target
-    underlying price to verify the option premium can realistically
-    achieve the profit target after theta decay and slippage.
-
-    This closes the critical gap where stops/targets are in underlying
-    price space but we trade options — whose premium movement depends
-    on delta, gamma, theta, and time remaining.
-
-    Backtested impact: filters out trades where premium can't deliver,
-    especially late-day entries where theta overwhelms small moves.
-    """
-    # ── Master Enable ───────────────────────────────────────────
-    enabled: bool = True                 # Enable pre-trade feasibility check
-
-    # ── Minimum R:R Thresholds ──────────────────────────────────
-    # Expected option gain / expected option loss at target vs stop
-    min_expected_rr: float = 1.0         # Require at least 1:1 option R:R
-    min_expected_rr_runner: float = 0.5  # Runners: lower bar (big gamma leverage)
-
-    # ── Minimum Net Gain ────────────────────────────────────────
-    # Net gain (after slippage) as % of entry premium
-    min_net_gain_pct: float = 0.15       # Require 15% net gain potential
-    min_net_gain_pct_runner: float = 0.10  # Runners: lower bar
-
-    # ── Theta Cost Limits ───────────────────────────────────────
-    # Max acceptable theta decay as % of entry premium over expected hold
-    # NOTE: 0DTE options naturally have very high theta/premium ratios
-    # in the afternoon (50%+ is normal for ATM at 2 PM). Thresholds
-    # must accommodate this reality.
-    max_theta_pct: float = 0.40          # Reject if theta > 40% of premium
-    max_theta_pct_runner: float = 0.60   # Runners: lenient (momentum plays, fast resolution)
-    max_theta_pct_late: float = 0.35     # After 2:30 PM: slightly tighter for scalps
-    late_cutoff_minutes: int = 300       # 300 min after open = 2:30 PM
-
-    # ── Slippage Assumptions ────────────────────────────────────
-    entry_slippage_pct: float = 0.0125   # 1.25% above mid on entry
-    exit_slippage_pct: float = 0.0125    # 1.25% below mid on exit
-
-    # ── Per-Tier Overrides ──────────────────────────────────────
-    # Each tier can bypass with different thresholds
-    scalp_enabled: bool = True
-    runner_enabled: bool = True
-    orb_enabled: bool = True
-    range_fade_enabled: bool = True
 
 
 @dataclass
@@ -754,7 +726,6 @@ class EngineConfig:
     range_fade: RangeFadeConfig = field(default_factory=RangeFadeConfig)
     vwap_mr: VWAPMRConfig = field(default_factory=VWAPMRConfig)
     sizing: PositionSizingConfig = field(default_factory=PositionSizingConfig)
-    contract_picker: ContractPickerConfig = field(default_factory=ContractPickerConfig)
     data_dir: str = field(default_factory=lambda: os.path.join(
         os.path.dirname(os.path.dirname(__file__)), "data"
     ))
@@ -766,63 +737,26 @@ class EngineConfig:
     ))
 
     @staticmethod
-    def for_qqq_etf() -> "EngineConfig":
+    def for_qqq() -> "EngineConfig":
         """
-        QQQ ETF options configuration (QQQ underlying, premium_scale=1).
+        QQQ-optimized configuration.
 
-        For $10K accounts: trades actual QQQ ETF options (~$100-400/contract).
-        QQQ has 1.58× ORB range and 4.55× ATR vs SPY, more trending days.
+        QQQ has 1.36× the daily range of SPY (higher beta).
+        Calibrated via fine-grid sweep on 129 QQQ trading days:
+          - ORB: wider target (1.75× vs 1.5×), tighter stop (0.45× vs 0.6×)
+            captures QQQ's bigger trends without giving back on reversals
+          - RF: same params work (mean-reversion is regime-dependent, not beta-dependent)
+          - Scalp: same params (momentum signals are % based, scale-invariant)
+          - Trailing: SPY defaults (0.25/0.50/60) work well for QQQ too
 
-        Calibrated via 150-combo sweep on 129 QQQ trading days:
-          - ORB: stock params work (45 trades, 62% WR, +$4.4K)
-          - RF: wider stops needed (stop=0.30, target=0.60, hold=45)
-            QQQ range is wider → 12% stop = premature exits (27 stops on 42 trades)
-            Wider 30% stop → 49% WR, +$730 (vs -$247 with SPX params)
-          - Scalp: stock params work (5 trades, 80% WR, +$318)
-
-        Sweep results (QQQ ETF, $10K, optimized RF):
-          91 trades, PF=1.60, PnL=$+5,551, WR=57%
-          ORB: 45 trades +$4,504 | RF: 41 trades +$730 | Scalp: 5 trades +$318
-
-        Combined with SPX ($10K each, independent accounts):
-          157 trades, PnL=$+58,161 (vs SPX-only $52,609)
-          37 QQQ-only days where SPX has no trades (diversification)
-          PnL correlation: 0.634 (moderately correlated)
+        Sweep results (stop=0.45, tgt=1.75, default trailing):
+          99 trades, PF=3.48, PnL=$+100,723, MaxDD=27.9%, WR=53.5%
         """
         cfg = EngineConfig()
-        # RF: QQQ has wider intraday range → wider stop/target needed
-        cfg.range_fade.stop_range_pct = 0.30    # 30% vs SPX's 12% (wider range needs wider stop)
-        cfg.range_fade.target_range_pct = 0.60  # 60% vs SPX's 50% (ride the wider reversion)
-        cfg.range_fade.max_hold_bars = 45       # 45 vs 60 (quicker exit in QQQ's faster moves)
+        # ORB: QQQ trends harder → wider target, tighter stop
+        cfg.orb.stop_range_mult = 0.45   # 0.45 vs SPY's 0.6 (tighter)
+        cfg.orb.target_range_mult = 1.75 # 1.75 vs SPY's 1.5 (wider target)
         return cfg
-
-    @staticmethod
-    def for_qqq_ndx() -> "EngineConfig":
-        """
-        NDX index options configuration (QQQ×40 scaling, premium_scale=40).
-
-        For $20K+ accounts: trades NDX index options with 60/40 tax treatment.
-        NDX premiums ~$4,000-16,000/contract → needs capital from SPX profits
-        or larger starting account.
-
-        WARNING: At $10K starting capital, balance gate blocks most trades
-        (11 trades, -$8,180). Requires $20K+ for consistent entries.
-
-        Results at $20K start: 89 trades, PF=2.55, PnL=$+134,284
-        Results at $30K start: 91 trades, PF=2.26, PnL=$+123,809
-
-        Tax advantage: NDX (Section 1256) → 60% long-term / 40% short-term
-        capital gains regardless of hold time. Worth ~15% tax savings.
-        """
-        cfg = EngineConfig()
-        # RF: same wider params as ETF mode
-        cfg.range_fade.stop_range_pct = 0.30
-        cfg.range_fade.target_range_pct = 0.60
-        cfg.range_fade.max_hold_bars = 45
-        return cfg
-
-    # Keep backward compat alias
-    for_qqq = for_qqq_etf
 
     @staticmethod
     def for_10k() -> tuple:
@@ -830,23 +764,29 @@ class EngineConfig:
         Recommended configuration for a $10,000 starting account.
 
         Returns (spy_config, qqq_config) tuple.
-        Uses QQQ ETF options (not NDX) — affordable from $10K.
 
-        Validated on 129 trading days (Sep 2025 – Mar 2026):
-          SPX: 66 trades, PF=5.53, PnL=$+52,609
-          QQQ ETF: 91 trades, PF=1.60, PnL=$+5,551
-          Combined: 157 trades, PnL=$+58,161
+        Validated on 129 trading days (Sep 2025 – Mar 2026) in shared-balance
+        mode (single $10K account for both SPY + QQQ):
+          169 trades, PF=3.49, PnL=$+192,245, MaxDD=25.1%, Sharpe=5.38
+          ROI: 1,922% on $10K
 
-        Key findings:
-          1. QQQ ETF options (premium_scale=1) are affordable from $10K
-          2. NDX index options (premium_scale=40) need $20K+ (balance gate)
-          3. QQQ adds 37 trading days where SPX has no signal
-          4. PnL correlation 0.634 — moderate diversification benefit
-          5. QQQ RF needs wider stops (30% vs 12%) due to wider range
+        Key findings from $10K optimization study:
+          1. Position sizing ALREADY adapts to $10K via budget_pct gates:
+             - ORB: 25% budget → 1 contract at $10K (cost ~$2-3K)
+             - Scalp: 30% budget → 1-2 contracts (cost ~$1-2K)
+             - RF: 20% budget → 1 contract (cost ~$1.5-2.5K)
+             - Runner: 2% budget → 1 contract (cost ~$150)
+          2. First-month concurrent premium max: $5,906 (59% of $10K) — fits
+          3. Worst day: -$2,001 (day 3, Sep 4) → recovers next day
+          4. Balance progression: $10K → $13.4K (month 1) → $21.5K (month 2)
+          5. max_contracts=3 is optimal (budget math limits to 1-2 at $10K anyway)
+          6. No circuit breaker needed (25% breaker never triggers; 20% would
+             trigger day 3 and miss $188K of gains)
 
-        Use with: python run_portfolio_backtest.py --account 10000
+        No parameter changes from defaults — the system self-adapts.
+        Use with run_portfolio_backtest.py --shared --account 10000.
         """
-        return EngineConfig(), EngineConfig.for_qqq_etf()
+        return EngineConfig(), EngineConfig.for_qqq()
 
 
 # ─────────────────────────────────────────────────────────────────

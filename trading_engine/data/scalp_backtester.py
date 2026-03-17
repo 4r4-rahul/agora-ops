@@ -41,7 +41,6 @@ from ..config import EngineConfig, ScalpConfig, MeanReversionConfig, ORBConfig, 
 from ..black_scholes import (
     bs_call_price, bs_put_price, bs_delta, bs_gamma, bs_theta, bs_vega,
 )
-from ..modules.contract_picker import SmartContractPicker, FeasibilityResult
 from ..scalper import (
     SignalEngine, ScalpExitEngine, RunnerExitEngine,
     MeanReversionSignalEngine, MeanReversionExitEngine,
@@ -78,11 +77,6 @@ class SimScalpPosition:
     entry_iv: float = 0.20
     num_contracts: int = 1
     atr_at_entry: float = 0.0
-
-    # Partial exit tracking
-    remaining_contracts: int = 0      # Contracts still open (set = num_contracts on entry)
-    partial_exit_done: bool = False    # True after first half taken off
-    partial_pnl: float = 0.0          # Running PnL from partial exits
 
     # Pre-computed levels
     stop_price: float = 0.0
@@ -365,7 +359,7 @@ class ScalpBacktester:
         self._trade_history: list = []   # List of closed-trade PnL for LW lookback
         self._atr_history: list = []     # List of ATR values at entry for vol targeting
 
-    # ── Hybrid Position Sizer ────────────────────────────────────
+    # ── Risk Parity + Phased Capital Scaling Position Sizer ───────
     def _compute_position_size(
         self,
         balance: float,
@@ -376,7 +370,15 @@ class ScalpBacktester:
         conviction_mult: float = 1.0,
     ) -> int:
         """
-        Hybrid Larry Williams + Vol Target position sizer.
+        Risk Parity + Phased Capital Scaling position sizer.
+
+        Phase 1 ($10K–$25K): Risk Parity — allocate inversely proportional
+          to strategy volatility. Lower-vol strategies get bigger positions.
+          RAR=64.1 (best risk-adjusted), MedDD=13.7%, 0% blowup.
+        Phase 2 ($25K–$50K): Larry Williams 10% — accelerate growth.
+        Phase 3 ($50K+):     Larry Williams 15% — full throttle.
+
+        All phases apply vol-targeting (ATR normalisation) and absolute cap.
 
         Args:
             balance: Current account balance
@@ -401,66 +403,43 @@ class ScalpBacktester:
             runner_num = int(runner_budget / cost_per_contract) if cost_per_contract > 0 else 0
             runner_num = min(runner_num, self.scalp_cfg.runner_max_contracts)
             runner_num = max(1, runner_num) if runner_num >= 1 else 0
-            # Gate: total cost must be ≤ runner_balance_gate of balance
             if runner_num > 0 and cost_per_contract * runner_num > balance * sc.runner_balance_gate:
                 return 0
             return runner_num
 
-        # ── 1. Larry Williams: balance × risk_pct / worst_recent_loss ────
-        lookback = sc.lw_lookback
-        recent_losses = [
-            abs(pnl) for pnl in self._trade_history[-lookback:]
-            if pnl < 0
-        ]
-        worst_loss = max(recent_losses) if recent_losses else sc.lw_default_loss
-        # Scale default loss with price_scale for SPX/NDX
-        if not recent_losses:
-            worst_loss *= self.price_scale
+        # ── Determine phase based on capital level ───────────────
+        if balance >= sc.phase_3_balance:
+            # Phase 3: Larry Williams 15% — full throttle
+            risk_pct = sc.lw_risk_pct_full
+            risk_dollars = self._lw_risk_dollars(balance, risk_pct, sc)
+        elif balance >= sc.phase_2_balance:
+            # Phase 2: Larry Williams 10% — accelerate
+            risk_pct = sc.lw_risk_pct
+            risk_dollars = self._lw_risk_dollars(balance, risk_pct, sc)
+        else:
+            # Phase 1: Risk Parity — inversely proportional to strategy vol
+            risk_dollars = self._risk_parity_dollars(balance, strategy_tier, sc)
 
-        lw_budget = (balance * sc.lw_risk_pct) / worst_loss if worst_loss > 0 else 1.0
-        # lw_budget is a multiplier of "one worst-loss unit"
-        # Convert to contracts: lw_budget * worst_loss = total risk budget
-        lw_risk_dollars = balance * sc.lw_risk_pct
-        lw_contracts = lw_risk_dollars / cost_per_contract if cost_per_contract > 0 else 0
-
-        # ── 2. Vol Target: normalise by ATR regime ───────────────
+        # ── Vol Target: normalise by ATR regime ──────────────────
         atr_ratio = (current_atr / daily_median_atr) if daily_median_atr > 0 else 1.0
         atr_ratio = max(0.5, min(atr_ratio, 3.0))  # Clamp to avoid extremes
         vol_risk_dollars = (balance * sc.vol_target_pct) / atr_ratio
-        vol_contracts = vol_risk_dollars / cost_per_contract if cost_per_contract > 0 else 0
 
-        # ── 3. Absolute max cap ──────────────────────────────────
+        # ── Absolute max cap ─────────────────────────────────────
         abs_max_dollars = balance * sc.absolute_max_pct
-        abs_contracts = abs_max_dollars / cost_per_contract if cost_per_contract > 0 else 0
 
-        # ── LW-primary sizing: use Larry Williams as driver,
-        #    vol + abs_max as guardrails (not triple-min which stunts growth) ──
-        # LW is the main signal; cap at 2× vol_contracts to prevent insanity
-        raw_contracts = lw_contracts
-        vol_guardrail = vol_contracts * 2.0  # generous guardrail
-        abs_guardrail = abs_contracts * 1.5  # generous guardrail
-        raw_contracts = min(raw_contracts, vol_guardrail, abs_guardrail)
+        # ── Take minimum of all (most conservative wins) ─────────
+        budget = min(risk_dollars, vol_risk_dollars, abs_max_dollars)
+        raw_contracts = budget / cost_per_contract if cost_per_contract > 0 else 0
 
-        # Apply conviction multiplier (e.g., 1.5× for deep IV discount on scalp)
+        # Apply conviction multiplier (e.g., 1.5× for deep IV discount)
         raw_contracts *= conviction_mult
 
-        contracts = round(raw_contracts)  # round() not int() — 1.5→2 not 1
+        contracts = int(raw_contracts)
         contracts = max(sc.min_contracts, contracts)
-
-        # ── Per-tier max contracts cap ───────────────────────────
-        tier_max_map = {
-            "scalp": self.scalp_cfg.max_contracts,
-            "orb": self.orb_cfg.max_contracts,
-            "range_fade": self.rf_cfg.max_contracts,
-            "mean_reversion": self.mr_cfg.max_contracts,
-            "vwap_mr": self.vm_cfg.max_contracts,
-        }
-        tier_max = tier_max_map.get(strategy_tier, 5)
-        contracts = min(contracts, tier_max)
 
         # ── Balance gate: don't enter if cost > gate % of balance ─
         if cost_per_contract * contracts > balance * sc.balance_gate_pct:
-            # Try with fewer contracts
             max_affordable = int(balance * sc.balance_gate_pct / cost_per_contract)
             if max_affordable >= sc.min_contracts:
                 contracts = max_affordable
@@ -469,47 +448,60 @@ class ScalpBacktester:
 
         return contracts
 
+    def _risk_parity_dollars(self, balance: float, strategy_tier: str,
+                             sc) -> float:
+        """
+        Risk Parity: allocate risk inversely proportional to strategy volatility.
+        Lower-vol strategies get bigger positions (more risk budget).
+        """
+        vols = sc.strategy_vols
+        tier_key = strategy_tier.lower()
+        if tier_key not in vols:
+            # Unknown tier: give average weight
+            return balance * sc.base_risk_pct
+
+        # Inverse-vol weights (sum to 1.0)
+        inv_vols = {s: 1.0 / v for s, v in vols.items() if v > 0}
+        total_inv = sum(inv_vols.values())
+        weight = inv_vols.get(tier_key, 0.25) / total_inv if total_inv > 0 else 0.25
+
+        # Scale up: each strategy gets weight × total_risk × num_strategies
+        # so the total budget across all strategies = base_risk_pct × balance × N
+        n_strategies = len(vols)
+        risk_for_tier = sc.base_risk_pct * weight * n_strategies
+        return balance * risk_for_tier
+
+    def _lw_risk_dollars(self, balance: float, risk_pct: float,
+                         sc) -> float:
+        """
+        Larry Williams: size = balance × risk_pct, adjusted by recent loss severity.
+
+        When worst recent loss is large relative to balance, size down.
+        When losses are small (good run), size up — but capped at risk_pct.
+        This is anti-martingale: winning streaks → bigger positions.
+        """
+        lookback = sc.lw_lookback
+        recent_losses = [
+            abs(pnl) for pnl in self._trade_history[-lookback:]
+            if pnl < 0
+        ]
+
+        # Base budget: balance × risk_pct (e.g., $30K × 10% = $3K)
+        base_budget = balance * risk_pct
+
+        if recent_losses:
+            worst_loss = max(recent_losses)
+            # LW adjustment: if worst loss is big, scale DOWN
+            # If recent worst loss would exceed our budget, reduce proportionally
+            if worst_loss > base_budget:
+                return base_budget * (base_budget / worst_loss)
+
+        return base_budget
+
     def _record_trade_pnl(self, pnl: float, atr: float):
         """Record a closed trade's PnL and ATR for the hybrid sizer's lookback."""
         self._trade_history.append(pnl)
         self._atr_history.append(atr)
-
-    def _process_partial_exit(
-        self,
-        pos,                    # SimScalpPosition
-        exit_underlying: float,
-        T: float,               # time to expiry
-        daily_pnl: float,
-    ) -> float:
-        """
-        Process a partial exit: close half the contracts, move stop to breakeven.
-
-        Returns:
-            PnL from the partial close (to be added to daily_pnl).
-        """
-        # Price the option at exit
-        exit_premium = self.pricer.price_option(
-            exit_underlying, pos.strike, T, pos.entry_iv, pos.right,
-        )
-        exit_premium = max(0, exit_premium * (1 - self.exit_slippage_pct))
-
-        # Close half the remaining contracts
-        contracts_to_close = pos.remaining_contracts // 2
-        if contracts_to_close < 1:
-            return 0.0
-
-        commission = self.commission_per_contract * contracts_to_close  # one-leg (exit only)
-        partial_pnl = (exit_premium - pos.entry_premium) * contracts_to_close * 100 - commission
-
-        # Update position state
-        pos.remaining_contracts -= contracts_to_close
-        pos.partial_exit_done = True
-        pos.partial_pnl += partial_pnl
-
-        # Move stop to breakeven (entry price) for remaining contracts
-        pos.stop_price = pos.entry_underlying
-
-        return partial_pnl
 
     def run(self, bars_df: pd.DataFrame, ticker: str = "SPY",
             interval: str = "1m",
@@ -729,12 +721,7 @@ class ScalpBacktester:
         Strategy C (RUNNER): OTM options, wide exits, let winners ride in power hour.
         Strategy D (ORB BREAKOUT): ATM options, opening range breakout, regime-filtered.
         All can be open simultaneously (different strategies, different edges).
-
-        Intra-day compounding: balance is updated after each closed trade
-        so subsequent entries within the same day use the latest equity.
         """
-        # Track live balance within the day for intra-day compounding
-        self._intraday_balance = balance
         day_result = ScalpBacktestDay(date=day_date)
         day_result._trades = []
         day_result._orb_regime_skipped = 0
@@ -926,72 +913,57 @@ class ScalpBacktester:
                 if result:
                     exit_reason, exit_underlying = result
 
-                    # ── Partial exit: half off, move stop to breakeven ──
-                    if exit_reason == "PARTIAL_TAKE":
-                        partial_pnl = self._process_partial_exit(
-                            open_scalp, exit_underlying, T, daily_pnl,
-                        )
-                        daily_pnl += partial_pnl
-                        self._intraday_balance += partial_pnl
-                        # Position stays open with remaining contracts
-                    else:
-                        # ── Full exit ──
-                        # Price the option at exit using BS
-                        exit_premium = self.pricer.price_option(
-                            exit_underlying, open_scalp.strike, T,
-                            open_scalp.entry_iv, open_scalp.right,
-                        )
-                        exit_premium = max(0, exit_premium * (1 - self.exit_slippage_pct))
+                    # Price the option at exit using BS
+                    exit_premium = self.pricer.price_option(
+                        exit_underlying, open_scalp.strike, T,
+                        open_scalp.entry_iv, open_scalp.right,
+                    )
+                    exit_premium = max(0, exit_premium * (1 - self.exit_slippage_pct))
 
-                        # Use remaining_contracts for PnL (may be reduced after partial)
-                        active_contracts = open_scalp.remaining_contracts or open_scalp.num_contracts
-                        commission = self.commission_per_contract * active_contracts * 2
-                        pnl_amount = (exit_premium - open_scalp.entry_premium) * \
-                                     active_contracts * 100 - commission
-                        # Add any previously booked partial PnL
-                        total_trade_pnl = pnl_amount + open_scalp.partial_pnl
+                    commission = self.commission_per_contract * open_scalp.num_contracts * 2
+                    pnl_amount = (exit_premium - open_scalp.entry_premium) * \
+                                 open_scalp.num_contracts * 100 - commission
 
-                        # Fill exit fields
-                        open_scalp.is_open = False
-                        open_scalp.exit_time = current_time
-                        open_scalp.exit_underlying = exit_underlying
-                        open_scalp.exit_premium = exit_premium
-                        open_scalp.exit_reason = exit_reason
-                        open_scalp.total_pnl = round(total_trade_pnl, 2)
-                        open_scalp.hold_minutes = round(
-                            (current_time - open_scalp.entry_time).total_seconds() / 60, 1
-                        )
+                    # Fill exit fields
+                    open_scalp.is_open = False
+                    open_scalp.exit_time = current_time
+                    open_scalp.exit_underlying = exit_underlying
+                    open_scalp.exit_premium = exit_premium
+                    open_scalp.exit_reason = exit_reason
+                    open_scalp.total_pnl = round(pnl_amount, 2)
+                    open_scalp.hold_minutes = round(
+                        (current_time - open_scalp.entry_time).total_seconds() / 60, 1
+                    )
 
-                        daily_pnl += pnl_amount
-                        self._intraday_balance += pnl_amount  # intra-day compounding
-                        self._record_trade_pnl(total_trade_pnl, open_scalp.atr_at_entry)
+                    daily_pnl += pnl_amount
+                    self._record_trade_pnl(pnl_amount, open_scalp.atr_at_entry)
 
-                        if exit_reason == "STOP_LOSS":
-                            stopped_directions.add(open_scalp.direction)
+                    if exit_reason == "STOP_LOSS":
+                        stopped_directions.add(open_scalp.direction)
 
-                        # Track winning scalps for runner piggyback
-                        if exit_reason == "PROFIT_TARGET" and total_trade_pnl > 5:
-                            scalp_won_today = True
-                            scalp_win_direction = open_scalp.direction
+                    # Track winning scalps for runner piggyback
+                    if exit_reason == "PROFIT_TARGET" and pnl_amount > 5:
+                        scalp_won_today = True
+                        scalp_win_direction = open_scalp.direction
 
-                        cooldown_remaining = self.scalp_cfg.cooldown_bars
-                        day_result.trades_closed += 1
-                        if total_trade_pnl > 5:
-                            day_result.winning_trades += 1
-                        elif total_trade_pnl < -5:
-                            day_result.losing_trades += 1
+                    cooldown_remaining = self.scalp_cfg.cooldown_bars
+                    day_result.trades_closed += 1
+                    if pnl_amount > 5:
+                        day_result.winning_trades += 1
+                    elif pnl_amount < -5:
+                        day_result.losing_trades += 1
 
-                        if verbose:
-                            mult = exit_premium / open_scalp.entry_premium \
-                                if open_scalp.entry_premium > 0 else 0
-                            print(f"    [{day_date}] SCALP EXIT  {open_scalp.direction} "
-                                  f"{open_scalp.strike}{open_scalp.right} "
-                                  f"→ {exit_reason} | {mult:.2f}x | "
-                                  f"P&L: ${total_trade_pnl:+.2f} | "
-                                  f"hold: {open_scalp.hold_minutes:.0f}m | "
-                                  f"Δunderlying: ${exit_underlying - open_scalp.entry_underlying:+.2f}")
+                    if verbose:
+                        mult = exit_premium / open_scalp.entry_premium \
+                            if open_scalp.entry_premium > 0 else 0
+                        print(f"    [{day_date}] SCALP EXIT  {open_scalp.direction} "
+                              f"{open_scalp.strike}{open_scalp.right} "
+                              f"→ {exit_reason} | {mult:.2f}x | "
+                              f"P&L: ${pnl_amount:+.2f} | "
+                              f"hold: {open_scalp.hold_minutes:.0f}m | "
+                              f"Δunderlying: ${exit_underlying - open_scalp.entry_underlying:+.2f}")
 
-                        open_scalp = None
+                    open_scalp = None
 
             # ── 1b. Update open RUNNER position ──────────────────
             if open_runner and open_runner.is_open:
@@ -1013,29 +985,26 @@ class ScalpBacktester:
                     otm_slippage = 0.05 if self.spx_mode else 0.08
                     exit_premium = max(0, exit_premium * (1 - otm_slippage))
 
-                    active_contracts = open_runner.remaining_contracts or open_runner.num_contracts
-                    commission = self.commission_per_contract * active_contracts * 2
+                    commission = self.commission_per_contract * open_runner.num_contracts * 2
                     pnl_amount = (exit_premium - open_runner.entry_premium) * \
-                                 active_contracts * 100 - commission
-                    total_trade_pnl = pnl_amount + open_runner.partial_pnl
+                                 open_runner.num_contracts * 100 - commission
 
                     open_runner.is_open = False
                     open_runner.exit_time = current_time
                     open_runner.exit_underlying = exit_underlying
                     open_runner.exit_premium = exit_premium
                     open_runner.exit_reason = exit_reason
-                    open_runner.total_pnl = round(total_trade_pnl, 2)
+                    open_runner.total_pnl = round(pnl_amount, 2)
                     open_runner.hold_minutes = round(
                         (current_time - open_runner.entry_time).total_seconds() / 60, 1
                     )
 
                     daily_pnl += pnl_amount
-                    self._intraday_balance += pnl_amount  # intra-day compounding
-                    self._record_trade_pnl(total_trade_pnl, open_runner.atr_at_entry)
+                    self._record_trade_pnl(pnl_amount, open_runner.atr_at_entry)
                     day_result.trades_closed += 1
-                    if total_trade_pnl > 5:
+                    if pnl_amount > 5:
                         day_result.winning_trades += 1
-                    elif total_trade_pnl < -5:
+                    elif pnl_amount < -5:
                         day_result.losing_trades += 1
 
                     if verbose:
@@ -1044,7 +1013,7 @@ class ScalpBacktester:
                         print(f"    [{day_date}] 🏃 RUNNER EXIT  {open_runner.direction} "
                               f"{open_runner.strike}{open_runner.right} "
                               f"→ {exit_reason} | {mult:.2f}x | "
-                              f"P&L: ${total_trade_pnl:+.2f} | "
+                              f"P&L: ${pnl_amount:+.2f} | "
                               f"hold: {open_runner.hold_minutes:.0f}m | "
                               f"Δunderlying: ${exit_underlying - open_runner.entry_underlying:+.2f}")
 
@@ -1060,58 +1029,47 @@ class ScalpBacktester:
                 if result:
                     exit_reason, exit_underlying = result
 
-                    # ── Partial exit handling ──
-                    if exit_reason == "PARTIAL_TAKE":
-                        partial_pnl = self._process_partial_exit(
-                            open_mr, exit_underlying, T, daily_pnl,
-                        )
-                        daily_pnl += partial_pnl
-                        self._intraday_balance += partial_pnl
-                    else:
-                        exit_premium = self.pricer.price_option(
-                            exit_underlying, open_mr.strike, T,
-                            open_mr.entry_iv, open_mr.right,
-                        )
-                        exit_premium = max(0, exit_premium * (1 - self.exit_slippage_pct))
+                    exit_premium = self.pricer.price_option(
+                        exit_underlying, open_mr.strike, T,
+                        open_mr.entry_iv, open_mr.right,
+                    )
+                    exit_premium = max(0, exit_premium * (1 - self.exit_slippage_pct))
 
-                        active_contracts = open_mr.remaining_contracts or open_mr.num_contracts
-                        commission = self.commission_per_contract * active_contracts * 2
-                        pnl_amount = (exit_premium - open_mr.entry_premium) * \
-                                     active_contracts * 100 - commission
-                        total_trade_pnl = pnl_amount + open_mr.partial_pnl
+                    commission = self.commission_per_contract * open_mr.num_contracts * 2
+                    pnl_amount = (exit_premium - open_mr.entry_premium) * \
+                                 open_mr.num_contracts * 100 - commission
 
-                        open_mr.is_open = False
-                        open_mr.exit_time = current_time
-                        open_mr.exit_underlying = exit_underlying
-                        open_mr.exit_premium = exit_premium
-                        open_mr.exit_reason = exit_reason
-                        open_mr.total_pnl = round(total_trade_pnl, 2)
-                        open_mr.hold_minutes = round(
-                            (current_time - open_mr.entry_time).total_seconds() / 60, 1
-                        )
+                    open_mr.is_open = False
+                    open_mr.exit_time = current_time
+                    open_mr.exit_underlying = exit_underlying
+                    open_mr.exit_premium = exit_premium
+                    open_mr.exit_reason = exit_reason
+                    open_mr.total_pnl = round(pnl_amount, 2)
+                    open_mr.hold_minutes = round(
+                        (current_time - open_mr.entry_time).total_seconds() / 60, 1
+                    )
 
-                        daily_pnl += pnl_amount
-                        self._intraday_balance += pnl_amount
-                        self._record_trade_pnl(total_trade_pnl, open_mr.atr_at_entry)
-                        mr_daily_pnl += pnl_amount
-                        mr_cooldown_remaining = self.mr_cfg.cooldown_bars
-                        day_result.trades_closed += 1
-                        if total_trade_pnl > 5:
-                            day_result.winning_trades += 1
-                        elif total_trade_pnl < -5:
-                            day_result.losing_trades += 1
+                    daily_pnl += pnl_amount
+                    self._record_trade_pnl(pnl_amount, open_mr.atr_at_entry)
+                    mr_daily_pnl += pnl_amount
+                    mr_cooldown_remaining = self.mr_cfg.cooldown_bars
+                    day_result.trades_closed += 1
+                    if pnl_amount > 5:
+                        day_result.winning_trades += 1
+                    elif pnl_amount < -5:
+                        day_result.losing_trades += 1
 
-                        if verbose:
-                            mult = exit_premium / open_mr.entry_premium \
-                                if open_mr.entry_premium > 0 else 0
-                            print(f"    [{day_date}] 🔄 MR EXIT  {open_mr.direction} "
-                                  f"{open_mr.strike}{open_mr.right} "
-                                  f"→ {exit_reason} | {mult:.2f}x | "
-                                  f"P&L: ${total_trade_pnl:+.2f} | "
-                                  f"hold: {open_mr.hold_minutes:.0f}m | "
-                                  f"Δunderlying: ${exit_underlying - open_mr.entry_underlying:+.2f}")
+                    if verbose:
+                        mult = exit_premium / open_mr.entry_premium \
+                            if open_mr.entry_premium > 0 else 0
+                        print(f"    [{day_date}] 🔄 MR EXIT  {open_mr.direction} "
+                              f"{open_mr.strike}{open_mr.right} "
+                              f"→ {exit_reason} | {mult:.2f}x | "
+                              f"P&L: ${pnl_amount:+.2f} | "
+                              f"hold: {open_mr.hold_minutes:.0f}m | "
+                              f"Δunderlying: ${exit_underlying - open_mr.entry_underlying:+.2f}")
 
-                        open_mr = None
+                    open_mr = None
 
             # ── 1d. Update open ORB position ─────────────────────
             if open_orb and open_orb.is_open:
@@ -1123,56 +1081,45 @@ class ScalpBacktester:
                 if result:
                     exit_reason, exit_underlying = result
 
-                    # ── Partial exit handling ──
-                    if exit_reason == "PARTIAL_TAKE":
-                        partial_pnl = self._process_partial_exit(
-                            open_orb, exit_underlying, T, daily_pnl,
-                        )
-                        daily_pnl += partial_pnl
-                        self._intraday_balance += partial_pnl
-                    else:
-                        exit_premium = self.pricer.price_option(
-                            exit_underlying, open_orb.strike, T,
-                            open_orb.entry_iv, open_orb.right,
-                        )
-                        exit_premium = max(0, exit_premium * (1 - self.exit_slippage_pct))
+                    exit_premium = self.pricer.price_option(
+                        exit_underlying, open_orb.strike, T,
+                        open_orb.entry_iv, open_orb.right,
+                    )
+                    exit_premium = max(0, exit_premium * (1 - self.exit_slippage_pct))
 
-                        active_contracts = open_orb.remaining_contracts or open_orb.num_contracts
-                        commission = self.commission_per_contract * active_contracts * 2
-                        pnl_amount = (exit_premium - open_orb.entry_premium) * \
-                                     active_contracts * 100 - commission
-                        total_trade_pnl = pnl_amount + open_orb.partial_pnl
+                    commission = self.commission_per_contract * open_orb.num_contracts * 2
+                    pnl_amount = (exit_premium - open_orb.entry_premium) * \
+                                 open_orb.num_contracts * 100 - commission
 
-                        open_orb.is_open = False
-                        open_orb.exit_time = current_time
-                        open_orb.exit_underlying = exit_underlying
-                        open_orb.exit_premium = exit_premium
-                        open_orb.exit_reason = exit_reason
-                        open_orb.total_pnl = round(total_trade_pnl, 2)
-                        open_orb.hold_minutes = round(
-                            (current_time - open_orb.entry_time).total_seconds() / 60, 1
-                        )
+                    open_orb.is_open = False
+                    open_orb.exit_time = current_time
+                    open_orb.exit_underlying = exit_underlying
+                    open_orb.exit_premium = exit_premium
+                    open_orb.exit_reason = exit_reason
+                    open_orb.total_pnl = round(pnl_amount, 2)
+                    open_orb.hold_minutes = round(
+                        (current_time - open_orb.entry_time).total_seconds() / 60, 1
+                    )
 
-                        daily_pnl += pnl_amount
-                        self._intraday_balance += pnl_amount
-                        self._record_trade_pnl(total_trade_pnl, open_orb.atr_at_entry)
-                        day_result.trades_closed += 1
-                        if total_trade_pnl > 5:
-                            day_result.winning_trades += 1
-                        elif total_trade_pnl < -5:
-                            day_result.losing_trades += 1
+                    daily_pnl += pnl_amount
+                    self._record_trade_pnl(pnl_amount, open_orb.atr_at_entry)
+                    day_result.trades_closed += 1
+                    if pnl_amount > 5:
+                        day_result.winning_trades += 1
+                    elif pnl_amount < -5:
+                        day_result.losing_trades += 1
 
-                        if verbose:
-                            mult = exit_premium / open_orb.entry_premium \
-                                if open_orb.entry_premium > 0 else 0
-                            print(f"    [{day_date}] 📊 ORB EXIT  {open_orb.direction} "
-                                  f"{open_orb.strike}{open_orb.right} "
-                                  f"→ {exit_reason} | {mult:.2f}x | "
-                                  f"P&L: ${total_trade_pnl:+.2f} | "
-                                  f"hold: {open_orb.hold_minutes:.0f}m | "
-                                  f"Δunderlying: ${exit_underlying - open_orb.entry_underlying:+.2f}")
+                    if verbose:
+                        mult = exit_premium / open_orb.entry_premium \
+                            if open_orb.entry_premium > 0 else 0
+                        print(f"    [{day_date}] 📊 ORB EXIT  {open_orb.direction} "
+                              f"{open_orb.strike}{open_orb.right} "
+                              f"→ {exit_reason} | {mult:.2f}x | "
+                              f"P&L: ${pnl_amount:+.2f} | "
+                              f"hold: {open_orb.hold_minutes:.0f}m | "
+                              f"Δunderlying: ${exit_underlying - open_orb.entry_underlying:+.2f}")
 
-                        open_orb = None
+                    open_orb = None
 
             # ── 1e. Update open RANGE-FADE position ──────────────
             if open_rf and open_rf.is_open:
@@ -1184,56 +1131,45 @@ class ScalpBacktester:
                 if result:
                     exit_reason, exit_underlying = result
 
-                    # ── Partial exit handling ──
-                    if exit_reason == "PARTIAL_TAKE":
-                        partial_pnl = self._process_partial_exit(
-                            open_rf, exit_underlying, T, daily_pnl,
-                        )
-                        daily_pnl += partial_pnl
-                        self._intraday_balance += partial_pnl
-                    else:
-                        exit_premium = self.pricer.price_option(
-                            exit_underlying, open_rf.strike, T,
-                            open_rf.entry_iv, open_rf.right,
-                        )
-                        exit_premium = max(0, exit_premium * (1 - self.exit_slippage_pct))
+                    exit_premium = self.pricer.price_option(
+                        exit_underlying, open_rf.strike, T,
+                        open_rf.entry_iv, open_rf.right,
+                    )
+                    exit_premium = max(0, exit_premium * (1 - self.exit_slippage_pct))
 
-                        active_contracts = open_rf.remaining_contracts or open_rf.num_contracts
-                        commission = self.commission_per_contract * active_contracts * 2
-                        pnl_amount = (exit_premium - open_rf.entry_premium) * \
-                                     active_contracts * 100 - commission
-                        total_trade_pnl = pnl_amount + open_rf.partial_pnl
+                    commission = self.commission_per_contract * open_rf.num_contracts * 2
+                    pnl_amount = (exit_premium - open_rf.entry_premium) * \
+                                 open_rf.num_contracts * 100 - commission
 
-                        open_rf.is_open = False
-                        open_rf.exit_time = current_time
-                        open_rf.exit_underlying = exit_underlying
-                        open_rf.exit_premium = exit_premium
-                        open_rf.exit_reason = exit_reason
-                        open_rf.total_pnl = round(total_trade_pnl, 2)
-                        open_rf.hold_minutes = round(
-                            (current_time - open_rf.entry_time).total_seconds() / 60, 1
-                        )
+                    open_rf.is_open = False
+                    open_rf.exit_time = current_time
+                    open_rf.exit_underlying = exit_underlying
+                    open_rf.exit_premium = exit_premium
+                    open_rf.exit_reason = exit_reason
+                    open_rf.total_pnl = round(pnl_amount, 2)
+                    open_rf.hold_minutes = round(
+                        (current_time - open_rf.entry_time).total_seconds() / 60, 1
+                    )
 
-                        daily_pnl += pnl_amount
-                        self._intraday_balance += pnl_amount
-                        self._record_trade_pnl(total_trade_pnl, open_rf.atr_at_entry)
-                        day_result.trades_closed += 1
-                        if total_trade_pnl > 5:
-                            day_result.winning_trades += 1
-                        elif total_trade_pnl < -5:
-                            day_result.losing_trades += 1
+                    daily_pnl += pnl_amount
+                    self._record_trade_pnl(pnl_amount, open_rf.atr_at_entry)
+                    day_result.trades_closed += 1
+                    if pnl_amount > 5:
+                        day_result.winning_trades += 1
+                    elif pnl_amount < -5:
+                        day_result.losing_trades += 1
 
-                        if verbose:
-                            mult = exit_premium / open_rf.entry_premium \
-                                if open_rf.entry_premium > 0 else 0
-                            print(f"    [{day_date}] 🔃 RF EXIT  {open_rf.direction} "
-                                  f"{open_rf.strike}{open_rf.right} "
-                                  f"→ {exit_reason} | {mult:.2f}x | "
-                                  f"P&L: ${total_trade_pnl:+.2f} | "
-                                  f"hold: {open_rf.hold_minutes:.0f}m | "
-                                  f"Δunderlying: ${exit_underlying - open_rf.entry_underlying:+.2f}")
+                    if verbose:
+                        mult = exit_premium / open_rf.entry_premium \
+                            if open_rf.entry_premium > 0 else 0
+                        print(f"    [{day_date}] 🔃 RF EXIT  {open_rf.direction} "
+                              f"{open_rf.strike}{open_rf.right} "
+                              f"→ {exit_reason} | {mult:.2f}x | "
+                              f"P&L: ${pnl_amount:+.2f} | "
+                              f"hold: {open_rf.hold_minutes:.0f}m | "
+                              f"Δunderlying: ${exit_underlying - open_rf.entry_underlying:+.2f}")
 
-                        open_rf = None
+                    open_rf = None
 
             # ── 1f. Update open VWAP-MR position ─────────────────
             if open_vm and open_vm.is_open:
@@ -1248,56 +1184,45 @@ class ScalpBacktester:
                 if result:
                     exit_reason, exit_underlying = result
 
-                    # ── Partial exit handling ──
-                    if exit_reason == "PARTIAL_TAKE":
-                        partial_pnl = self._process_partial_exit(
-                            open_vm, exit_underlying, T, daily_pnl,
-                        )
-                        daily_pnl += partial_pnl
-                        self._intraday_balance += partial_pnl
-                    else:
-                        exit_premium = self.pricer.price_option(
-                            exit_underlying, open_vm.strike, T,
-                            open_vm.entry_iv, open_vm.right,
-                        )
-                        exit_premium = max(0, exit_premium * (1 - self.exit_slippage_pct))
+                    exit_premium = self.pricer.price_option(
+                        exit_underlying, open_vm.strike, T,
+                        open_vm.entry_iv, open_vm.right,
+                    )
+                    exit_premium = max(0, exit_premium * (1 - self.exit_slippage_pct))
 
-                        active_contracts = open_vm.remaining_contracts or open_vm.num_contracts
-                        commission = self.commission_per_contract * active_contracts * 2
-                        pnl_amount = (exit_premium - open_vm.entry_premium) * \
-                                     active_contracts * 100 - commission
-                        total_trade_pnl = pnl_amount + open_vm.partial_pnl
+                    commission = self.commission_per_contract * open_vm.num_contracts * 2
+                    pnl_amount = (exit_premium - open_vm.entry_premium) * \
+                                 open_vm.num_contracts * 100 - commission
 
-                        open_vm.is_open = False
-                        open_vm.exit_time = current_time
-                        open_vm.exit_underlying = exit_underlying
-                        open_vm.exit_premium = exit_premium
-                        open_vm.exit_reason = exit_reason
-                        open_vm.total_pnl = round(total_trade_pnl, 2)
-                        open_vm.hold_minutes = round(
-                            (current_time - open_vm.entry_time).total_seconds() / 60, 1
-                        )
+                    open_vm.is_open = False
+                    open_vm.exit_time = current_time
+                    open_vm.exit_underlying = exit_underlying
+                    open_vm.exit_premium = exit_premium
+                    open_vm.exit_reason = exit_reason
+                    open_vm.total_pnl = round(pnl_amount, 2)
+                    open_vm.hold_minutes = round(
+                        (current_time - open_vm.entry_time).total_seconds() / 60, 1
+                    )
 
-                        daily_pnl += pnl_amount
-                        self._intraday_balance += pnl_amount
-                        self._record_trade_pnl(total_trade_pnl, open_vm.atr_at_entry)
-                        day_result.trades_closed += 1
-                        if total_trade_pnl > 5:
-                            day_result.winning_trades += 1
-                        elif total_trade_pnl < -5:
-                            day_result.losing_trades += 1
+                    daily_pnl += pnl_amount
+                    self._record_trade_pnl(pnl_amount, open_vm.atr_at_entry)
+                    day_result.trades_closed += 1
+                    if pnl_amount > 5:
+                        day_result.winning_trades += 1
+                    elif pnl_amount < -5:
+                        day_result.losing_trades += 1
 
-                        if verbose:
-                            mult = exit_premium / open_vm.entry_premium \
-                                if open_vm.entry_premium > 0 else 0
-                            print(f"    [{day_date}] 📉 VM EXIT  {open_vm.direction} "
-                                  f"{open_vm.strike}{open_vm.right} "
-                                  f"→ {exit_reason} | {mult:.2f}x | "
-                                  f"P&L: ${total_trade_pnl:+.2f} | "
-                                  f"hold: {open_vm.hold_minutes:.0f}m | "
-                                  f"Δunderlying: ${exit_underlying - open_vm.entry_underlying:+.2f}")
+                    if verbose:
+                        mult = exit_premium / open_vm.entry_premium \
+                            if open_vm.entry_premium > 0 else 0
+                        print(f"    [{day_date}] 📉 VM EXIT  {open_vm.direction} "
+                              f"{open_vm.strike}{open_vm.right} "
+                              f"→ {exit_reason} | {mult:.2f}x | "
+                              f"P&L: ${pnl_amount:+.2f} | "
+                              f"hold: {open_vm.hold_minutes:.0f}m | "
+                              f"Δunderlying: ${exit_underlying - open_vm.entry_underlying:+.2f}")
 
-                        open_vm = None
+                    open_vm = None
 
             # ── 2. Scan for new signals ──────────────────────────
             if cooldown_remaining > 0:
@@ -1400,7 +1325,7 @@ class ScalpBacktester:
                                 conviction_mult = 1.5
 
                         num_contracts = self._compute_position_size(
-                            self._intraday_balance, entry_premium, current_atr,
+                            balance, entry_premium, current_atr,
                             daily_median_atr, "scalp",
                             conviction_mult=conviction_mult,
                         )
@@ -1414,44 +1339,30 @@ class ScalpBacktester:
                                 stop_price = current_price + stop_dist
                                 target_price = current_price - target_dist
 
-                            # Pre-trade feasibility check
-                            if not self._check_contract_feasibility(
-                                current_price, strike, right, entry_premium,
-                                day_iv, T, target_price, stop_price,
-                                "scalp", minutes_since_open,
-                            ):
-                                if verbose:
-                                    print(f"    [{day_date}] SCALP REJECTED: "
-                                          f"{strike}{right} @ ${entry_premium:.2f} "
-                                          f"(contract can't reach target)")
-                                pass  # Fall through, don't enter
-                            else:
+                            pos = SimScalpPosition(
+                                ticker=ticker, strike=strike, right=right,
+                                direction=signal.direction, expiry_date=day_date,
+                                confirmations=signal.confirmations.copy(),
+                                confidence=signal.confidence, tier="scalp",
+                                entry_time=current_time, entry_underlying=current_price,
+                                entry_premium=entry_premium, entry_iv=day_iv,
+                                num_contracts=num_contracts, atr_at_entry=current_atr,
+                                stop_price=stop_price, target_price=target_price,
+                                best_favorable_underlying=current_price,
+                            )
 
-                                pos = SimScalpPosition(
-                                    ticker=ticker, strike=strike, right=right,
-                                    direction=signal.direction, expiry_date=day_date,
-                                    confirmations=signal.confirmations.copy(),
-                                    confidence=signal.confidence, tier="scalp",
-                                    entry_time=current_time, entry_underlying=current_price,
-                                    entry_premium=entry_premium, entry_iv=day_iv,
-                                    num_contracts=num_contracts, atr_at_entry=current_atr,
-                                    remaining_contracts=num_contracts, partial_exit_done=False,
-                                    stop_price=stop_price, target_price=target_price,
-                                    best_favorable_underlying=current_price,
-                                )
+                            open_scalp = pos
+                            scalp_trades_today += 1
+                            day_result.trades_entered += 1
+                            day_result._trades.append(pos)
 
-                                open_scalp = pos
-                                scalp_trades_today += 1
-                                day_result.trades_entered += 1
-                                day_result._trades.append(pos)
-
-                                if verbose:
-                                    print(f"    [{day_date}] SCALP ENTER {signal.direction} "
-                                          f"{ticker} {strike}{right} "
-                                          f"@ ${entry_premium:.2f} x{num_contracts} "
-                                          f"({', '.join(signal.confirmations)}) "
-                                          f"ATR=${current_atr:.3f} "
-                                          f"stop=${stop_price:.2f} target=${target_price:.2f}")
+                            if verbose:
+                                print(f"    [{day_date}] SCALP ENTER {signal.direction} "
+                                      f"{ticker} {strike}{right} "
+                                      f"@ ${entry_premium:.2f} x{num_contracts} "
+                                      f"({', '.join(signal.confirmations)}) "
+                                      f"ATR=${current_atr:.3f} "
+                                      f"stop=${stop_price:.2f} target=${target_price:.2f}")
 
             # ── 3b. MEAN-REVERSION entry ─────────────────────────
             if mr_signal is not None:
@@ -1489,7 +1400,7 @@ class ScalpBacktester:
                         mr_stop_dist = current_atr * self.mr_cfg.stop_atr_mult
 
                         mr_num = self._compute_position_size(
-                            self._intraday_balance, mr_entry_premium, current_atr,
+                            balance, mr_entry_premium, current_atr,
                             daily_median_atr, "mean_rev",
                         )
                         if mr_num > 0:
@@ -1509,7 +1420,6 @@ class ScalpBacktester:
                                 entry_time=current_time, entry_underlying=current_price,
                                 entry_premium=mr_entry_premium, entry_iv=day_iv,
                                 num_contracts=mr_num, atr_at_entry=current_atr,
-                                remaining_contracts=mr_num, partial_exit_done=False,
                                 stop_price=mr_stop_price, target_price=mr_target_price,
                                 best_favorable_underlying=current_price,
                             )
@@ -1583,7 +1493,7 @@ class ScalpBacktester:
                             if runner_min_prem <= runner_entry_premium <= runner_max_prem:
                                 # Runner position sizing via hybrid sizer (budget-based path)
                                 runner_num = self._compute_position_size(
-                                    self._intraday_balance, runner_entry_premium, current_atr,
+                                    balance, runner_entry_premium, current_atr,
                                     daily_median_atr, "runner",
                                 )
 
@@ -1597,48 +1507,30 @@ class ScalpBacktester:
                                         runner_stop_price = current_price + runner_stop_dist
                                         runner_target_price = 0
 
-                                    # Feasibility check: runners have no fixed target,
-                                    # use 1.5× stop distance as synthetic target for validation
-                                    # (modest bar — actual trailing can capture much more)
-                                    synth_target = (
-                                        current_price + 1.5 * runner_stop_dist
-                                        if signal.direction == "CALL"
-                                        else current_price - 1.5 * runner_stop_dist
+                                    runner_pos = SimScalpPosition(
+                                        ticker=ticker, strike=runner_strike, right=runner_right,
+                                        direction=signal.direction, expiry_date=day_date,
+                                        confirmations=signal.confirmations.copy(),
+                                        confidence=signal.confidence, tier="runner",
+                                        entry_time=current_time, entry_underlying=current_price,
+                                        entry_premium=runner_entry_premium, entry_iv=day_iv,
+                                        num_contracts=runner_num, atr_at_entry=current_atr,
+                                        stop_price=runner_stop_price, target_price=runner_target_price,
+                                        best_favorable_underlying=current_price,
                                     )
-                                    if not self._check_contract_feasibility(
-                                        current_price, runner_strike, runner_right,
-                                        runner_entry_premium, day_iv, T,
-                                        synth_target, runner_stop_price,
-                                        "runner", minutes_since_open,
-                                    ):
-                                        pass  # Rejected — don't enter
-                                    else:
 
-                                        runner_pos = SimScalpPosition(
-                                            ticker=ticker, strike=runner_strike, right=runner_right,
-                                            direction=signal.direction, expiry_date=day_date,
-                                            confirmations=signal.confirmations.copy(),
-                                            confidence=signal.confidence, tier="runner",
-                                            entry_time=current_time, entry_underlying=current_price,
-                                            entry_premium=runner_entry_premium, entry_iv=day_iv,
-                                            num_contracts=runner_num, atr_at_entry=current_atr,
-                                            remaining_contracts=runner_num, partial_exit_done=False,
-                                            stop_price=runner_stop_price, target_price=runner_target_price,
-                                            best_favorable_underlying=current_price,
-                                        )
+                                    open_runner = runner_pos
+                                    runner_trades_today += 1
+                                    day_result.trades_entered += 1
+                                    day_result._trades.append(runner_pos)
 
-                                        open_runner = runner_pos
-                                        runner_trades_today += 1
-                                        day_result.trades_entered += 1
-                                        day_result._trades.append(runner_pos)
-
-                                        if verbose:
-                                            print(f"    [{day_date}] 🏃 RUNNER ENTER {signal.direction} "
-                                                  f"{ticker} {runner_strike}{runner_right} "
-                                                  f"@ ${runner_entry_premium:.2f} x{runner_num} "
-                                                  f"({', '.join(signal.confirmations)}) "
-                                                  f"ATR=${current_atr:.3f} (ATR ratio: {atr_ratio:.2f}x) "
-                                                  f"stop=${runner_stop_price:.2f}")
+                                    if verbose:
+                                        print(f"    [{day_date}] 🏃 RUNNER ENTER {signal.direction} "
+                                              f"{ticker} {runner_strike}{runner_right} "
+                                              f"@ ${runner_entry_premium:.2f} x{runner_num} "
+                                              f"({', '.join(signal.confirmations)}) "
+                                              f"ATR=${current_atr:.3f} (ATR ratio: {atr_ratio:.2f}x) "
+                                              f"stop=${runner_stop_price:.2f}")
 
             # ── 3d. ORB BREAKOUT entry ───────────────────────────
             # Strategy D: fires ONLY when momentum engine has no signal this day.
@@ -1683,7 +1575,7 @@ class ScalpBacktester:
                             stop_dist = orb_range * self.orb_cfg.stop_range_mult
 
                             num_contracts = self._compute_position_size(
-                                self._intraday_balance, orb_entry_premium, current_atr,
+                                balance, orb_entry_premium, current_atr,
                                 daily_median_atr, "orb",
                             )
 
@@ -1697,41 +1589,30 @@ class ScalpBacktester:
                                     orb_stop_price = current_price + stop_dist
                                     orb_target_price = current_price - target_dist
 
-                                # Pre-trade feasibility check
-                                if not self._check_contract_feasibility(
-                                    current_price, orb_strike, orb_right,
-                                    orb_entry_premium, day_iv, T,
-                                    orb_target_price, orb_stop_price,
-                                    "orb", minutes_since_open,
-                                ):
-                                    pass  # Rejected — don't enter
-                                else:
+                                orb_pos = SimScalpPosition(
+                                    ticker=ticker, strike=orb_strike, right=orb_right,
+                                    direction=orb_signal.direction, expiry_date=day_date,
+                                    confirmations=orb_signal.confirmations.copy(),
+                                    confidence=orb_signal.confidence, tier="orb",
+                                    entry_time=current_time, entry_underlying=current_price,
+                                    entry_premium=orb_entry_premium, entry_iv=day_iv,
+                                    num_contracts=num_contracts, atr_at_entry=current_atr,
+                                    stop_price=orb_stop_price, target_price=orb_target_price,
+                                    best_favorable_underlying=current_price,
+                                )
 
-                                    orb_pos = SimScalpPosition(
-                                        ticker=ticker, strike=orb_strike, right=orb_right,
-                                        direction=orb_signal.direction, expiry_date=day_date,
-                                        confirmations=orb_signal.confirmations.copy(),
-                                        confidence=orb_signal.confidence, tier="orb",
-                                        entry_time=current_time, entry_underlying=current_price,
-                                        entry_premium=orb_entry_premium, entry_iv=day_iv,
-                                        num_contracts=num_contracts, atr_at_entry=current_atr,
-                                        remaining_contracts=num_contracts, partial_exit_done=False,
-                                        stop_price=orb_stop_price, target_price=orb_target_price,
-                                        best_favorable_underlying=current_price,
-                                    )
+                                open_orb = orb_pos
+                                orb_trades_today += 1
+                                day_result.trades_entered += 1
+                                day_result._trades.append(orb_pos)
 
-                                    open_orb = orb_pos
-                                    orb_trades_today += 1
-                                    day_result.trades_entered += 1
-                                    day_result._trades.append(orb_pos)
-
-                                    if verbose:
-                                        print(f"    [{day_date}] 📊 ORB ENTER {orb_signal.direction} "
-                                              f"{ticker} {orb_strike}{orb_right} "
-                                              f"@ ${orb_entry_premium:.2f} x{num_contracts} "
-                                              f"({', '.join(orb_signal.confirmations)}) "
-                                              f"ORB range=${orb_range:.2f} "
-                                              f"stop=${orb_stop_price:.2f} target=${orb_target_price:.2f}")
+                                if verbose:
+                                    print(f"    [{day_date}] 📊 ORB ENTER {orb_signal.direction} "
+                                          f"{ticker} {orb_strike}{orb_right} "
+                                          f"@ ${orb_entry_premium:.2f} x{num_contracts} "
+                                          f"({', '.join(orb_signal.confirmations)}) "
+                                          f"ORB range=${orb_range:.2f} "
+                                          f"stop=${orb_stop_price:.2f} target=${orb_target_price:.2f}")
 
             # ── 3e. RANGE-FADE entry ─────────────────────────────
             # Strategy E: fires only on RANGE_BOUND / MIXED days.
@@ -1776,7 +1657,7 @@ class ScalpBacktester:
                             stop_dist = range_size * self.rf_cfg.stop_range_pct
 
                             num_contracts = self._compute_position_size(
-                                self._intraday_balance, rf_entry_premium, current_atr,
+                                balance, rf_entry_premium, current_atr,
                                 daily_median_atr, "range_fade",
                             )
 
@@ -1792,41 +1673,30 @@ class ScalpBacktester:
                                     rf_stop_price = current_price + stop_dist
                                     rf_target_price = current_price - target_dist
 
-                                # Pre-trade feasibility check
-                                if not self._check_contract_feasibility(
-                                    current_price, rf_strike, rf_right,
-                                    rf_entry_premium, day_iv, T,
-                                    rf_target_price, rf_stop_price,
-                                    "range_fade", minutes_since_open,
-                                ):
-                                    pass  # Rejected — don't enter
-                                else:
+                                rf_pos = SimScalpPosition(
+                                    ticker=ticker, strike=rf_strike, right=rf_right,
+                                    direction=rf_signal.direction, expiry_date=day_date,
+                                    confirmations=rf_signal.confirmations.copy(),
+                                    confidence=rf_signal.confidence, tier="range_fade",
+                                    entry_time=current_time, entry_underlying=current_price,
+                                    entry_premium=rf_entry_premium, entry_iv=day_iv,
+                                    num_contracts=num_contracts, atr_at_entry=current_atr,
+                                    stop_price=rf_stop_price, target_price=rf_target_price,
+                                    best_favorable_underlying=current_price,
+                                )
 
-                                    rf_pos = SimScalpPosition(
-                                        ticker=ticker, strike=rf_strike, right=rf_right,
-                                        direction=rf_signal.direction, expiry_date=day_date,
-                                        confirmations=rf_signal.confirmations.copy(),
-                                        confidence=rf_signal.confidence, tier="range_fade",
-                                        entry_time=current_time, entry_underlying=current_price,
-                                        entry_premium=rf_entry_premium, entry_iv=day_iv,
-                                        num_contracts=num_contracts, atr_at_entry=current_atr,
-                                        remaining_contracts=num_contracts, partial_exit_done=False,
-                                        stop_price=rf_stop_price, target_price=rf_target_price,
-                                        best_favorable_underlying=current_price,
-                                    )
+                                open_rf = rf_pos
+                                rf_trades_today += 1
+                                day_result.trades_entered += 1
+                                day_result._trades.append(rf_pos)
 
-                                    open_rf = rf_pos
-                                    rf_trades_today += 1
-                                    day_result.trades_entered += 1
-                                    day_result._trades.append(rf_pos)
-
-                                    if verbose:
-                                        print(f"    [{day_date}] 🔃 RF ENTER {rf_signal.direction} "
-                                              f"{ticker} {rf_strike}{rf_right} "
-                                              f"@ ${rf_entry_premium:.2f} x{num_contracts} "
-                                              f"({', '.join(rf_signal.confirmations)}) "
-                                              f"range=${range_size:.2f} "
-                                              f"stop=${rf_stop_price:.2f} target=${rf_target_price:.2f}")
+                                if verbose:
+                                    print(f"    [{day_date}] 🔃 RF ENTER {rf_signal.direction} "
+                                          f"{ticker} {rf_strike}{rf_right} "
+                                          f"@ ${rf_entry_premium:.2f} x{num_contracts} "
+                                          f"({', '.join(rf_signal.confirmations)}) "
+                                          f"range=${range_size:.2f} "
+                                          f"stop=${rf_stop_price:.2f} target=${rf_target_price:.2f}")
 
             # ── 3f. VWAP MEAN-REVERSION entry ────────────────────
             # Strategy F: fires only on DEAD_FLAT days.
@@ -1871,7 +1741,7 @@ class ScalpBacktester:
                             stop_dev = current_price * self.vm_cfg.stop_deviation_pct / 100
 
                             num_contracts = self._compute_position_size(
-                                self._intraday_balance, vm_entry_premium, current_atr,
+                                balance, vm_entry_premium, current_atr,
                                 daily_median_atr, "vwap_mr",
                             )
 
@@ -1896,7 +1766,6 @@ class ScalpBacktester:
                                     entry_time=current_time, entry_underlying=current_price,
                                     entry_premium=vm_entry_premium, entry_iv=day_iv,
                                     num_contracts=num_contracts, atr_at_entry=current_atr,
-                                    remaining_contracts=num_contracts, partial_exit_done=False,
                                     stop_price=vm_stop_price, target_price=vm_target_price,
                                     best_favorable_underlying=current_price,
                                 )
@@ -1927,29 +1796,26 @@ class ScalpBacktester:
                 )
                 slippage = self.exit_slippage_pct if pos_to_close.tier in ("scalp", "mean_rev", "orb", "range_fade", "vwap_mr") else 0.05
                 exit_premium = max(0, exit_premium * (1 - slippage))
-                active_contracts = pos_to_close.remaining_contracts or pos_to_close.num_contracts
-                commission = self.commission_per_contract * active_contracts * 2
+                commission = self.commission_per_contract * pos_to_close.num_contracts * 2
                 pnl_amount = (exit_premium - pos_to_close.entry_premium) * \
-                             active_contracts * 100 - commission
-                total_trade_pnl = pnl_amount + pos_to_close.partial_pnl
+                             pos_to_close.num_contracts * 100 - commission
 
                 pos_to_close.is_open = False
                 pos_to_close.exit_time = last_time
                 pos_to_close.exit_underlying = last_price
                 pos_to_close.exit_premium = exit_premium
                 pos_to_close.exit_reason = "EOD_CLOSE"
-                pos_to_close.total_pnl = round(total_trade_pnl, 2)
+                pos_to_close.total_pnl = round(pnl_amount, 2)
                 pos_to_close.hold_minutes = round(
                     (last_time - pos_to_close.entry_time).total_seconds() / 60, 1
                 )
 
                 daily_pnl += pnl_amount
-                self._intraday_balance += pnl_amount  # intra-day compounding
-                self._record_trade_pnl(total_trade_pnl, pos_to_close.atr_at_entry)
+                self._record_trade_pnl(pnl_amount, pos_to_close.atr_at_entry)
                 day_result.trades_closed += 1
-                if total_trade_pnl > 5:
+                if pnl_amount > 5:
                     day_result.winning_trades += 1
-                elif total_trade_pnl < -5:
+                elif pnl_amount < -5:
                     day_result.losing_trades += 1
 
         day_result.day_pnl = round(daily_pnl, 2)
@@ -1969,82 +1835,6 @@ class ScalpBacktester:
         """Check if in valid MEAN-REVERSION trading window (midday chop)."""
         cfg = self.mr_cfg
         return cfg.window_start <= minutes_since_open <= cfg.window_end
-
-    def _check_contract_feasibility(
-        self,
-        current_price: float,
-        strike: float,
-        right: str,
-        entry_premium: float,
-        day_iv: float,
-        T: float,
-        target_price: float,
-        stop_price: float,
-        tier: str,
-        minutes_since_open: int = 0,
-    ) -> bool:
-        """
-        Pre-trade option feasibility check.
-
-        Forward-prices the option at the target underlying price to verify
-        the premium can realistically achieve the profit target after
-        theta decay and slippage.
-
-        Returns True if feasible, False if the contract should be rejected.
-        """
-        cp_cfg = self.config.contract_picker
-        if not cp_cfg.enabled:
-            return True
-
-        # Per-tier enable check
-        tier_map = {
-            "scalp": cp_cfg.scalp_enabled,
-            "runner": cp_cfg.runner_enabled,
-            "orb": cp_cfg.orb_enabled,
-            "range_fade": cp_cfg.range_fade_enabled,
-        }
-        if not tier_map.get(tier, True):
-            return True
-
-        # Create picker with tier-appropriate thresholds
-        if tier == "runner":
-            picker = SmartContractPicker(
-                min_expected_rr=cp_cfg.min_expected_rr_runner,
-                min_net_gain_pct=cp_cfg.min_net_gain_pct_runner,
-                max_theta_pct=cp_cfg.max_theta_pct_runner,
-                entry_slippage_pct=self.entry_slippage_pct,
-                exit_slippage_pct=self.exit_slippage_pct,
-            )
-            # Runners are always late-day momentum plays — no additional
-            # theta tightening (their threshold already accounts for 0DTE reality)
-        else:
-            picker = SmartContractPicker(
-                min_expected_rr=cp_cfg.min_expected_rr,
-                min_net_gain_pct=cp_cfg.min_net_gain_pct,
-                max_theta_pct=cp_cfg.max_theta_pct,
-                entry_slippage_pct=self.entry_slippage_pct,
-                exit_slippage_pct=self.exit_slippage_pct,
-            )
-
-            # Late-day theta tightening for non-runner tiers
-            if minutes_since_open >= cp_cfg.late_cutoff_minutes:
-                picker.max_theta_pct = cp_cfg.max_theta_pct_late
-
-        expected_hold = SmartContractPicker.expected_hold_for_tier(tier, minutes_since_open)
-
-        result = picker.check_feasibility(
-            underlying_price=current_price,
-            strike=strike,
-            right=right,
-            iv=day_iv,
-            time_to_expiry=T,
-            target_price=target_price,
-            stop_price=stop_price,
-            expected_hold_minutes=expected_hold,
-            entry_premium=entry_premium,
-        )
-
-        return result.feasible
 
     @staticmethod
     def _round_strike(price: float, profile: TickerProfile) -> float:

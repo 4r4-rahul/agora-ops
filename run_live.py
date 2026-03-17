@@ -278,7 +278,10 @@ class LiveTradingLoop:
         print(f"  Account:      ${self.account_size:,.0f}")
         print(f"  Dry Run:      {'YES ⚠️' if self.dry_run else 'NO — LIVE ORDERS'}")
         print(f"  Confirmation: {'Required' if self.require_confirmation else 'Auto'}")
-        print(f"  Sizer:        Hybrid LW(10%) + VolTarget(15%)")
+        phase = "Phase 1: Risk Parity" if self.account_size < 25_000 else \
+                "Phase 2: LW 10%" if self.account_size < 50_000 else \
+                "Phase 3: LW 15%"
+        print(f"  Sizer:        {phase} + VolTarget(15%)")
         print("═" * 60)
 
         # 1. Load persisted state

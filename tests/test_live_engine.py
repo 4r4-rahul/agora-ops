@@ -275,7 +275,7 @@ class TestPositionSerialization:
 
 
 # ─────────────────────────────────────────────────────────────────
-# Test: Hybrid Position Sizer
+# Test: Risk Parity + Phased Capital Scaling Position Sizer
 # ─────────────────────────────────────────────────────────────────
 
 class TestPositionSizer:
@@ -289,10 +289,11 @@ class TestPositionSizer:
             strategy_tier="scalp",
         )
         assert n >= 1
-        # $10K × 10% = $1K risk / $200 = 5 contracts max from LW
-        # $10K × 15% = $1.5K / $200 = 7.5 → vol target
-        # $10K × 15% = $1.5K / $200 = 7.5 → absolute max
-        # min(5, 7, 7) = 5
+        # Phase 1 (Risk Parity): scalp weight=19.9%, risk=12.0%
+        # $10K × 12.0% = $1,196 / $200 = 5.98 → 5 contracts
+        # Vol target: $10K × 15% / 1.0 = $1,500 / $200 = 7.5
+        # Abs max: $10K × 15% = $1,500 / $200 = 7.5
+        # min(5.98, 7.5, 7.5) = 5
         assert n == 5
 
     def test_sizing_respects_balance_gate(self):
@@ -383,21 +384,54 @@ class TestPositionSizer:
         assert boosted >= base
 
     def test_lw_lookback_uses_history(self):
-        """With loss history, LW adjusts sizing."""
-        engine = make_engine(account_size=10_000.0)
+        """With loss history at Phase 2+, LW adjusts sizing."""
+        engine = make_engine(account_size=30_000.0)
         # Record some trade losses
         for _ in range(5):
             engine._trade_history.append(-300.0)
 
         n = engine._compute_position_size(
-            balance=10_000.0,
+            balance=30_000.0,
             entry_premium=2.00,
             current_atr=0.50,
             daily_median_atr=0.50,
             strategy_tier="scalp",
         )
-        # With $300 worst loss on record, LW should still produce contracts
+        # Phase 2 ($25K-$50K): LW 10%, worst_loss=$300
+        # LW mult = min($30K × 10% / $300, 3.0) = min(10.0, 3.0) = 3.0
+        # LW dollars = 3.0 × $300 = $900 → $900/$200 = 4.5 → 4
         assert n >= 1
+
+    def test_phase_transition(self):
+        """Verify sizing increases as balance crosses phase thresholds."""
+        engine = make_engine(account_size=10_000.0)
+        # Seed some trade history so LW uses real worst-loss, not default
+        for _ in range(5):
+            engine._trade_history.append(-200.0)
+        for _ in range(10):
+            engine._trade_history.append(400.0)
+
+        # Phase 1: Risk Parity at $10K
+        n1 = engine._compute_position_size(
+            balance=10_000.0, entry_premium=2.00,
+            current_atr=0.50, daily_median_atr=0.50,
+            strategy_tier="scalp",
+        )
+        # Phase 2: LW 10% at $30K
+        n2 = engine._compute_position_size(
+            balance=30_000.0, entry_premium=2.00,
+            current_atr=0.50, daily_median_atr=0.50,
+            strategy_tier="scalp",
+        )
+        # Phase 3: LW 15% at $60K
+        n3 = engine._compute_position_size(
+            balance=60_000.0, entry_premium=2.00,
+            current_atr=0.50, daily_median_atr=0.50,
+            strategy_tier="scalp",
+        )
+        # Higher balance → more contracts (with history, LW scales properly)
+        assert n3 > n1
+        assert n2 > n1
 
 
 # ─────────────────────────────────────────────────────────────────
