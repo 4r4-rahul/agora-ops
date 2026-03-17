@@ -176,6 +176,14 @@ class ScalpConfig:
     trailing_activation_atr: float = 3.5  # Start trailing after 3.5 × ATR
     trailing_distance_atr: float = 1.5   # Trail distance: 1.5 × ATR
 
+    # ── Break-Even Stop (disabled — net negative in sweep) ────────
+    # Once underlying moves breakeven_activation_pct% in our favor,
+    # move stop to entry price. Sweep result: clips winning trades that
+    # temporarily dip to entry, destroying WR at every threshold tested
+    # (0.03%→18.8% WR, 0.5%→57.5%, baseline 58.8%). Infrastructure
+    # kept for future experimentation but disabled by default.
+    breakeven_activation_pct: float = 0.0  # 0.0 = disabled
+
     # ── Time-Based Exits ────────────────────────────────────────
     time_stop_minutes: int = 30         # No move in 30 min → scratch exit
     time_stop_atr_mult: float = 0.5     # "No move" = within 0.5 × ATR of entry
@@ -304,6 +312,13 @@ class ORBConfig:
     stop_range_mult: float = 0.6         # Stop: 0.6× ORB range back inside (was 0.7, tighter saves theta)
     stop_close_confirm: bool = False     # Tested True: -$804 drag from theta decay on delayed exits
     max_hold_bars: int = 120             # Max bars to hold (2h, lets trend develop)
+
+    # ── Break-Even Stop (disabled — net negative in sweep) ────────
+    # Tested 9 thresholds (0.03%-1.0%): all net negative because winning
+    # trades temporarily dip to entry before running to target. The BE
+    # stop catches those and converts winners to breakeven. At best
+    # (0.5%), only -$698 drag; at worst (0.03%), -$48K drag.
+    breakeven_activation_pct: float = 0.0  # 0.0 = disabled
 
     # ── Trailing Stop (Phase 3: protect profits on runners) ────
     trailing_enabled: bool = True         # Enable trailing stop for ORB
@@ -546,6 +561,15 @@ class RangeFadeConfig:
     stop_close_confirm: bool = False   # Tested True: -$804 drag from theta decay on delayed exits
     max_hold_bars: int = 60            # Max 60 bars (1 hour) — reversion should be fast
 
+    # ── Trailing Stop (protect partial gains on fades) ──────────
+    # RF was the only strategy without trailing. Adding it converts
+    # TIME_STOP/MAX_HOLD exits (at bar_close, often losses) into
+    # TRAILING_STOP exits (at a profit level above entry).
+    trailing_enabled: bool = False      # Enable trailing for range fades (QQQ-only via for_qqq)
+    trailing_activation_pct: float = 0.60  # Activate after 60% of target distance
+    trailing_distance_pct: float = 0.50    # Trail 50% of favorable move behind peak
+    trailing_min_bars: int = 10            # Min bars before trailing activates
+
     # ── Risk Management ────────────────────────────────────────
     max_trades_per_day: int = 1        # 1 fade per day (2nd trade = revenge trading)
     max_risk_per_trade: float = 400.0  # Max dollar risk
@@ -764,6 +788,18 @@ class EngineConfig:
         # more of the range swing.  RF PnL: +$8,550 → +$10,904 (+28%)
         cfg.range_fade.stop_range_pct = 0.25   # 0.25 vs SPY's 0.12
         cfg.range_fade.target_range_pct = 0.60  # 0.60 vs SPY's 0.50
+        # QQQ RF trailing: protects partial gains on QQQ fades.
+        # Sweep: activation=0.60, distance=0.50 → QQQ WR +2.0pp (55.6→57.6%)
+        # with moderate PnL impact. Not enabled for SPY (no WR benefit).
+        cfg.range_fade.trailing_enabled = True
+        cfg.range_fade.trailing_activation_pct = 0.60
+        cfg.range_fade.trailing_distance_pct = 0.50
+        cfg.range_fade.trailing_min_bars = 10
+        # QQQ scalp trailing: lower activation to actually fire before target.
+        # Sweep: 2.0/0.75 → WR +3.3pp, PF 3.21 (>3.08 baseline). Protects
+        # partial gains on QQQ scalps which have lower WR than SPY.
+        cfg.scalp.trailing_activation_atr = 2.0   # 2.0 vs SPY 3.5
+        cfg.scalp.trailing_distance_atr = 0.75     # 0.75 vs SPY 1.5
         return cfg
 
     @staticmethod
