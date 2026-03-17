@@ -745,17 +745,25 @@ class EngineConfig:
         Calibrated via fine-grid sweep on 129 QQQ trading days:
           - ORB: wider target (1.75× vs 1.5×), tighter stop (0.45× vs 0.6×)
             captures QQQ's bigger trends without giving back on reversals
-          - RF: same params work (mean-reversion is regime-dependent, not beta-dependent)
+          - RF: wider stop (0.25 vs 0.12) + wider target (0.60 vs 0.50)
+            QQQ's per-bar noise is ~36% larger than SPY; default 0.12 stop
+            produces $2-3 stops on small-range days → 6 flash-stops (≤3 min).
+            Wider stop eliminates all flash stops, +$2.3K RF improvement.
           - Scalp: same params (momentum signals are % based, scale-invariant)
           - Trailing: SPY defaults (0.25/0.50/60) work well for QQQ too
 
-        Sweep results (stop=0.45, tgt=1.75, default trailing):
-          99 trades, PF=3.48, PnL=$+100,723, MaxDD=27.9%, WR=53.5%
+        Sweep results (129 days, $10K start):
+          ORB+RF tuned: 98t, PF=2.39, PnL=$+41,033, RF=43t/47%WR/$+10,904
         """
         cfg = EngineConfig()
         # ORB: QQQ trends harder → wider target, tighter stop
         cfg.orb.stop_range_mult = 0.45   # 0.45 vs SPY's 0.6 (tighter)
         cfg.orb.target_range_mult = 1.75 # 1.75 vs SPY's 1.5 (wider target)
+        # RF: QQQ needs wider stops — per-bar volatility is ~36% higher
+        # Sweep: stop 0.25 eliminates all flash-stops, target 0.60 captures
+        # more of the range swing.  RF PnL: +$8,550 → +$10,904 (+28%)
+        cfg.range_fade.stop_range_pct = 0.25   # 0.25 vs SPY's 0.12
+        cfg.range_fade.target_range_pct = 0.60  # 0.60 vs SPY's 0.50
         return cfg
 
     @staticmethod
