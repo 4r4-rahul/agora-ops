@@ -2,8 +2,11 @@
 """
 Multi-Ticker Portfolio Backtester
 ==================================
-Runs SPY/SPX + QQQ/SPX independently, then combines equity curves
+Runs SPY/SPX + QQQ independently, then combines equity curves
 and computes portfolio-level metrics (MaxDD, Sharpe, correlation).
+
+SPY uses spx_mode=True (scales ×10 to SPX index options).
+QQQ trades native QQQ ETF options (no scaling).
 
 Usage:
     python run_portfolio_backtest.py
@@ -437,7 +440,7 @@ def main():
                 data_file=os.path.join(data_dir, "QQQ_ibkr_1m_180d.csv"),
                 config=EngineConfig.for_qqq(),
                 account_size=args.account,
-                spx_mode=True,  # Use SPX-like pricing for QQQ
+                # QQQ ETF options — no price scaling, $1 strikes, normal premiums
             ))
         else:
             print(f"Unknown ticker: {ticker}. Supported: SPY, QQQ")

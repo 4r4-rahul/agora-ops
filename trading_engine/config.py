@@ -763,7 +763,12 @@ class EngineConfig:
     @staticmethod
     def for_qqq() -> "EngineConfig":
         """
-        QQQ-optimized configuration.
+        QQQ-optimized configuration for QQQ ETF options.
+
+        QQQ trades native ETF options ($1 strikes, ~$530 underlying),
+        NOT NDX index options. The live engine passes "QQQ" to IBKR,
+        so the backtest must match: no price scaling (spx_mode=False,
+        ndx_mode=False).
 
         QQQ has 1.36× the daily range of SPY (higher beta).
         Calibrated via fine-grid sweep on 129 QQQ trading days:
