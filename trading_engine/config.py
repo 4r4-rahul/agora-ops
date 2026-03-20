@@ -629,7 +629,7 @@ class VWAPMRConfig:
       - Result: 37 trades, 43.2% WR, R:R=2.1:1, +$4,180 VM P&L
     """
     # ── Master Enable ───────────────────────────────────────────
-    enabled: bool = False  # Disabled: standalone +$4K but -$981 total from compounding drag
+    enabled: bool = False  # Default off; enabled for QQQ in for_qqq() (+$5.6K PnL, MaxDD -0.8pp)
 
     # ── Regime Requirement ─────────────────────────────────────
     require_dead_flat: bool = True     # Only trade on DEAD_FLAT days
@@ -807,6 +807,13 @@ class EngineConfig:
         # partial gains on QQQ scalps which have lower WR than SPY.
         cfg.scalp.trailing_activation_atr = 2.0   # 2.0 vs SPY 3.5
         cfg.scalp.trailing_distance_atr = 0.75     # 0.75 vs SPY 1.5
+        # VWAP MR: QQQ-only — on DEAD_FLAT days, QQQ's tighter VWAP oscillations
+        # produce profitable mean-reversion entries. Official backtest (shared $10K):
+        #   +$5,580 PnL, MaxDD 19.1% (from 19.9%), +18 active trading days (99→117).
+        # VM is consistently negative on SPY → disabled for SPX.
+        # Default params (0.25% dev, 25 bar hold, 0.04% target) work best for QQQ;
+        # "quicker" params (15 bar, 0.06%) tested worse.
+        cfg.vwap_mr.enabled = True
         return cfg
 
     @staticmethod
@@ -816,10 +823,10 @@ class EngineConfig:
 
         Returns (spy_config, qqq_config) tuple.
 
-        Validated on 129 trading days (Sep 2025 – Mar 2026) in shared-balance
+        Validated on 128 trading days (Sep 2025 – Mar 2026) in shared-balance
         mode (single $10K account for both SPY + QQQ):
-          169 trades, PF=3.49, PnL=$+192,245, MaxDD=25.1%, Sharpe=5.38
-          ROI: 1,922% on $10K
+          188 trades, PF=3.41, PnL=$+186,721, MaxDD=19.1%, Sharpe=4.30
+          ROI: 1,867% on $10K, 117/128 active trading days
 
         Key findings from $10K optimization study:
           1. Position sizing ALREADY adapts to $10K via budget_pct gates:

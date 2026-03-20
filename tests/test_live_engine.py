@@ -699,6 +699,14 @@ class TestORB:
         # (will fail on signal evaluation, not momentum gate)
         assert engine.config.orb.only_when_no_momentum is False
 
+    def test_vwap_mr_enabled_for_qqq_only(self):
+        """VWAP MR should be enabled for QQQ but disabled for SPY (default)."""
+        from trading_engine.config import EngineConfig
+        spy_cfg = EngineConfig()
+        qqq_cfg = EngineConfig.for_qqq()
+        assert spy_cfg.vwap_mr.enabled is False, "VM should be disabled for SPY"
+        assert qqq_cfg.vwap_mr.enabled is True, "VM should be enabled for QQQ"
+
     def test_orb_blocked_without_data(self):
         engine = make_engine()
         engine._orb_data = None  # Not yet computed
