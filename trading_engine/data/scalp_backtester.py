@@ -749,10 +749,14 @@ class ScalpBacktester:
         open_orb: Optional[SimScalpPosition] = None
         orb_trades_today = 0
         momentum_signal_fired = False    # Track if momentum ever fires this day
+        orb_first_hit_target = False     # Quality gate: 1st ORB hit target → allow 2nd
+        orb_first_direction = None       # Direction of first ORB trade
 
         # ── Range-fade tier state ────────────────────────────────
         open_rf: Optional[SimScalpPosition] = None
         rf_trades_today = 0
+        rf_first_profitable = False      # Quality gate: 1st RF profitable → allow 2nd
+        rf_first_direction = None        # Direction of 1st RF (2nd must be opposite)
 
         # ── VWAP mean-reversion tier state ───────────────────────
         open_vm: Optional[SimScalpPosition] = None
@@ -1109,6 +1113,14 @@ class ScalpBacktester:
                     elif pnl_amount < -5:
                         day_result.losing_trades += 1
 
+                    # Track first ORB outcome for quality-gated re-entry
+                    if orb_trades_today == 1:
+                        orb_first_direction = open_orb.direction
+                        if exit_reason == "PROFIT_TARGET" or (
+                            exit_reason == "TRAILING_STOP" and pnl_amount > 0
+                        ):
+                            orb_first_hit_target = True
+
                     if verbose:
                         mult = exit_premium / open_orb.entry_premium \
                             if open_orb.entry_premium > 0 else 0
@@ -1158,6 +1170,12 @@ class ScalpBacktester:
                         day_result.winning_trades += 1
                     elif pnl_amount < -5:
                         day_result.losing_trades += 1
+
+                    # Track first RF outcome for quality-gated 2nd fade
+                    if rf_trades_today == 1:
+                        rf_first_direction = open_rf.direction
+                        if pnl_amount > 0:
+                            rf_first_profitable = True
 
                     if verbose:
                         mult = exit_premium / open_rf.entry_premium \
@@ -1533,18 +1551,23 @@ class ScalpBacktester:
                                               f"stop=${runner_stop_price:.2f}")
 
             # ── 3d. ORB BREAKOUT entry ───────────────────────────
-            # Strategy D: fires ONLY when momentum engine has no signal this day.
-            # Regime-filtered: skip DEAD_FLAT and CHOPPY days.
+            # Strategy D: can coexist with momentum. Regime-filtered.
+            # Quality gate: 2nd ORB requires 1st hit target (trend confirmed).
             if (orb_enabled and orb_regime_ok and orb_data and orb_data.get("valid", False)
                     and open_orb is None
                     and orb_trades_today < self.orb_cfg.max_trades_per_day):
 
-                # Defer to momentum: if momentum already fired OR has a signal, skip ORB
+                # Quality gate: 2nd+ entry requires 1st hit profit target
+                orb_quality_ok = (
+                    orb_trades_today == 0 or orb_first_hit_target
+                )
+
+                # Defer to momentum if configured
                 skip_for_momentum = (
                     self.orb_cfg.only_when_no_momentum and momentum_signal_fired
                 )
 
-                if not skip_for_momentum:
+                if not skip_for_momentum and orb_quality_ok:
                     orb_signal = self._orb_signal_engine.evaluate(day_bars, orb_data, i)
 
                     if orb_signal is not None:
@@ -1616,18 +1639,30 @@ class ScalpBacktester:
 
             # ── 3e. RANGE-FADE entry ─────────────────────────────
             # Strategy E: fires only on RANGE_BOUND / MIXED days.
-            # Fades price at range boundaries with confirmation.
+            # Quality gate: 2nd RF requires 1st profitable + opposite direction.
             if (rf_enabled and rf_regime_ok and rf_data and rf_data.get("valid", False)
                     and open_rf is None
                     and rf_trades_today < self.rf_cfg.max_trades_per_day):
+
+                # Quality gate: 2nd+ fade requires 1st profitable + opposite boundary
+                rf_quality_ok = (
+                    rf_trades_today == 0
+                    or (rf_first_profitable and rf_first_direction is not None)
+                )
 
                 # Defer to momentum
                 skip_for_momentum = (
                     self.rf_cfg.only_when_no_momentum and momentum_signal_fired
                 )
 
-                if not skip_for_momentum:
+                if not skip_for_momentum and rf_quality_ok:
                     rf_signal = self._rf_signal_engine.evaluate(day_bars, rf_data, i)
+
+                    if rf_signal is not None:
+                        # 2nd fade must be opposite direction (other boundary)
+                        if (rf_trades_today >= 1 and rf_first_direction is not None
+                                and rf_signal.direction == rf_first_direction):
+                            rf_signal = None  # Same direction = same boundary, skip
 
                     if rf_signal is not None:
                         day_result.signals_found += 1

@@ -334,7 +334,7 @@ class ORBConfig:
     eod_exit_minutes: int = 15           # Close before market close
 
     # ── Risk Management ─────────────────────────────────────────
-    max_trades_per_day: int = 1          # 1 ORB trade per day (breakout is binary)
+    max_trades_per_day: int = 2          # 2 ORB/day (2nd quality-gated: 1st must hit target)
     max_risk_per_trade: float = 500.0    # Max dollar risk ($500 SPX scale)
     max_risk_pct: float = 0.05           # 5% of account per trade
 
@@ -356,9 +356,11 @@ class ORBConfig:
     skip_mixed: bool = True              # Skip MIXED days (ambiguous regime)
 
     # ── Priority ────────────────────────────────────────────────
-    # ORB is Strategy B: only fires when momentum engine has no signal.
-    # This prevents conflicts and preserves momentum's superior edge.
-    only_when_no_momentum: bool = True   # Defer to momentum signals
+    # ORB can coexist with momentum scalps — different edges, different
+    # risk profiles. Momentum targets micro-breakouts (3-ATR), ORB targets
+    # macro-breakouts (30-min range). Both can be right on the same day.
+    # Sweep result: PF 3.45 → 3.63, PnL +$7.6K when both fire.
+    only_when_no_momentum: bool = False  # Allow ORB even when momentum fires
 
 
 @dataclass
@@ -571,7 +573,7 @@ class RangeFadeConfig:
     trailing_min_bars: int = 10            # Min bars before trailing activates
 
     # ── Risk Management ────────────────────────────────────────
-    max_trades_per_day: int = 1        # 1 fade per day (2nd trade = revenge trading)
+    max_trades_per_day: int = 1        # 1 fade/day (2nd fade tested: -$7K even quality-gated)
     max_risk_per_trade: float = 400.0  # Max dollar risk
     max_risk_pct: float = 0.04         # 4% of account per trade
 

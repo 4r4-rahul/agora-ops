@@ -677,7 +677,10 @@ class TestORB:
         assert result is None
 
     def test_orb_defers_to_momentum(self):
-        engine = make_engine()
+        """When only_when_no_momentum=True, ORB defers to momentum."""
+        cfg = EngineConfig()
+        cfg.orb.only_when_no_momentum = True  # Explicitly enable defer behavior
+        engine = make_engine(config=cfg)
         engine.momentum_fired_today = True
         engine._orb_data = {"valid": True}
         engine._orb_regime_ok = True
@@ -685,6 +688,16 @@ class TestORB:
             "SPY", make_bars(100), 50, 600.0, 0.50, 0.50, 60, False,
         )
         assert result is None
+
+    def test_orb_coexists_with_momentum_by_default(self):
+        """By default (only_when_no_momentum=False), ORB fires even when momentum has fired."""
+        engine = make_engine()
+        engine.momentum_fired_today = True
+        engine._orb_data = {"valid": True}
+        engine._orb_regime_ok = True
+        # Should NOT be blocked by momentum — coexist is the default
+        # (will fail on signal evaluation, not momentum gate)
+        assert engine.config.orb.only_when_no_momentum is False
 
     def test_orb_blocked_without_data(self):
         engine = make_engine()
