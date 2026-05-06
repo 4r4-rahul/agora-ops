@@ -2,8 +2,8 @@
 """
 Monte Carlo Stress Test
 ========================
-Shuffles the actual trade-sequence from the backtest 10,000 times
-to build confidence intervals on:
+Shuffles the actual trade-sequence from the walk-forward backtest 10,000
+times to build confidence intervals on:
   • Final PnL (5th / 50th / 95th percentile)
   • Maximum drawdown (dollars and %)
   • Ruin probability (balance hitting ≤ $0)
@@ -14,38 +14,37 @@ This answers: "Was our edge real, or did we just get lucky with the
  order of trades?"
 
 Usage:
-    python scripts/monte_carlo.py
-    python scripts/monte_carlo.py --sims 50000
+    python scripts/monte_carlo.py SPY --start 2023-01-01 --end 2024-12-31
+    python scripts/monte_carlo.py SPY QQQ --start 2024-01-01 --end 2024-12-31 --sims 50000
+    python scripts/monte_carlo.py SPY --start 2023-01-01 --end 2024-12-31 --balance 25000
 """
 
-import sys, os, argparse
+import asyncio
+import sys
+import os
+import argparse
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
-import pandas as pd
 from typing import List, Tuple
-from trading_engine.config import EngineConfig
-from trading_engine.data.scalp_backtester import ScalpBacktester
 
 
 # ─────────────────────────────────────────────────────────────────
-#  Run backtest once to get the actual trade PnL vector
+#  Run walk-forward backtest once to get the actual trade PnL vector
 # ─────────────────────────────────────────────────────────────────
 
-def get_trade_pnls() -> Tuple[List[float], float]:
-    """Run backtest and return (list_of_pnls, starting_balance)."""
-    df = pd.read_csv(
-        "data/intraday/SPY_ibkr_1m_180d.csv",
-        parse_dates=["timestamp"], index_col="timestamp",
-    )
-    df.index = pd.to_datetime(df.index, utc=True)
+async def _run_backtest(ticker: str, start: str, end: str, balance: float) -> Tuple[List[float], float]:
+    from trading_platform.backtester.engine import BacktestEngine
+    engine = BacktestEngine(ticker=ticker, start=start, end=end, starting_balance=balance)
+    result = await engine.run()
+    pnls = [t.pnl_dollars for t in result.closed_trades if t.pnl_dollars is not None]
+    return pnls, result.starting_balance
 
-    config = EngineConfig()
-    bt = ScalpBacktester(config=config, account_size=10_000.0, spx_mode=True)
-    r = bt.run(df, ticker="SPY", interval="1m", verbose=False)
 
-    pnls = [t.total_pnl for t in r.trades]
-    return pnls, r.starting_balance
+def get_trade_pnls(ticker: str, start: str, end: str, balance: float) -> Tuple[List[float], float]:
+    """Run walk-forward backtest and return (list_of_pnls, starting_balance)."""
+    return asyncio.run(_run_backtest(ticker, start, end, balance))
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -256,23 +255,31 @@ def report(pnls: List[float], starting_balance: float, results: dict,
 # ─────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Monte Carlo stress test")
-    parser.add_argument("--sims", type=int, default=10_000,
-                        help="Number of simulations (default: 10000)")
-    parser.add_argument("--seed", type=int, default=42,
-                        help="Random seed for reproducibility")
+    parser = argparse.ArgumentParser(description="Monte Carlo stress test for trading_platform walk-forward backtest")
+    parser.add_argument("tickers", nargs="+", help="Ticker symbols (e.g. SPY QQQ)")
+    parser.add_argument("--start", required=True, help="Backtest start date YYYY-MM-DD")
+    parser.add_argument("--end", required=True, help="Backtest end date YYYY-MM-DD")
+    parser.add_argument("--balance", type=float, default=10_000.0, help="Starting balance (default: 10000)")
+    parser.add_argument("--sims", type=int, default=10_000, help="Number of simulations (default: 10000)")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     args = parser.parse_args()
 
-    print("\n  Running backtest to extract trade sequence...")
-    pnls, starting_balance = get_trade_pnls()
-    print(f"  Got {len(pnls)} trades, total PnL: ${sum(pnls):+,.0f}")
+    all_pass = True
+    for ticker in [t.upper() for t in args.tickers]:
+        print(f"\n  Running walk-forward backtest for {ticker} ({args.start} → {args.end})...")
+        pnls, starting_balance = get_trade_pnls(ticker, args.start, args.end, args.balance)
+        if not pnls:
+            print(f"  No closed trades for {ticker} — skipping Monte Carlo.")
+            continue
+        print(f"  Got {len(pnls)} closed trades, total PnL: ${sum(pnls):+,.0f}")
 
-    print(f"  Running {args.sims:,} Monte Carlo simulations...")
-    results = simulate(np.array(pnls), starting_balance,
-                       n_sims=args.sims, seed=args.seed)
+        print(f"  Running {args.sims:,} Monte Carlo simulations...")
+        results = simulate(np.array(pnls), starting_balance,
+                           n_sims=args.sims, seed=args.seed)
+        ok = report(pnls, starting_balance, results, args.sims)
+        all_pass = all_pass and ok
 
-    ok = report(pnls, starting_balance, results, args.sims)
-    sys.exit(0 if ok else 1)
+    sys.exit(0 if all_pass else 1)
 
 
 if __name__ == "__main__":

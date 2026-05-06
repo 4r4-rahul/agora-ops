@@ -173,15 +173,74 @@ class ExecutionAgent(BaseAgent):
     async def _execute_live(
         self, session_id: str, rec: TradeRecommendation
     ) -> None:
+        from ..services.ibkr_client import place_combo_order
+
         self._log.warning(
-            "[LIVE] submitting order — %s %s @ $%.2f x%d",
+            "[LIVE] submitting IBKR order — %s %s @ $%.2f x%d",
             rec.ticker,
             rec.strategy.value,
             rec.entry_price,
             rec.contracts,
         )
-        # TODO: wire IBKR client here
-        raise NotImplementedError(
-            "Live execution not yet implemented. "
-            "Set trading_mode=paper or implement IBKR order routing."
+
+        legs = [
+            {
+                "option_type": leg.option_type,
+                "strike": leg.strike,
+                "expiration_dte": leg.expiration_dte,
+                "action": leg.action,
+                "quantity": leg.quantity,
+            }
+            for leg in rec.legs
+        ]
+
+        try:
+            fill_result = await place_combo_order(
+                ticker=rec.ticker,
+                legs=legs,
+                contracts=rec.contracts,
+                limit_price=rec.entry_price,
+                session_id=session_id,
+                host=self._settings.ibkr_host,
+                port=self._settings.ibkr_port,
+                client_id=self._settings.ibkr_client_id,
+            )
+        except Exception as exc:
+            self._log.error(
+                "[LIVE] IBKR order failed — %s: %s",
+                type(exc).__name__, exc,
+            )
+            await self.publish(
+                AgentTopic.EXECUTION_STATUS,
+                session_id=session_id,
+                payload={
+                    "status": "live_order_failed",
+                    "ticker": rec.ticker,
+                    "error": str(exc),
+                    "session_id": session_id,
+                },
+            )
+            raise
+
+        self._log.info(
+            "[LIVE] Order filled — orderId=%s status=%s avg_price=%s",
+            fill_result.get("order_id"),
+            fill_result.get("status"),
+            fill_result.get("avg_price"),
+        )
+
+        await self.publish(
+            AgentTopic.EXECUTION_STATUS,
+            session_id=session_id,
+            payload={
+                "status": "live_filled",
+                "ticker": rec.ticker,
+                "strategy": rec.strategy,
+                "entry_price": fill_result.get("avg_price") or rec.entry_price,
+                "contracts": rec.contracts,
+                "order_id": fill_result.get("order_id"),
+                "fill_status": fill_result.get("status"),
+                "mode": "live",
+                "session_id": session_id,
+            },
         )
