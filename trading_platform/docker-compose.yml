@@ -1,0 +1,29 @@
+version: "3.9"
+
+services:
+  platform:
+    build:
+      context: ..
+      dockerfile: trading_platform/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - TRADING_MODE=${TRADING_MODE:-paper}
+      - REQUIRE_HUMAN_APPROVAL=${REQUIRE_HUMAN_APPROVAL:-true}
+      - ACCOUNT_SIZE=${ACCOUNT_SIZE:-25000}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - journal_data:/data
+    env_file:
+      - .env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  journal_data:
