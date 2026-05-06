@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from uuid import UUID
 
 from trading_platform.core.models.market import Bar, MarketSnapshot, OptionContract, OptionsChain
@@ -20,12 +20,12 @@ from trading_platform.core.models.risk import Greeks, LiquidityCheck, PositionSi
 
 class TestBar:
     def test_valid_bar(self):
-        bar = Bar(ts=datetime.utcnow(), open=100, high=105, low=99, close=103, volume=1000)
+        bar = Bar(ts=datetime.now(timezone.utc).replace(tzinfo=None), open=100, high=105, low=99, close=103, volume=1000)
         assert bar.high >= bar.low
 
     def test_invalid_bar_high_lt_low(self):
         with pytest.raises(ValueError):
-            Bar(ts=datetime.utcnow(), open=100, high=95, low=99, close=103, volume=1000)
+            Bar(ts=datetime.now(timezone.utc).replace(tzinfo=None), open=100, high=95, low=99, close=103, volume=1000)
 
 
 class TestOptionContract:

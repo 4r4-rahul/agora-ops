@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import StrEnum
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 from typing import Any
 from uuid import uuid4
 
@@ -44,7 +47,7 @@ class AgentMessage(BaseModel):
     session_id: str
     sender: str
     payload: dict[str, Any]
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=_utcnow)
     correlation_id: str | None = None
 
     @classmethod
@@ -128,7 +131,7 @@ class AnalysisSession(BaseModel):
 
     session_id: str = Field(default_factory=lambda: str(uuid4()))
     ticker: str
-    requested_at: datetime = Field(default_factory=datetime.utcnow)
+    requested_at: datetime = Field(default_factory=_utcnow)
     completed_at: datetime | None = None
     status: str = "pending"
     error: str | None = None
@@ -145,9 +148,9 @@ class AnalysisSession(BaseModel):
 
     def mark_complete(self) -> None:
         self.status = "complete"
-        self.completed_at = datetime.utcnow()
+        self.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
     def mark_failed(self, error: str) -> None:
         self.status = "failed"
         self.error = error
-        self.completed_at = datetime.utcnow()
+        self.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)

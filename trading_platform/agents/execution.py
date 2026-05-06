@@ -170,6 +170,22 @@ class ExecutionAgent(BaseAgent):
             },
         )
 
+        from ..services.alerts import alert_trade_approved
+        await alert_trade_approved(
+            self._settings.alert_webhook_url,
+            ticker=rec.ticker,
+            strategy=rec.strategy.value,
+            direction=rec.direction.value,
+            entry_price=rec.entry_price,
+            stop_loss=rec.stop_loss,
+            profit_target=rec.profit_target,
+            max_loss_dollars=rec.max_loss_dollars,
+            reward_risk_ratio=rec.reward_risk_ratio,
+            contracts=rec.contracts,
+            thesis=rec.thesis,
+            session_id=session_id,
+        )
+
     async def _execute_live(
         self, session_id: str, rec: TradeRecommendation
     ) -> None:

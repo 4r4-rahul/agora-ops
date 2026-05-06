@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import patch
 
@@ -416,7 +416,7 @@ class BacktestEngine:
                     return 0.0
 
             bars.append(Bar(
-                ts=ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else datetime.utcnow(),
+                ts=ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else datetime.now(timezone.utc).replace(tzinfo=None),
                 open=_get("Open"),
                 high=_get("High"),
                 low=_get("Low"),

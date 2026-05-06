@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from enum import StrEnum
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -64,7 +67,7 @@ class TradeRecommendation(BaseModel):
     model_config = ConfigDict(validate_assignment=False)
 
     id: UUID = Field(default_factory=uuid4)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=_utcnow)
     session_id: str
 
     # ── What & Why ─────────────────────────────────────────────────
@@ -122,7 +125,7 @@ class TradeRecommendation(BaseModel):
     def approve(self, user: str = "human") -> None:
         self.final_decision = TradeDecision.APPROVED
         self.approved_by = user
-        self.approved_at = datetime.utcnow()
+        self.approved_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
     def reject(self, reasons: list[str]) -> None:
         self.final_decision = TradeDecision.REJECTED
@@ -145,7 +148,7 @@ class TradeJournalEntry(BaseModel):
     ticker: str
     strategy: OptionsStrategyType
     direction: Direction
-    opened_at: datetime = Field(default_factory=datetime.utcnow)
+    opened_at: datetime = Field(default_factory=_utcnow)
     closed_at: datetime | None = None
     status: TradeStatus = TradeStatus.OPEN
 
@@ -171,7 +174,7 @@ class TradeJournalEntry(BaseModel):
 
     def close(self, exit_price: float, reason: str) -> None:
         self.exit_price = exit_price
-        self.closed_at = datetime.utcnow()
+        self.closed_at = datetime.now(timezone.utc).replace(tzinfo=None)
         self.status = TradeStatus.CLOSED
         self.exit_reason = reason
         # P&L: positive for debit spread means price went up; negative = loss

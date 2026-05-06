@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from functools import partial
 from typing import Any
 
@@ -70,7 +70,7 @@ class YFinanceProvider:
 
         return MarketSnapshot(
             ticker=ticker.upper(),
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc).replace(tzinfo=None),
             price=price or (recent.close if recent else 0.0),
             volume=int(stock_info.get("regularMarketVolume", 0)),
             vwap=None,
@@ -203,7 +203,7 @@ class YFinanceProvider:
         return OptionsChain(
             ticker=ticker.upper(),
             underlying_price=underlying_price,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc).replace(tzinfo=None),
             expiration=exp_date,
             calls=calls,
             puts=puts,
@@ -254,7 +254,7 @@ class YFinanceProvider:
                         return 0.0
 
                 bars.append(Bar(
-                    ts=ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else datetime.utcnow(),
+                    ts=ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else datetime.now(timezone.utc).replace(tzinfo=None),
                     open=_get("Open"),
                     high=_get("High"),
                     low=_get("Low"),

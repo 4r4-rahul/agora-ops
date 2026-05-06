@@ -58,9 +58,22 @@ class TradeJournalAgent(BaseAgent):
                     thesis TEXT,
                     lessons_learned TEXT,
                     tags TEXT DEFAULT '[]',
-                    raw_recommendation TEXT DEFAULT '{}'
+                    raw_recommendation TEXT DEFAULT '{}',
+                    underlying_at_entry REAL,
+                    expiration_date TEXT,
+                    original_dte INTEGER
                 )
             """)
+            # Migrate existing DBs — ignore "duplicate column" errors
+            for col, typedef in [
+                ("underlying_at_entry", "REAL"),
+                ("expiration_date", "TEXT"),
+                ("original_dte", "INTEGER"),
+            ]:
+                try:
+                    conn.execute(f"ALTER TABLE trade_journal ADD COLUMN {col} {typedef}")
+                except Exception:
+                    pass
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_ticker ON trade_journal(ticker);
             """)
@@ -102,6 +115,26 @@ class TradeJournalAgent(BaseAgent):
 
         try:
             rec = TradeRecommendation.model_validate(session.final_recommendation)
+
+            # Underlying price at entry — from the market snapshot captured during analysis
+            underlying_at_entry: float | None = None
+            if session.market_snapshot:
+                snap = session.market_snapshot
+                underlying_at_entry = snap.get("price") if isinstance(snap, dict) else getattr(snap, "price", None)
+
+            # DTE at entry — from the first leg of the recommendation
+            original_dte: int | None = None
+            rec_dict = rec.model_dump(mode="json")
+            legs = rec_dict.get("legs", [])
+            if legs:
+                first_leg = legs[0]
+                # SpreadLeg has expiration (date), compute DTE from today
+                exp = first_leg.get("expiration")
+                if exp:
+                    from datetime import date as _date
+                    exp_date = _date.fromisoformat(str(exp))
+                    original_dte = max(0, (exp_date - _date.today()).days)
+
             entry = TradeJournalEntry(
                 recommendation_id=rec.id,
                 session_id=session_id,
@@ -116,19 +149,31 @@ class TradeJournalAgent(BaseAgent):
                 stop_loss=rec.stop_loss,
                 profit_target=rec.profit_target,
                 thesis=rec.thesis,
-                raw_recommendation=rec.model_dump(mode="json"),
+                raw_recommendation=rec_dict,
             )
-            self._insert(entry)
+            self._insert(
+                entry,
+                underlying_at_entry=underlying_at_entry,
+                expiration_date=rec.expiration.isoformat() if rec.expiration else None,
+                original_dte=original_dte,
+            )
             self._log.info("[%s] journaled trade %s", session_id, entry.id)
         except Exception as exc:
             self._log.error("[%s] journal insert failed: %s", session_id, exc)
 
-    def _insert(self, entry: TradeJournalEntry) -> None:
+    def _insert(
+        self,
+        entry: TradeJournalEntry,
+        underlying_at_entry: float | None = None,
+        expiration_date: str | None = None,
+        original_dte: int | None = None,
+    ) -> None:
         with sqlite3.connect(self._db_path) as conn:
             conn.execute(
                 """
                 INSERT INTO trade_journal VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?
                 )
                 """,
                 (
@@ -155,6 +200,9 @@ class TradeJournalAgent(BaseAgent):
                     entry.lessons_learned,
                     json.dumps(entry.tags),
                     json.dumps(entry.raw_recommendation),
+                    underlying_at_entry,
+                    expiration_date,
+                    original_dte,
                 ),
             )
             conn.commit()

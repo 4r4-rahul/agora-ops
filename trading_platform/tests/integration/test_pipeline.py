@@ -11,7 +11,7 @@ No API keys or network calls required.
 from __future__ import annotations
 
 import asyncio
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -189,7 +189,7 @@ def state_store() -> SharedStateStore:
 
 @pytest.fixture
 def spy_snapshot() -> MarketSnapshot:
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     bars = [
         Bar(
             ts=now - timedelta(days=i),

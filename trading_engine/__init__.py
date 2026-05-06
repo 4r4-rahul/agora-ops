@@ -2,20 +2,26 @@
 Institutional-Grade Options Trading Engine
 ==========================================
 
-12-module system for systematic theta income strategies:
+DEPRECATED — superseded by trading_platform/
+---------------------------------------------
+This module is the original scalp trading engine. It is preserved for
+historical reference and research scripts. New development should target
+trading_platform/ — the multi-agent options platform with full Claude
+integration, walk-forward backtester, and IBKR live execution.
 
-1.  0DTE SPX Credit Spread Scanner     (Tastytrade-style)
-2.  Market Regime Classifier            (Citadel-style)
-3.  Daily Theta Decay Calculator        (SIG-style)
-4.  Probability-Based Strike Selection  (Two Sigma-style)
-5.  Iron Condor Income Machine          (D.E. Shaw-style)
-6.  Pre-Market Edge Analyzer            (Jane Street-style)
-7.  Risk Management System              (Wolverine-style)
-8.  Volatility Skew Exploiter           (Akuna Capital-style)
-9.  SPY Weekly Income Calendar          (Peak6-style)
-10. Earnings Theta Crusher              (IMC-style)
-11. End-of-Day Theta Scalper            (Optiver-style)
-12. Monthly Performance Dashboard       (Citadel-style)
+Migration path:
+  - Analysis pipeline:  trading_platform.agents.orchestrator
+  - Backtesting:        trading_platform.backtester.engine
+  - Live execution:     trading_platform.services.ibkr_client
+  - Paper monitoring:   trading_platform.agents.monitor
 """
+
+import warnings as _warnings
+_warnings.warn(
+    "trading_engine is deprecated and will be removed after paper trading "
+    "validation. Use trading_platform instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 __version__ = "1.0.0"
