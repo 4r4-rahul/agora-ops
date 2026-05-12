@@ -19,6 +19,7 @@ import asyncio
 import logging
 import uuid
 from datetime import datetime
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from agora.agents import (
@@ -162,7 +163,7 @@ class AgoraSession:
 
             from trading_platform.services.market_data.yfinance_provider import YFinanceProvider
             provider = YFinanceProvider()
-            spy_snap = provider.get_snapshot("SPY")
+            spy_snap = await provider.get_snapshot("SPY")
 
             regime_result = self._vol_classifier.classify(
                 iv_rank=spy_snap.iv_rank,
@@ -171,8 +172,8 @@ class AgoraSession:
                 hv10=None,
                 hv30=None,
                 spy_rsi=spy_snap.rsi_14,
-                atm_iv=spy_snap.atm_iv,
-                hv21=spy_snap.historical_vol_30d,
+                atm_iv=vix / 100,            # VIX is the ATM IV proxy for SPY
+                hv21=spy_snap.hist_vol_30,
             )
 
             cal = self._event_engine._cal
@@ -221,25 +222,27 @@ class AgoraSession:
         """Full signal stack for one ticker → trade recommendation → risk gate → order."""
         try:
             from trading_platform.services.market_data.yfinance_provider import YFinanceProvider
-            from trading_platform.services.options_flow import OptionsFlowService
+            from trading_platform.services.options_flow import get_gex
 
             provider = YFinanceProvider()
-            flow_svc = OptionsFlowService()
-
-            snap = provider.get_snapshot(ticker)
+            snap = await provider.get_snapshot(ticker)
             if not snap or not snap.price:
                 return
 
-            # IV premium signal
-            iv_signal = self._iv_screen.check(
-                ticker, snap.atm_iv, snap.historical_vol_30d
-            )
+            # IV premium signal — use VIX/100 as ATM IV proxy; hist_vol_30 as realized vol
+            atm_iv_proxy = (snap.vix / 100) if snap.vix else (snap.hist_vol_30 * 1.25 if snap.hist_vol_30 else None)
+            iv_signal = self._iv_screen.check(ticker, atm_iv_proxy, snap.hist_vol_30)
 
             # GEX signal
-            gex_raw = flow_svc.get_gex(ticker, snap.price)
+            gex_raw = get_gex(ticker, snap.price)
 
             # Regime signal (reuse macro context regime)
             from agora.core.models import GexRegime, GexSignal, IvPremiumSignal, Regime, VolRegimeSignal
+            _STANCE_TO_REGIME = {
+                "risk_on":  Regime.LOW_VOL,
+                "neutral":  Regime.NORMAL,
+                "risk_off": Regime.HIGH_VOL,
+            }
             gex = GexSignal(
                 ticker=ticker,
                 gex_total=gex_raw.get("gex_total", 0.0),
@@ -263,7 +266,7 @@ class AgoraSession:
             event = None
             if event_signals:
                 es = event_signals[0]
-                from ..core.models import EventSignal
+                from agora.core.models import EventSignal
                 event = EventSignal(
                     event_type=es["event_type"],
                     ticker=ticker,
@@ -297,7 +300,10 @@ class AgoraSession:
             # Score conviction
             from agora.core.models import VolRegimeSignal as VRS
             regime_signal = VRS(
-                regime=Regime(self._macro_context.macro_stance if self._macro_context else "normal"),
+                regime=_STANCE_TO_REGIME.get(
+                    self._macro_context.macro_stance if self._macro_context else "neutral",
+                    Regime.NORMAL,
+                ),
                 confidence=self._macro_context.confidence if self._macro_context else 0.5,
                 iv_rank=snap.iv_rank,
                 vix=None,

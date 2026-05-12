@@ -506,7 +506,19 @@ class AgoraBacktestEngine:
                 conviction.size_multiplier = 1.0
 
         else:
-            # Directional trades require resolver consensus
+            # Directional trades: require trend + IV-rank confirmation before resolver
+            sma20 = self._get_sma(history_bars, today, 20)
+            if sma20 is not None:
+                trending_up   = spot > sma20 * 1.005   # price >0.5% above SMA20
+                trending_down = spot < sma20 * 0.995   # price >0.5% below SMA20
+                bullish_ok  = macro_dir == "bullish" and trending_up   and rsi > 52
+                bearish_ok  = macro_dir == "bearish" and trending_down and rsi < 48
+                if not (bullish_ok or bearish_ok):
+                    return None
+            # IV rank floor: debit spreads need cheap-enough options relative to history
+            if iv_rank < 30:
+                return None
+
             resolution = self._resolver.resolve(
                 macro=SignalInput(source="macro", direction=macro_dir, confidence=0.55),
                 microstructure=SignalInput(source="microstructure", direction=micro_dir, confidence=0.60),
@@ -822,6 +834,13 @@ class AgoraBacktestEngine:
         if max_hv <= min_hv:
             return 50.0
         return min(100.0, max(0.0, (current_hv - min_hv) / (max_hv - min_hv) * 100))
+
+    def _get_sma(self, bars: list[dict], today: date, window: int) -> float | None:
+        """Simple moving average of the last `window` closes strictly before today."""
+        past = [b["close"] for b in bars if b["date"] < today]
+        if len(past) < window:
+            return None
+        return sum(past[-window:]) / window
 
     def _get_rsi(self, bars: list[dict], today: date, period: int = 14) -> float | None:
         """RSI from past closes."""

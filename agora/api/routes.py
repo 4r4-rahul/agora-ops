@@ -174,8 +174,11 @@ async def get_attribution(days: int = 30) -> JSONResponse:
     session = get_session()
     attributor = session._attributor
 
+    from datetime import date, timedelta
+    end_dt = date.today()
+    start_dt = end_dt - timedelta(days=days)
     return JSONResponse({
-        "attribution":      attributor.attribution_report(days=days),
+        "attribution":      attributor.attribution_report(start_date=start_dt, end_date=end_dt),
         "slippage":         attributor.slippage_report(days=days),
         "regime_accuracy":  attributor.regime_accuracy_report(),
         "days":             days,
