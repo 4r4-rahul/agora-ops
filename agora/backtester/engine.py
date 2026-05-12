@@ -296,6 +296,7 @@ class AgoraBacktestEngine:
                     iv_day_counts=iv_day_counts,
                     balance=balance,
                     macro_data=macro_data,
+                    open_positions=open_positions,
                 )
 
                 if trade:
@@ -332,6 +333,7 @@ class AgoraBacktestEngine:
         iv_day_counts: dict[str, int],
         balance: float,
         macro_data: dict[str, list[dict]] | None = None,
+        open_positions: list[AgoraBacktestTrade] | None = None,
     ) -> AgoraBacktestTrade | None:
         """Run the full signal stack for one ticker on one day."""
         macro_data = macro_data or {}
@@ -565,6 +567,18 @@ class AgoraBacktestEngine:
             entry_credit = entry_credit * (1 - slip)
         else:                  # debit spread: pay more
             entry_credit = entry_credit * (1 + slip)
+
+        # Level 3: portfolio delta limit — block trades that push net delta past budget
+        trade_delta = self._spread_delta(strategy, contracts)
+        portfolio_delta = self._portfolio_delta(open_positions or [])
+        max_delta = self.starting_balance / 10_000 * 0.30   # e.g. 0.75 for $25K
+        if abs(portfolio_delta + trade_delta) > max_delta:
+            logger.debug(
+                "DELTA BLOCKED: %s %s | port_delta=%.2f trade_delta=%.2f limit=%.2f",
+                ticker, strategy, portfolio_delta, trade_delta, max_delta,
+            )
+            return None
+
         n_legs = 4 if strategy == "iron_condor" else 2
         commission = n_legs * contracts * _COMMISSION_PER_LEG * 2
 
@@ -841,6 +855,33 @@ class AgoraBacktestEngine:
         if len(past) < window:
             return None
         return sum(past[-window:]) / window
+
+    # ── Portfolio Greeks helpers ────────────────────────────────────
+
+    _STRATEGY_DELTA: dict[str, float] = {
+        # Net delta per contract (positive = bullish, negative = bearish)
+        # bull_put_spread: short 0.20-delta put + long 0.10-delta put
+        "bull_put_spread":   +0.10,
+        # bear_call_spread: short 0.20-delta call + long 0.10-delta call
+        "bear_call_spread":  -0.10,
+        # iron_condor: symmetric → near zero (small negative from put skew)
+        "iron_condor":        -0.02,
+        # bull_call_spread: long 0.35-delta call + short 0.20-delta call
+        "bull_call_spread":  +0.15,
+        # bear_put_spread: long 0.35-delta put + short 0.20-delta put
+        "bear_put_spread":   -0.15,
+    }
+
+    def _spread_delta(self, strategy: str, contracts: int) -> float:
+        """Net portfolio delta added by one spread × contracts."""
+        return self._STRATEGY_DELTA.get(strategy, 0.0) * contracts
+
+    def _portfolio_delta(self, positions: list) -> float:
+        """Sum net delta across all open positions using analytical approximation."""
+        return sum(
+            self._STRATEGY_DELTA.get(p.strategy, 0.0) * p.contracts
+            for p in positions
+        )
 
     def _get_rsi(self, bars: list[dict], today: date, period: int = 14) -> float | None:
         """RSI from past closes."""
