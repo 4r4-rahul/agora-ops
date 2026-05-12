@@ -8,9 +8,12 @@ All yfinance calls are offloaded to a thread pool (yfinance is synchronous).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import threading
 from datetime import date, datetime, timedelta, timezone
 from functools import partial
+from pathlib import Path
 from typing import Any
 
 import yfinance as yf
@@ -18,6 +21,10 @@ import yfinance as yf
 from ...core.models.market import Bar, MarketSnapshot, OptionContract, OptionsChain
 
 logger = logging.getLogger(__name__)
+
+# yfinance options chain endpoint is not thread-safe (shared crumb/cookie state).
+# Serialise all calls that touch tk.options / tk.option_chain() behind this lock.
+_YF_OPTIONS_LOCK = threading.Lock()
 
 
 class YFinanceProvider:
@@ -47,7 +54,7 @@ class YFinanceProvider:
                 self._run(self._fetch_info, ticker),
                 self._run(self._fetch_history, ticker),
                 self._run(self._fetch_vix),
-                self._run(self._estimate_iv_rank, ticker),
+                self._run(self._get_real_iv_rank, ticker),
             )
         except Exception as exc:
             logger.error("yfinance snapshot failed for %s: %s", ticker, exc)
@@ -58,6 +65,16 @@ class YFinanceProvider:
 
         price = stock_info.get("currentPrice") or stock_info.get("regularMarketPrice", 0.0)
         prev_close = stock_info.get("previousClose") or stock_info.get("regularMarketPreviousClose", 0.0)
+
+        # Fall back to most recent bar close if info API returns nothing
+        if not price and bars_daily:
+            price = bars_daily[-1].close
+
+        if not price or price <= 0:
+            raise ValueError(
+                f"yfinance returned no price data for {ticker} — "
+                "possible rate-limit or market closure"
+            )
 
         # Compute indicators from history
         closes = [b.close for b in bars_daily]
@@ -125,48 +142,102 @@ class YFinanceProvider:
         except Exception:
             return None
 
-    def _estimate_iv_rank(self, ticker: str) -> dict[str, float | None]:
+    # IV cache directory — shared across all provider instances
+    _IV_CACHE_DIR = Path(".agora/iv_cache")
+
+    def _get_real_iv_rank(self, ticker: str) -> dict[str, float | None]:
         """
-        Estimate IV rank from HV30 as a proxy.
-        Production: use IBKR or Polygon for real IV history.
+        Compute IV rank from REAL ATM implied volatility from the options chain.
+
+        Strategy:
+          1. Pull ATM IV from the nearest ≥7 DTE expiry (real market-implied vol).
+          2. Cache each day's ATM IV in .agora/iv_cache/{ticker}.json.
+          3. IV rank = (current_atm_iv - 52w_min) / (52w_max - 52w_min) * 100.
+          4. Requires ≥20 cached data points; returns None until then rather than
+             returning a silently wrong HV proxy.
         """
         try:
-            hist = yf.download(ticker, period="1y", progress=False, auto_adjust=True)
-            if hasattr(hist, "columns") and hasattr(hist.columns, "nlevels") and hist.columns.nlevels > 1:
-                hist.columns = hist.columns.get_level_values(0)
-            if hist.empty:
-                return {"rank": None, "percentile": None}
+            with _YF_OPTIONS_LOCK:
+                tk = yf.Ticker(ticker)
+                if not tk.options:
+                    return {"rank": None, "percentile": None, "atm_iv": None}
 
-            closes = hist["Close"].values.tolist()
-            if len(closes) < 30:
-                return {"rank": None, "percentile": None}
+                # Pick nearest expiry with ≥7 DTE so we get meaningful IV
+                today = date.today()
+                expiry = None
+                for exp in tk.options:
+                    if (date.fromisoformat(exp) - today).days >= 7:
+                        expiry = exp
+                        break
+                if not expiry:
+                    expiry = tk.options[0]
 
-            # Rolling 30-day HV as IV proxy
-            hvs = []
-            for i in range(30, len(closes)):
-                window = closes[i - 30 : i]
-                hv = self._hv_from_prices(window)
-                if hv:
-                    hvs.append(hv)
+                chain = tk.option_chain(expiry)
+                calls, puts = chain.calls, chain.puts
+                if calls.empty or puts.empty:
+                    return {"rank": None, "percentile": None, "atm_iv": None}
 
-            if not hvs:
-                return {"rank": None, "percentile": None}
+                # Current underlying price (use fast_info to avoid extra API hit)
+                spot = float(tk.fast_info.get("lastPrice") or calls["strike"].median())
 
-            current_hv = hvs[-1]
-            min_hv, max_hv = min(hvs), max(hvs)
+                # ATM call IV — strike closest to spot
+                atm_row = calls.iloc[(calls["strike"] - spot).abs().argsort()[:1]]
+                atm_iv = float(atm_row["impliedVolatility"].iloc[0]) if not atm_row.empty else None
 
+                # Fall back to put ATM if call IV missing/zero
+                if not atm_iv or atm_iv <= 0:
+                    atm_row_p = puts.iloc[(puts["strike"] - spot).abs().argsort()[:1]]
+                    atm_iv = float(atm_row_p["impliedVolatility"].iloc[0]) if not atm_row_p.empty else None
+
+            if not atm_iv or atm_iv <= 0:
+                return {"rank": None, "percentile": None, "atm_iv": None}
+
+            # Load / update daily IV cache
+            self._IV_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            cache_path = self._IV_CACHE_DIR / f"{ticker.upper()}.json"
+            cache: dict = {"dates": [], "atm_ivs": []}
+            if cache_path.exists():
+                try:
+                    cache = json.loads(cache_path.read_text())
+                except Exception:
+                    cache = {"dates": [], "atm_ivs": []}
+
+            today_str = today.isoformat()
+            # Append today's reading (one per calendar day)
+            if not cache["dates"] or cache["dates"][-1] != today_str:
+                cache["dates"].append(today_str)
+                cache["atm_ivs"].append(round(atm_iv, 6))
+
+            # Keep rolling 252 trading days (≈1 year)
+            cache["dates"]  = cache["dates"][-252:]
+            cache["atm_ivs"] = cache["atm_ivs"][-252:]
+            cache_path.write_text(json.dumps(cache))
+
+            ivs = cache["atm_ivs"]
+            if len(ivs) < 20:
+                # Not enough history yet — return real ATM IV but no rank
+                logger.debug(
+                    "IV cache for %s has only %d days — rank unavailable", ticker, len(ivs)
+                )
+                return {"rank": None, "percentile": None, "atm_iv": round(atm_iv * 100, 1)}
+
+            min_iv, max_iv = min(ivs), max(ivs)
             iv_rank = (
-                (current_hv - min_hv) / (max_hv - min_hv) * 100
-                if max_hv > min_hv
-                else 50.0
+                (atm_iv - min_iv) / (max_iv - min_iv) * 100
+                if max_iv > min_iv else 50.0
             )
-            below = sum(1 for h in hvs if h <= current_hv)
-            iv_percentile = below / len(hvs) * 100
+            below = sum(1 for v in ivs if v <= atm_iv)
+            iv_percentile = below / len(ivs) * 100
 
-            return {"rank": round(iv_rank, 1), "percentile": round(iv_percentile, 1)}
+            return {
+                "rank":       round(iv_rank, 1),
+                "percentile": round(iv_percentile, 1),
+                "atm_iv":     round(atm_iv * 100, 1),  # in % terms
+            }
+
         except Exception as exc:
-            logger.debug("IV rank estimation failed for %s: %s", ticker, exc)
-            return {"rank": None, "percentile": None}
+            logger.debug("Real IV rank failed for %s: %s", ticker, exc)
+            return {"rank": None, "percentile": None, "atm_iv": None}
 
     def _fetch_chain(
         self, ticker: str, expiration: date | None
@@ -253,12 +324,15 @@ class YFinanceProvider:
                     except Exception:
                         return 0.0
 
+                close = _get("Close")
+                if not close or close <= 0:
+                    continue
                 bars.append(Bar(
                     ts=ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else datetime.now(timezone.utc).replace(tzinfo=None),
                     open=_get("Open"),
                     high=_get("High"),
                     low=_get("Low"),
-                    close=_get("Close"),
+                    close=close,
                     volume=int(_get("Volume")),
                 ))
             except Exception:

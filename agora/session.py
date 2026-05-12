@@ -215,8 +215,12 @@ class AgoraSession:
     async def _universe_scan(self) -> None:
         """Score each ETF in universe and place high-conviction trades."""
         logger.info("Universe scan starting for %d tickers", len(self._settings.etf_universe))
-        tasks = [self._evaluate_ticker(ticker) for ticker in self._settings.etf_universe]
-        await asyncio.gather(*tasks, return_exceptions=True)
+        # Sequential — yfinance options chain is not thread-safe under concurrent calls
+        for ticker in self._settings.etf_universe:
+            try:
+                await self._evaluate_ticker(ticker)
+            except Exception as exc:
+                logger.error("Evaluate ticker %s failed: %s", ticker, exc)
 
     async def _evaluate_ticker(self, ticker: str) -> None:
         """Full signal stack for one ticker → trade recommendation → risk gate → order."""
@@ -337,18 +341,22 @@ class AgoraSession:
             conviction.gate = resolution["gate"]
 
             # Get options chain and build recommendation
+            # Serialised behind the same lock used by YFinanceProvider to avoid crumb corruption
+            import threading
             import yfinance as yf
-            tk = yf.Ticker(ticker)
-            if not tk.options:
-                return
-
+            from trading_platform.services.market_data.yfinance_provider import _YF_OPTIONS_LOCK
             chain_dict = {}
-            for exp in tk.options[:8]:   # check up to 8 expiries
-                try:
-                    c = tk.option_chain(exp)
-                    chain_dict[exp] = {"calls": c.calls, "puts": c.puts}
-                except Exception:
-                    continue
+            with _YF_OPTIONS_LOCK:
+                tk = yf.Ticker(ticker)
+                exps = tk.options or []
+                for exp in exps[:8]:   # check up to 8 expiries
+                    try:
+                        c = tk.option_chain(exp)
+                        chain_dict[exp] = {"calls": c.calls, "puts": c.puts}
+                    except Exception:
+                        continue
+            if not chain_dict:
+                return
 
             recommendation = self._strategy.build_recommendation(
                 conviction=conviction,
@@ -391,16 +399,18 @@ class AgoraSession:
         # Get options chain
         try:
             import yfinance as yf
-            tk = yf.Ticker(catalyst.ticker)
-            if not tk.options:
-                return
+            from trading_platform.services.market_data.yfinance_provider import _YF_OPTIONS_LOCK
             chain_dict = {}
-            for exp in tk.options[:4]:
-                try:
-                    c = tk.option_chain(exp)
-                    chain_dict[exp] = {"calls": c.calls, "puts": c.puts}
-                except Exception:
-                    continue
+            with _YF_OPTIONS_LOCK:
+                tk = yf.Ticker(catalyst.ticker)
+                for exp in (tk.options or [])[:4]:
+                    try:
+                        c = tk.option_chain(exp)
+                        chain_dict[exp] = {"calls": c.calls, "puts": c.puts}
+                    except Exception:
+                        continue
+            if not chain_dict:
+                return
 
             spot_info = tk.info or {}
             spot = float(spot_info.get("regularMarketPrice") or spot_info.get("currentPrice") or 0)
