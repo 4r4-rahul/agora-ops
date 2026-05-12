@@ -1,0 +1,155 @@
+"""
+AGORA configuration — extends the shared trading_platform Settings.
+All AGORA-specific settings live here; shared settings are imported directly.
+"""
+
+from __future__ import annotations
+
+from functools import lru_cache
+from pathlib import Path
+from typing import Literal
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class AgoraSettings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    # ── Anthropic ──────────────────────────────────────────────────
+    anthropic_api_key: str = Field(..., description="Anthropic API key")
+    claude_model: str = Field(
+        default="claude-opus-4-7",
+        description="Primary model — Opus 4.7 for Macro Synthesizer, Resolver, 8-K parser",
+    )
+    claude_fast_model: str = Field(
+        default="claude-haiku-4-5-20251001",
+        description="Fast model for high-frequency classification tasks",
+    )
+
+    # ── Trading ────────────────────────────────────────────────────
+    trading_mode: Literal["paper", "live"] = Field(default="paper")
+    account_size: float = Field(default=25_000.0, ge=1_000.0)
+    max_position_size_pct: float = Field(default=0.02, ge=0.005, le=0.05)
+    max_open_positions: int = Field(default=10, ge=1, le=20)
+    daily_loss_limit_pct: float = Field(default=0.02, ge=0.005, le=0.10)
+    weekly_loss_limit_pct: float = Field(default=0.06, ge=0.01, le=0.20)
+    min_reward_risk_ratio: float = Field(default=1.5, ge=1.0)
+
+    # ── IBKR ───────────────────────────────────────────────────────
+    ibkr_host: str = Field(default="127.0.0.1")
+    ibkr_port: int = Field(default=7497)
+    ibkr_client_id: int = Field(default=10)  # separate from APEX (client 1)
+
+    # ── Strategy parameters ────────────────────────────────────────
+    target_dte_entry: int = Field(default=45, description="Target DTE at entry")
+    target_dte_close: int = Field(default=21, description="Close position at this DTE")
+    profit_target_pct: float = Field(default=0.50, description="Close at 50% of max profit")
+    short_delta_target: float = Field(default=0.20, description="20-delta short strike for credit spreads")
+    long_delta_target: float = Field(default=0.35, description="35-delta long strike for debit spreads")
+
+    # ── Signal thresholds ──────────────────────────────────────────
+    iv_premium_threshold: float = Field(
+        default=0.25,
+        description="IV_implied_vs_realized ratio threshold to sell premium",
+    )
+    iv_premium_min_days: int = Field(
+        default=15,
+        description="Minimum consecutive days IV premium must hold before signal fires",
+    )
+    gex_negative_threshold: float = Field(
+        default=-1_000_000.0,
+        description="GEX below this is considered 'negative' (trending/amplifying regime)",
+    )
+    min_conviction_score: float = Field(default=60.0, description="Minimum score to enter any trade")
+    high_conviction_score: float = Field(default=80.0, description="Score for 1.5x size multiplier")
+
+    # ── Universe ───────────────────────────────────────────────────
+    etf_universe: list[str] = Field(
+        default=["SPY", "QQQ", "IWM", "GLD", "TLT"],
+        description="ETFs for vol premium credit spreads and event plays",
+    )
+    single_name_min_market_cap: float = Field(
+        default=300_000_000.0,
+        description="Minimum market cap for single-name catalyst plays",
+    )
+    single_name_max_market_cap: float = Field(
+        default=10_000_000_000.0,
+        description="Max market cap — above this whales compete, edge shrinks",
+    )
+
+    # ── Catalyst discovery ─────────────────────────────────────────
+    edgar_poll_seconds: int = Field(default=60, description="How often to poll EDGAR RSS")
+    max_new_tickers_per_day: int = Field(default=5, description="Cap on catalyst-discovered tickers/day")
+    min_contract_value_usd: float = Field(default=50_000_000.0)
+    min_funding_round_usd: float = Field(default=25_000_000.0)
+    catalyst_max_age_hours: float = Field(default=4.0)
+
+    # ── Risk limits ────────────────────────────────────────────────
+    max_portfolio_delta_per_10k: float = Field(default=0.30)
+    max_portfolio_vega_per_10k: float = Field(default=200.0)
+    max_daily_theta_pct: float = Field(default=0.005, description="Max theta decay as % of account/day")
+    bid_ask_max_pct: float = Field(default=0.10)
+    min_open_interest: int = Field(default=500)
+
+    # ── Paths ──────────────────────────────────────────────────────
+    iv_cache_dir: Path = Field(default=Path(".agora/iv_cache"))
+    db_path: Path = Field(default=Path(".agora/agora.db"))
+    audit_log_path: Path = Field(default=Path(".agora/audit.log"))
+    shadow_book_path: Path = Field(default=Path(".agora/shadow_book.json"))
+
+    # ── Trade sizing ──────────────────────────────────────────────
+    risk_per_trade_dollars: float = Field(
+        default=500.0,
+        description="Max dollar risk per spread (1 contract) before size multiplier",
+    )
+    max_contracts_per_trade: int = Field(
+        default=10,
+        description="Hard cap on contracts per trade regardless of size_multiplier",
+    )
+    stop_loss_multiplier: float = Field(
+        default=2.0,
+        description="Exit when position P&L = -stop_loss_multiplier × initial credit/debit",
+    )
+
+    # ── Alerts ─────────────────────────────────────────────────────
+    alert_webhook_url: str | None = Field(default=None)
+    discord_bot_token: str | None = Field(default=None)
+    discord_approval_user_id: str | None = Field(default=None)
+
+    # ── Logging ───────────────────────────────────────────────────
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field(default="INFO")
+
+    @property
+    def max_risk_per_trade(self) -> float:
+        return self.account_size * self.max_position_size_pct
+
+    @property
+    def daily_loss_limit_dollars(self) -> float:
+        return self.account_size * self.daily_loss_limit_pct
+
+    @property
+    def weekly_loss_limit_dollars(self) -> float:
+        return self.account_size * self.weekly_loss_limit_pct
+
+    @property
+    def max_portfolio_delta(self) -> float:
+        return self.max_portfolio_delta_per_10k * (self.account_size / 10_000)
+
+    @property
+    def max_portfolio_vega(self) -> float:
+        return self.max_portfolio_vega_per_10k * (self.account_size / 10_000)
+
+    @property
+    def max_daily_theta_dollars(self) -> float:
+        return self.account_size * self.max_daily_theta_pct
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> AgoraSettings:
+    return AgoraSettings()
