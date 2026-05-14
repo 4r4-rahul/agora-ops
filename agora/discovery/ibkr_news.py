@@ -165,7 +165,7 @@ class IBKRNewsAgent:
             await ib.connectAsync(
                 self._settings.ibkr_host,
                 self._settings.ibkr_port,
-                clientId=4,
+                clientId=self._settings.ibkr_news_client_id,
                 timeout=10,
             )
             connected = True

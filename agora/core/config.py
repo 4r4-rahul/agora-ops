@@ -55,12 +55,22 @@ class AgoraSettings(BaseSettings):
     ibkr_host: str = Field(default="127.0.0.1")
     ibkr_port: int = Field(default=7497)
     ibkr_client_id: int = Field(default=10)  # separate from APEX (client 1)
+    ibkr_news_client_id: int = Field(
+        default=11,
+        description="clientId for IBKRNewsAgent (must differ from ibkr_client_id and startup_tws_sync_client_id).",
+    )
 
     # ── IBKR GTC / order lifecycle ─────────────────────────────────
     gtc_max_concurrent: int = Field(
         default=20,
         description="Alert if more than this many GTC orders are live (Error 201 risk). "
                     "Set this in TWS Precautionary Settings → Options → max combo orders.",
+    )
+    gtc_max_open_combo_orders: int = Field(
+        default=3,
+        description="Hard gate: do not submit a new combo bracket if this many positions already "
+                    "have active GTC profit-target orders. IBKR paper enforces a ~3-order limit. "
+                    "Increase once TWS Precautionary Settings → max combo orders is raised.",
     )
     gtc_fill_sync_interval_sec: int = Field(
         default=1800,

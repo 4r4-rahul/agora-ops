@@ -324,11 +324,20 @@ async def place_bracket_order(
             if status in ("Filled", "Submitted", "PreSubmitted"):
                 break
             if status in ("Cancelled", "ApiCancelled", "Inactive"):
-                tws_msgs = [e.message for e in entry_trade.log if e.message]
+                # Brief wait: ib_insync may update entry_trade.log slightly after
+                # orderStatus flips — errorCode=201 arrives in a separate callback.
+                await asyncio.sleep(0.25)
+                log_entries = list(entry_trade.log)
+                tws_msgs = [e.message for e in log_entries if e.message]
+                error_codes = [e.errorCode for e in log_entries if getattr(e, "errorCode", 0)]
                 reason = " | ".join(tws_msgs[-3:]) if tws_msgs else "no detail"
                 logger.warning("[%s] BAG combo rejected (%s): %s", session_id, status, reason)
-                if any("201" in m or "Riskless" in m for m in tws_msgs):
-                    logger.info("[%s] Falling back to individual leg orders", session_id)
+                is_201 = (
+                    201 in error_codes
+                    or any("201" in m or "Riskless" in m or "riskless" in m for m in tws_msgs)
+                )
+                if is_201:
+                    logger.info("[%s] Error 201 detected — falling back to individual leg orders", session_id)
                     return await _place_individual_legs(
                         ib=ib,
                         qualified_legs=qualified_legs,

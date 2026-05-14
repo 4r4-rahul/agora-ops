@@ -1609,7 +1609,17 @@ class AgoraSession:
         mid_price = abs(recommendation.entry_debit_credit / max(1, recommendation.contracts * 100))
         self._exec_quality.record_attempt(ticker, str(strategy_str), mid_price)
 
-        # 4b. Discord DM approval gate — required for high-conviction trades when bot is configured
+        # 4b. Open combo order gate — IBKR paper limits riskless-combination orders (Error 201)
+        #     Each open position has a live GTC profit-target (counts against the limit).
+        open_positions = self._position_mgr.get_open_positions()
+        if len(open_positions) >= self._settings.gtc_max_open_combo_orders:
+            logger.info(
+                "ENTRY BLOCKED by open-combo limit: %d/%d active GTC brackets | %s",
+                len(open_positions), self._settings.gtc_max_open_combo_orders, ticker,
+            )
+            return
+
+        # 4d. Discord DM approval gate — required for high-conviction trades when bot is configured
         if (
             self._settings.discord_bot_token
             and self._settings.discord_approval_user_id
