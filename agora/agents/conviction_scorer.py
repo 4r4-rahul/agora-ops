@@ -2,13 +2,14 @@
 ConvictionScorer — aggregates all signals into a 0–100 conviction score.
 
 Scoring breakdown (100 points total):
-  Vol Premium   /30  — IV premium screen (days above threshold + premium ratio)
-  GEX           /20  — gamma exposure regime alignment
-  Regime        /20  — vol regime + macro stance alignment
-  Event         /15  — FOMC drift, CPI condor, post-earnings skew
-  Macro         /5   — macro stance override (risk_on / risk_off)
-  Smart Money   /5   — insider cluster or 13D activist signal
-  Info Speed    /5   — catalyst freshness (filed < 2h ago = full points)
+  Vol Premium     /30  — IV premium screen (days above threshold + premium ratio)
+  GEX             /20  — gamma exposure regime alignment
+  Regime          /20  — vol regime + macro stance alignment
+  Event           /15  — FOMC drift, CPI condor, post-earnings skew
+  Macro           /5   — macro stance override (risk_on / risk_off)
+  Smart Money     /5   — insider cluster or 13D activist signal
+  Info Speed      /5   — catalyst freshness (filed < 2h ago = full points)
+  Market Interest /10  — 6-fingerprint market interest score (bonus, capped at 100 total)
 
 Gates:
   ≥ 70 → "high"       (1.5x size if resolver agrees)
@@ -34,6 +35,12 @@ from ..core.models import (
 )
 from .macro_synthesizer import MacroContext
 
+# Lazy import to avoid circular: MarketInterestScore is a dataclass, not a Pydantic model
+try:
+    from ..discovery.market_interest import MarketInterestScore
+except ImportError:
+    MarketInterestScore = None  # type: ignore[misc,assignment]
+
 logger = logging.getLogger(__name__)
 
 
@@ -42,6 +49,23 @@ class ConvictionScorer:
     Pure deterministic scoring — no LLM calls.
     All inputs are already computed by their respective signal generators.
     """
+
+    def __init__(self) -> None:
+        self._session_scores: list[float] = []
+        self._session_by_ticker: dict[str, float] = {}
+
+    def get_session_stats(self) -> dict:
+        """Return session scoring statistics for CTO briefing."""
+        if not self._session_scores:
+            return {"scored": 0, "avg_score": 0.0, "high_conviction": 0}
+        return {
+            "scored": len(self._session_scores),
+            "avg_score": round(sum(self._session_scores) / len(self._session_scores), 1),
+            "high_conviction": sum(1 for s in self._session_scores if s >= 70),
+            "top_tickers": sorted(
+                self._session_by_ticker.items(), key=lambda x: x[1], reverse=True
+            )[:5],
+        }
 
     def score(
         self,
@@ -54,6 +78,7 @@ class ConvictionScorer:
         event: EventSignal | None,
         catalyst: Catalyst | None,
         smart_money: Catalyst | None = None,
+        market_interest: "MarketInterestScore | None" = None,
     ) -> ConvictionScore:
 
         vol_score    = self._score_vol_premium(iv_premium)
@@ -63,10 +88,11 @@ class ConvictionScorer:
         macro_score  = self._score_macro(macro)
         sm_score     = self._score_smart_money(smart_money)
         info_score   = self._score_info_speed(catalyst)
+        mi_score     = self._score_market_interest(market_interest)
 
         total = (
             vol_score + gex_score + regime_score
-            + event_score + macro_score + sm_score + info_score
+            + event_score + macro_score + sm_score + info_score + mi_score
         )
         total = round(min(100.0, total), 2)
 
@@ -82,7 +108,7 @@ class ConvictionScorer:
             vol_score, gex_score, event_score, catalyst, smart_money
         )
 
-        return ConvictionScore(
+        result = ConvictionScore(
             session_id=session_id,
             ticker=ticker,
             total_score=total,
@@ -97,9 +123,17 @@ class ConvictionScorer:
             pillar=pillar,
             reasoning=self._build_reasoning(
                 vol_score, gex_score, regime_score, event_score,
-                macro_score, sm_score, info_score, gate,
+                macro_score, sm_score, info_score, gate, mi_score,
             ),
         )
+
+        # Session tracking
+        self._session_scores.append(total)
+        self._session_by_ticker[ticker] = total
+        if len(self._session_scores) > 500:
+            self._session_scores = self._session_scores[-500:]
+
+        return result
 
     # ── Component scorers ──────────────────────────────────────────
 
@@ -201,6 +235,27 @@ class ConvictionScorer:
         # Full 5 points at 0h, 0 points at 4h
         return round(max(0.0, 5.0 * (1.0 - age_hours / 4.0)), 2)
 
+    def _score_market_interest(self, mi: "MarketInterestScore | None") -> float:
+        """
+        Max 10 points — 6-fingerprint market interest score from MarketInterestAgent.
+
+        MarketInterestScore.score is 0–10. We map linearly:
+          score >= 7  → 10 pts (strong institutional attention)
+          score >= 4  →  5 pts (moderate interest)
+          score >= 2  →  2 pts (weak signal)
+          score < 2   →  0 pts
+        """
+        if not mi:
+            return 0.0
+        s = mi.score
+        if s >= 7.0:
+            return 10.0
+        if s >= 4.0:
+            return round(5.0 + (s - 4.0) / 3.0 * 5.0, 2)   # 5–10 linear between 4–7
+        if s >= 2.0:
+            return round((s - 2.0) / 2.0 * 5.0, 2)           # 0–5 linear between 2–4
+        return 0.0
+
     # ── Helpers ────────────────────────────────────────────────────
 
     def _dominant_pillar(
@@ -226,7 +281,7 @@ class ConvictionScorer:
     def _build_reasoning(
         self,
         vol: float, gex: float, regime: float, event: float,
-        macro: float, sm: float, info: float, gate: str,
+        macro: float, sm: float, info: float, gate: str, mi: float = 0.0,
     ) -> str:
         parts = []
         if vol >= 20:
@@ -241,5 +296,9 @@ class ConvictionScorer:
             parts.append(f"smart money signal ({sm:.0f}/5)")
         if info > 2:
             parts.append(f"fresh catalyst ({info:.0f}/5)")
-        total = vol + gex + regime + event + macro + sm + info
+        if mi >= 5:
+            parts.append(f"high market interest ({mi:.0f}/10)")
+        elif mi >= 2:
+            parts.append(f"market interest ({mi:.0f}/10)")
+        total = vol + gex + regime + event + macro + sm + info + mi
         return f"Gate: {gate} | Total: {total:.0f}/100 | " + (", ".join(parts) if parts else "no dominant signal")

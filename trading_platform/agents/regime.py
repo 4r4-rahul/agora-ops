@@ -58,6 +58,17 @@ class RegimeAgent(BaseAgent):
         session_id = message.session_id
         snapshot = MarketSnapshot.model_validate(message.payload)
 
+        if not snapshot.price or snapshot.price <= 0:
+            self._log.warning(
+                "[%s] %s has invalid price %.2f — skipping regime classification",
+                session_id, snapshot.ticker, snapshot.price or 0,
+            )
+            await self._publish_error(
+                session_id,
+                f"RegimeAgent: market data unavailable for {snapshot.ticker} (price=0)",
+            )
+            return
+
         self._log.info("[%s] classifying regime for %s", session_id, snapshot.ticker)
 
         user_message = self._build_prompt(snapshot)

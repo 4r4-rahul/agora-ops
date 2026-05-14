@@ -45,7 +45,8 @@ class BacktestTrade:
     # Exit (filled in when trade closes)
     date_closed: date | None = None
     exit_price: float | None = None
-    pnl_dollars: float | None = None
+    pnl_dollars: float | None = None          # net of commissions
+    commission_dollars: float = 0.0           # round-trip commission paid
     status: BacktestTradeStatus = BacktestTradeStatus.OPEN
 
     # Underlying price at entry — needed for cumulative P&L tracking
@@ -173,6 +174,10 @@ class BacktestResult:
         if std == 0:
             return 0.0
         return (mean_r / std) * math.sqrt(252)
+
+    @property
+    def total_commissions(self) -> float:
+        return sum(t.commission_dollars for t in self.closed_trades)
 
     @property
     def expectancy(self) -> float:

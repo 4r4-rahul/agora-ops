@@ -12,11 +12,34 @@ prices every 60s and calling close_trade() when the threshold is breached.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# ib_insync manages its own internal event loop and is not safe to call from
+# inside uvicorn's asyncio loop. All IBKR calls are offloaded to a dedicated
+# single-threaded executor where each call gets a brand-new event loop via
+# _run_in_new_loop(), bypassing the "already running" asyncio.run() restriction.
+_IBKR_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ibkr")
+
+
+def _run_in_new_loop(coro):
+    """Run a coroutine in a fresh event loop — safe to call from a thread pool."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        try:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        except Exception:
+            pass
+        loop.close()
+        asyncio.set_event_loop(None)
 
 
 # ── Leg translation helpers ────────────────────────────────────────────────────
@@ -60,20 +83,22 @@ async def submit_trade(rec: Any, settings: Any, session_id: str) -> dict:
     Profit target = 50 % of credit/debit received (matches backtest rule).
     Stop loss     = 2× credit/debit (informational — enforced by PositionManager).
     """
-    profit_target = abs(rec.entry_debit_credit) * 0.50
-    stop_loss     = abs(rec.entry_debit_credit) * 2.00
+    # IBKR combo (BAG) orders use per-share pricing; entry_debit_credit is total dollars.
+    # Divide by (contracts × 100) to get the per-share limit price TWS expects.
+    per_share_divisor = max(1, rec.contracts) * 100
+    entry_per_share   = rec.entry_debit_credit / per_share_divisor
+    profit_target     = abs(entry_per_share) * 0.50
+    stop_loss         = abs(entry_per_share) * 2.00
 
-    if settings.trading_mode == "paper":
-        logger.info(
-            "PAPER OPEN  | %-6s | %-22s | contracts=%d | entry=%+.2f"
-            " | target=%.2f | stop=%.2f | score=%.0f",
-            rec.ticker, rec.strategy.value, rec.contracts,
-            rec.entry_debit_credit, profit_target, stop_loss,
-            rec.conviction_score,
-        )
-        return {"order_id": -1, "status": "paper", "fills": []}
+    mode_label = "PAPER" if settings.trading_mode == "paper" else "LIVE"
+    logger.info(
+        "%s OPEN  | %-6s | %-22s | contracts=%d | entry=%+.4f/sh"
+        " | target=%.4f | stop=%.4f | score=%.0f | port=%d",
+        mode_label, rec.ticker, rec.strategy.value, rec.contracts,
+        entry_per_share, profit_target, stop_loss,
+        rec.conviction_score, settings.ibkr_port,
+    )
 
-    # ── Live mode ──────────────────────────────────────────────────────────────
     try:
         from trading_platform.services.ibkr_client import place_bracket_order
     except ImportError as exc:
@@ -81,24 +106,22 @@ async def submit_trade(rec: Any, settings: Any, session_id: str) -> dict:
             "ib_insync is not installed or ibkr_client is unavailable"
         ) from exc
 
-    logger.info(
-        "LIVE OPEN   | %-6s | %-22s | contracts=%d | entry=%+.2f"
-        " | target=%.2f | stop=%.2f (monitor-enforced)",
-        rec.ticker, rec.strategy.value, rec.contracts,
-        rec.entry_debit_credit, profit_target, stop_loss,
-    )
-
-    return await place_bracket_order(
+    kwargs = dict(
         ticker=rec.ticker,
         legs=_rec_to_legs(rec),
         contracts=rec.contracts,
-        entry_price=rec.entry_debit_credit,
+        entry_price=entry_per_share,
         profit_target=profit_target,
         stop_loss=stop_loss,
         session_id=session_id,
         host=settings.ibkr_host,
         port=settings.ibkr_port,
         client_id=settings.ibkr_client_id,
+    )
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        _IBKR_EXECUTOR,
+        lambda: _run_in_new_loop(place_bracket_order(**kwargs)),
     )
 
 
@@ -111,26 +134,28 @@ async def close_trade(pos: Any, settings: Any, session_id: str) -> dict:
     """
     unrealized = getattr(pos, "unrealized_pnl", 0.0)
 
-    if settings.trading_mode == "paper":
-        logger.info(
-            "PAPER CLOSE | %-6s | unrealized_pnl=%+.0f",
-            pos.ticker, unrealized,
-        )
-        return {"order_id": -1, "status": "paper_close", "fills": []}
+    mode_label = "PAPER" if settings.trading_mode == "paper" else "LIVE"
+    logger.info(
+        "%s CLOSE | %-6s | unrealized_pnl=%+.0f | port=%d",
+        mode_label, pos.ticker, unrealized, settings.ibkr_port,
+    )
 
     try:
         from trading_platform.services.ibkr_client import close_position
     except ImportError as exc:
         raise RuntimeError("ib_insync is not installed") from exc
 
-    logger.info("LIVE CLOSE  | %-6s | unrealized_pnl=%+.0f", pos.ticker, unrealized)
-
-    return await close_position(
+    kwargs = dict(
         ticker=pos.ticker,
         legs=_pos_to_close_legs(pos),
         contracts=pos.contracts,
         session_id=session_id,
         host=settings.ibkr_host,
         port=settings.ibkr_port,
-        client_id=settings.ibkr_client_id + 1,  # different client_id to avoid order conflicts
+        client_id=settings.ibkr_client_id + 1,
+    )
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        _IBKR_EXECUTOR,
+        lambda: _run_in_new_loop(close_position(**kwargs)),
     )

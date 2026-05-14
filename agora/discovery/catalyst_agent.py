@@ -86,13 +86,65 @@ class CatalystDiscoveryAgent:
         self._settings = settings or get_settings()
         self._on_catalyst = on_catalyst
         self._client = anthropic.AsyncAnthropic(api_key=self._settings.anthropic_api_key)
-        self._seen_hashes: set[str] = set()
         self._daily_new_tickers: set[str] = set()
         self._last_day: str = ""
         self._running = False
+        self._csuite_manager: Any = None   # CIOAgent — set via register_csuite_manager()
+        self._recent_catalysts: list[dict] = []   # rolling buffer for CIO reporting
+        # Persist seen hashes to SQLite so session restart doesn't re-process old 8-Ks
+        self._db = self._init_seen_db()
+
+    def register_csuite_manager(self, manager: Any) -> None:
+        """Wire the CIOAgent as supervising executive."""
+        self._csuite_manager = manager
+
+    def get_recent_count(self) -> int:
+        """Return number of catalysts discovered this session."""
+        return len(self._recent_catalysts)
+
+    def get_recent_catalysts(self) -> list[dict]:
+        """Return last 10 catalyst summaries for CIO briefing."""
+        return self._recent_catalysts[-10:]
+
+    def _init_seen_db(self):
+        import sqlite3
+        db_path = self._settings.db_path
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS catalyst_seen_hashes (
+                file_hash TEXT PRIMARY KEY,
+                seen_date TEXT NOT NULL
+            )
+        """)
+        conn.commit()
+        return conn
+
+    def _is_seen(self, h: str) -> bool:
+        row = self._db.execute(
+            "SELECT 1 FROM catalyst_seen_hashes WHERE file_hash=?", (h,)
+        ).fetchone()
+        return row is not None
+
+    def _mark_seen(self, h: str) -> None:
+        self._db.execute(
+            "INSERT OR IGNORE INTO catalyst_seen_hashes VALUES (?, ?)",
+            (h, datetime.now(tz=ET).date().isoformat()),
+        )
+        self._db.commit()
+
+    def _purge_old_hashes(self, keep_days: int = 3) -> None:
+        """Remove hashes older than keep_days to prevent unbounded growth."""
+        from datetime import date, timedelta
+        cutoff = (date.today() - timedelta(days=keep_days)).isoformat()
+        self._db.execute(
+            "DELETE FROM catalyst_seen_hashes WHERE seen_date < ?", (cutoff,)
+        )
+        self._db.commit()
 
     async def start(self) -> None:
         self._running = True
+        self._purge_old_hashes()
         logger.info("CatalystDiscoveryAgent started — polling every %ds", self._settings.edgar_poll_seconds)
         while self._running:
             try:
@@ -146,11 +198,11 @@ class CatalystDiscoveryAgent:
         entity = source.get("entity_name", "Unknown")
         file_num = source.get("file_num", "")
 
-        # Dedup by file number
+        # Dedup by file number — persisted to SQLite so session restart is safe
         h = hashlib.md5(file_num.encode()).hexdigest()
-        if h in self._seen_hashes:
+        if self._is_seen(h):
             return
-        self._seen_hashes.add(h)
+        self._mark_seen(h)
 
         # Fetch the actual filing text (first 3000 chars is usually enough)
         filing_text = await self._fetch_filing_text(file_num)
@@ -179,8 +231,27 @@ class CatalystDiscoveryAgent:
             catalyst.ticker, catalyst.catalyst_type, catalyst.strength, catalyst.direction
         )
 
+        # Track for CIO reporting
+        self._recent_catalysts.append({
+            "ticker": catalyst.ticker,
+            "type": str(catalyst.catalyst_type),
+            "direction": catalyst.direction,
+            "strength": catalyst.strength,
+            "ts": datetime.now(tz=ET).isoformat(),
+        })
+        if len(self._recent_catalysts) > 50:
+            self._recent_catalysts = self._recent_catalysts[-50:]
+
         if self._on_catalyst:
             await self._on_catalyst(catalyst)
+
+        # Notify CIO of strong catalysts
+        if catalyst.strength == "strong" and self._csuite_manager:
+            await self._csuite_manager.receive_alert(
+                "CatalystDiscovery", "info",
+                f"Strong {catalyst.direction} catalyst on {catalyst.ticker}: "
+                f"{catalyst.catalyst_type} — {getattr(catalyst, 'reason', '')}",
+            )
 
     async def _fetch_filing_text(self, file_num: str) -> str:
         """Fetch a brief excerpt of the 8-K filing text from EDGAR."""
@@ -275,8 +346,14 @@ class CatalystDiscoveryAgent:
             if total_oi < self._settings.min_open_interest:
                 return False
             # Quick bid/ask check on ATM
-            info = tk.info or {}
-            spot = float(info.get("regularMarketPrice") or info.get("currentPrice") or 0)
+            try:
+                fi   = tk.fast_info
+                spot = float(getattr(fi, "last_price", None) or fi.get("lastPrice", 0) or 0)
+            except Exception:
+                spot = 0.0
+            if spot <= 0:
+                info = tk.info or {}
+                spot = float(info.get("regularMarketPrice") or info.get("currentPrice") or 0)
             if spot <= 0:
                 return False
             atm = calls.iloc[(calls["strike"] - spot).abs().argsort()[:1]]

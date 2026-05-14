@@ -28,6 +28,7 @@ from ..core.config import Settings
 from ..core.models.market import Bar, MarketSnapshot
 from ..core.models.trade import TradeDecision
 from ..core.state import SharedStateStore
+from ..agents.conviction import ConvictionAgent
 from ..agents.market_data import MarketDataAgent
 from ..agents.regime import RegimeAgent
 from ..agents.technical import TechnicalAnalysisAgent
@@ -202,7 +203,7 @@ class BacktestEngine:
         self, snapshot: MarketSnapshot, today: date, balance: float
     ) -> BacktestTrade | None:
         """Run the full agent pipeline for one day. Returns a trade or None."""
-        snapshot_ref: dict[str, Any] = {"snap": snapshot}
+        snapshot_ref: dict[str, Any] = {"snap": snapshot, "account_size": balance}
         mock_client = make_mock_client(snapshot_ref)
 
         bus = MessageBus()
@@ -228,6 +229,7 @@ class BacktestEngine:
                 RegimeAgent(bus=bus, state_store=state_store, settings=settings),
                 TechnicalAnalysisAgent(bus=bus, state_store=state_store, settings=settings),
                 NewsCatalystAgent(bus=bus, state_store=state_store, settings=settings),
+                ConvictionAgent(bus=bus, state_store=state_store, settings=settings),
                 OptionsStrategyAgent(bus=bus, state_store=state_store, settings=settings),
                 RiskManagerAgent(bus=bus, state_store=state_store, settings=settings),
                 ReviewerAgent(bus=bus, state_store=state_store, settings=settings),
@@ -354,23 +356,43 @@ class BacktestEngine:
             displacement = abs(price_now - centre)
             intrinsic = max(0.0, condor_width - displacement)
 
-        # Remaining time value decays linearly from entry_price to 0
-        time_value = pos.entry_price * time_fraction * 0.5
+        # Time value: convex theta decay scaled by moneyness.
+        # sqrt(T/T0) avoids premature stop-outs on fresh positions.
+        # Moneyness factor zeroes TV when underlying is far from profit zone.
+        if spread_width > 0:
+            if pos.direction == "bullish":
+                distance_otm = max(0.0, low_strike - price_now)
+            elif pos.direction == "bearish":
+                distance_otm = max(0.0, price_now - high_strike)
+            else:
+                centre = (low_strike + high_strike) / 2.0
+                distance_otm = max(0.0, abs(price_now - centre) - spread_width / 2.0)
+            moneyness_scale = max(0.0, 1.0 - distance_otm / (spread_width * 2.0))
+        else:
+            moneyness_scale = 1.0
+
+        time_value = pos.entry_price * math.sqrt(time_fraction) * moneyness_scale
 
         current_price = intrinsic + time_value
         current_price = max(0.01, current_price)
 
+        # Round-trip commission: entry + exit, $0.65/contract/leg each side
+        n_legs = len(legs) if legs else 2
+        commission_rate = getattr(self._settings, "commission_per_contract_leg", 0.65)
+        commission = n_legs * pos.contracts * commission_rate * 2
+        pos.commission_dollars = commission
+
         # Profit target check
         if current_price >= pos.profit_target:
-            pnl = (pos.profit_target - pos.entry_price) * pos.contracts * 100
+            gross = (pos.profit_target - pos.entry_price) * pos.contracts * 100
             pos.status = BacktestTradeStatus.CLOSED_PROFIT_TARGET
-            return pnl
+            return gross - commission
 
         # Stop loss check
         if current_price <= pos.stop_loss:
-            pnl = (pos.stop_loss - pos.entry_price) * pos.contracts * 100
+            gross = (pos.stop_loss - pos.entry_price) * pos.contracts * 100
             pos.status = BacktestTradeStatus.CLOSED_STOP_LOSS
-            return pnl
+            return gross - commission
 
         return None
 

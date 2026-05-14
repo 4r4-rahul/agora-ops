@@ -25,7 +25,7 @@ import argparse
 import asyncio
 import logging
 import sys
-from datetime import datetime, time, timezone, timedelta
+from datetime import date, datetime, time, timezone, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -41,8 +41,32 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 logger = logging.getLogger(__name__)
 
 ET = ZoneInfo("America/New_York")
-MARKET_OPEN = time(9, 30)
+MARKET_OPEN  = time(9, 30)
 MARKET_CLOSE = time(16, 0)
+
+# Entry blackout windows — never enter during these windows
+# Opening: first 30 min too volatile, fake moves, wide spreads
+# Closing: last 30 min end-of-day games, pinning, wide spreads
+_ENTRY_BLACKOUT: list[tuple[time, time]] = [
+    (time(9, 30),  time(10, 0)),   # Opening volatility window
+    (time(15, 30), time(16, 0)),   # Closing window
+]
+
+# Best entry windows — prioritise analysis during these times
+_PRIME_WINDOWS: list[tuple[time, time]] = [
+    (time(10, 0),  time(11, 30)),  # Post-open: trend established, spreads tight
+    (time(13, 0),  time(15, 30)),  # Afternoon: institutional activity resumes
+]
+
+# Day-of-week multipliers for position sizing confidence
+# 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri
+_DOW_MULTIPLIER: dict[int, float] = {
+    0: 0.5,   # Monday: gap fills, fade-the-open behaviour, lower confidence
+    1: 1.0,   # Tuesday: best directional follow-through
+    2: 1.0,   # Wednesday: best day overall
+    3: 0.75,  # Thursday: pre-OPEX positioning, afternoon vol spikes
+    4: 0.5,   # Friday: OPEX pinning, max pain gravity, time decay accelerates
+}
 
 # Approximate US market holidays for 2025-2026 (NYSE schedule)
 _HOLIDAYS: frozenset[tuple[int, int]] = frozenset({
@@ -62,15 +86,40 @@ _HOLIDAYS: frozenset[tuple[int, int]] = frozenset({
 def _is_market_open(now: datetime) -> bool:
     """Return True if the NYSE is currently open for trading."""
     et = now.astimezone(ET)
-    # Weekend
     if et.weekday() >= 5:
         return False
-    # Holiday (month, day) — approximate
     if (et.month, et.day) in _HOLIDAYS:
         return False
-    # Pre/after hours
     t = et.time()
     return MARKET_OPEN <= t < MARKET_CLOSE
+
+
+def _is_entry_blackout(now: datetime) -> tuple[bool, str]:
+    """Return (True, reason) if we are in an entry blackout window."""
+    et = now.astimezone(ET)
+    t = et.time()
+    for start, end in _ENTRY_BLACKOUT:
+        if start <= t < end:
+            return True, f"Entry blackout {start.strftime('%H:%M')}–{end.strftime('%H:%M')} ET"
+    return False, ""
+
+
+def _is_prime_entry_window(now: datetime) -> bool:
+    """Return True if now is in a prime entry window."""
+    et = now.astimezone(ET)
+    t = et.time()
+    return any(start <= t < end for start, end in _PRIME_WINDOWS)
+
+
+def get_session_confidence(now: datetime) -> float:
+    """
+    Return a 0.0–1.0 multiplier for analysis confidence based on
+    time of day and day of week. Used to scale conviction scores.
+    """
+    et = now.astimezone(ET)
+    dow_mult = _DOW_MULTIPLIER.get(et.weekday(), 0.75)
+    time_mult = 1.0 if _is_prime_entry_window(now) else 0.7
+    return round(dow_mult * time_mult, 2)
 
 
 def _seconds_until_next_open(now: datetime) -> float:
@@ -110,6 +159,7 @@ class AnalysisScheduler:
         self._webhook = alert_webhook_url
         self._running = False
         self._last_run: dict[str, datetime] = {}
+        self._last_feedback_date: date | None = None  # weekly feedback loop tracker
 
     async def run(self) -> None:
         """Block until cancelled. Runs analyses on schedule."""
@@ -133,6 +183,12 @@ class AnalysisScheduler:
                 await asyncio.sleep(min(wait, 3600))  # wake up at least hourly
                 continue
 
+            # Weekly feedback loop — runs once on Friday after 15:30 ET
+            if now.weekday() == 4 and now.time() >= time(15, 30):
+                if self._last_feedback_date != now.date():
+                    self._last_feedback_date = now.date()
+                    asyncio.create_task(self._run_feedback(), name="weekly_feedback")
+
             # Market is open — run analysis for each ticker that's due
             tasks = []
             for ticker in self._tickers:
@@ -149,7 +205,28 @@ class AnalysisScheduler:
     async def _analyze(self, ticker: str) -> None:
         now = datetime.now(tz=ET)
         self._last_run[ticker] = now
-        logger.info("Scheduled analysis: %s @ %s ET", ticker, now.strftime("%H:%M"))
+
+        # Check entry blackout
+        in_blackout, blackout_reason = _is_entry_blackout(now)
+        if in_blackout:
+            logger.info("Skipping %s analysis — %s", ticker, blackout_reason)
+            return
+
+        # Check macro calendar
+        from ..services.macro_calendar import get_macro_calendar
+        cal = get_macro_calendar()
+        can_trade, macro_reason = cal.should_trade(now.date())
+        if not can_trade:
+            logger.warning("Skipping %s — macro calendar: %s", ticker, macro_reason)
+            return
+
+        session_conf = get_session_confidence(now)
+        logger.info(
+            "Scheduled analysis: %s @ %s ET (session_confidence=%.0f%%, dow=%s, prime=%s)",
+            ticker, now.strftime("%H:%M"), session_conf * 100,
+            ["Mon","Tue","Wed","Thu","Fri"][now.weekday()],
+            _is_prime_entry_window(now),
+        )
 
         try:
             result = await self._orchestrator.analyze(ticker, timeout=120.0)
@@ -187,6 +264,21 @@ class AnalysisScheduler:
                     session_id="scheduler",
                 )
 
+    async def _run_feedback(self) -> None:
+        """Run the weekly performance feedback loop (Friday close)."""
+        logger.info("Running weekly performance feedback loop...")
+        try:
+            from ..agents.performance_feedback import run_feedback_loop
+            result = await run_feedback_loop(use_claude=True)
+            logger.info(
+                "Feedback loop complete — trades=%d win_rate=%.0f%% lessons=%d",
+                result.get("total_trades", 0),
+                result.get("win_rate", 0) * 100,
+                len(result.get("lessons", [])),
+            )
+        except Exception as exc:
+            logger.error("Weekly feedback loop failed: %s", exc)
+
     def stop(self) -> None:
         self._running = False
 
@@ -198,7 +290,11 @@ async def _main(args: argparse.Namespace) -> None:
     from trading_platform.core.bus import MessageBus
     from trading_platform.core.config import get_settings
     from trading_platform.core.state import SharedStateStore
+    from trading_platform.agents.conviction import ConvictionAgent
     from trading_platform.agents.execution import ExecutionAgent
+    from trading_platform.agents.premarket import PreMarketAgent
+    from trading_platform.agents.setup_watcher import SetupWatcherAgent
+    from trading_platform.agents.universe_screener import UniverseScreenerAgent
     from trading_platform.agents.journal import TradeJournalAgent
     from trading_platform.agents.market_data import MarketDataAgent
     from trading_platform.agents.monitor import MonitorAgent
@@ -211,17 +307,24 @@ async def _main(args: argparse.Namespace) -> None:
     from trading_platform.agents.technical import TechnicalAnalysisAgent
 
     settings = get_settings()
-    tickers = [t.upper() for t in args.tickers] if args.tickers else settings.default_tickers
+    tickers = [t.upper() for t in args.tickers] if args.tickers else settings.tier_tickers
+    logger.info(
+        "Account tier=%s → trading %d tickers: %s",
+        settings.account_tier, len(tickers), tickers,
+    )
 
     bus = MessageBus()
     state_store = SharedStateStore()
     kwargs = {"bus": bus, "state_store": state_store, "settings": settings}
 
     all_agents = [
+        PreMarketAgent(**kwargs),
+        UniverseScreenerAgent(**kwargs),
         MarketDataAgent(**kwargs),
         RegimeAgent(**kwargs),
         TechnicalAnalysisAgent(**kwargs),
         NewsCatalystAgent(**kwargs),
+        ConvictionAgent(**kwargs),
         OptionsStrategyAgent(**kwargs),
         RiskManagerAgent(**kwargs),
         ReviewerAgent(**kwargs),
@@ -230,8 +333,16 @@ async def _main(args: argparse.Namespace) -> None:
         MonitorAgent(**kwargs, poll_interval_seconds=args.monitor_interval),
     ]
 
-    logger.info("Starting %d agents...", len(all_agents))
+    setup_watcher = SetupWatcherAgent(
+        bus=bus,
+        state_store=state_store,
+        settings=settings,
+        poll_interval_seconds=300.0,
+    )
+
+    logger.info("Starting %d agents + SetupWatcher...", len(all_agents))
     await asyncio.gather(*[a.start() for a in all_agents])
+    await setup_watcher.start()
 
     orchestrator = OrchestratorAgent(bus=bus, state_store=state_store, settings=settings)
     scheduler = AnalysisScheduler(
@@ -246,6 +357,7 @@ async def _main(args: argparse.Namespace) -> None:
     except asyncio.CancelledError:
         logger.info("Scheduler cancelled — shutting down")
     finally:
+        await setup_watcher.stop()
         await asyncio.gather(*[a.stop() for a in all_agents], return_exceptions=True)
         logger.info("All agents stopped")
 

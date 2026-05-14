@@ -42,7 +42,7 @@ _CORRELATION_GROUPS: dict[str, str] = {
     "XLE": "energy", "USO": "energy",
     "VXX": "volatility", "UVXY": "volatility",
 }
-_MAX_SAME_GROUP_POSITIONS = 2
+_MAX_SAME_GROUP_POSITIONS = 1  # overridden by settings.max_per_correlation_group
 
 
 class RiskCouncil:
@@ -53,7 +53,12 @@ class RiskCouncil:
 
     def __init__(self, settings: AgoraSettings | None = None) -> None:
         self._settings = settings or get_settings()
+        self._csuite_manager: Any = None   # CROAgent — set via register_csuite_manager()
         self._db = self._init_db()
+
+    def register_csuite_manager(self, manager: Any) -> None:
+        """Wire the CROAgent as supervising executive."""
+        self._csuite_manager = manager
 
     def _init_db(self) -> sqlite3.Connection:
         db_path = self._settings.db_path
@@ -182,11 +187,11 @@ class RiskCouncil:
             return {"approved": False, "reason": group_msg, "checks": checks}
 
         # 9. Reward/risk minimum
-        checks["reward_risk"] = recommendation.reward_risk_ratio >= self._settings.min_reward_risk_ratio
+        checks["reward_risk"] = recommendation.reward_risk_ratio >= self._settings.min_rr_ratio
         if not checks["reward_risk"]:
             return {
                 "approved": False,
-                "reason": f"R/R ratio {recommendation.reward_risk_ratio:.2f} below minimum {self._settings.min_reward_risk_ratio}",
+                "reason": f"R/R ratio {recommendation.reward_risk_ratio:.2f} below minimum {self._settings.min_rr_ratio}",
                 "checks": checks,
             }
 
@@ -296,11 +301,12 @@ class RiskCouncil:
             p for p in open_positions
             if _CORRELATION_GROUPS.get(p.ticker) == group
         ]
-        if len(same_group) >= _MAX_SAME_GROUP_POSITIONS:
+        limit = self._settings.max_per_correlation_group
+        if len(same_group) >= limit:
             return (
                 False,
                 f"Correlation limit: {len(same_group)} positions in {group} group "
-                f"(max {_MAX_SAME_GROUP_POSITIONS})",
+                f"(max {limit})",
             )
         return True, ""
 

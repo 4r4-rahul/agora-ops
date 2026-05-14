@@ -132,6 +132,20 @@ class SmartMoneyAgent:
         # Rolling window: ticker → list of Form 4 filings (date, name, shares, value)
         self._form4_buffer: dict[str, list[dict]] = {}
         self._running = False
+        self._csuite_manager: Any = None   # CIOAgent — set via register_csuite_manager()
+        self._recent_signals: list[dict] = []   # rolling buffer for CIO reporting
+
+    def register_csuite_manager(self, manager: Any) -> None:
+        """Wire the CIOAgent as supervising executive."""
+        self._csuite_manager = manager
+
+    def get_recent_count(self) -> int:
+        """Return number of smart money signals fired this session."""
+        return len(self._recent_signals)
+
+    def get_recent_signals(self) -> list[dict]:
+        """Return last 10 signal summaries for CIO briefing."""
+        return self._recent_signals[-10:]
 
     async def start(self) -> None:
         self._running = True
@@ -234,8 +248,25 @@ class SmartMoneyAgent:
             catalyst.ticker, form_type, stake_pct, analysis.get("intent"),
         )
 
+        self._recent_signals.append({
+            "ticker": catalyst.ticker,
+            "type": form_type,
+            "strength": strength,
+            "intent": analysis.get("intent"),
+            "ts": datetime.now(tz=ET).isoformat(),
+        })
+        if len(self._recent_signals) > 50:
+            self._recent_signals = self._recent_signals[-50:]
+
         if self._on_catalyst:
             await self._on_catalyst(catalyst)
+
+        if strength == "strong" and self._csuite_manager:
+            await self._csuite_manager.receive_alert(
+                "SmartMoney", "info",
+                f"Smart money signal: {form_type} on {catalyst.ticker} "
+                f"stake={stake_pct:.1f}% intent={analysis.get('intent')}",
+            )
 
     async def _analyze_13d_with_tools(
         self, entity: str, accession: str, form_type: str
@@ -437,13 +468,31 @@ class SmartMoneyAgent:
                 source="edgar_form4",
             )
 
+            strength = analysis.get("signal_strength", "moderate")
             logger.info(
                 "INSIDER CLUSTER: %s | insiders=%d | strength=%s",
-                ticker, analysis.get("insider_count", len(filings)), analysis.get("signal_strength"),
+                ticker, analysis.get("insider_count", len(filings)), strength,
             )
+
+            self._recent_signals.append({
+                "ticker": ticker,
+                "type": "form4_cluster",
+                "strength": strength,
+                "insider_count": analysis.get("insider_count", len(filings)),
+                "ts": datetime.now(tz=ET).isoformat(),
+            })
+            if len(self._recent_signals) > 50:
+                self._recent_signals = self._recent_signals[-50:]
 
             if self._on_catalyst:
                 await self._on_catalyst(catalyst)
+
+            if strength in ("strong", "moderate") and self._csuite_manager:
+                await self._csuite_manager.receive_alert(
+                    "SmartMoney", "info",
+                    f"Insider buy cluster: {ticker} | "
+                    f"insiders={analysis.get('insider_count', len(filings))} strength={strength}",
+                )
 
     async def _analyze_form4_cluster(
         self, ticker: str, filings: list[dict]

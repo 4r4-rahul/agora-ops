@@ -76,6 +76,8 @@ class StrategyRulesEngine:
         # Build legs
         legs = self._build_legs(strategy_type, direction, spot, chain_slice, expiry)
         if not legs:
+            logger.info("No legs built for %s | strategy=%s expiry=%s spot=%.2f",
+                        conviction.ticker, strategy_type.value, expiry, spot)
             return None
 
         # Compute P&L metrics
@@ -88,9 +90,24 @@ class StrategyRulesEngine:
         max_gain   = self._max_gain(strategy_type, debit_credit, width)
         rr_ratio   = abs(max_gain / max_loss) if max_loss != 0 else 0.0
 
-        if rr_ratio < 0.25:   # minimum 1:4 risk/reward for credit spreads
-            logger.debug("R/R ratio %.2f too low for %s", rr_ratio, conviction.ticker)
+        if rr_ratio < 0.10:   # floor: collect at least 10% of spread width as premium
+            logger.info("R/R ratio %.2f too low for %s (max_gain=%.0f max_loss=%.0f width=%.1f)",
+                        rr_ratio, conviction.ticker, max_gain, max_loss, width)
             return None
+
+        # Cost-to-width gate: debit spreads where the premium exceeds the max allowed
+        # fraction of the spread width are rejected (too expensive relative to potential gain).
+        # Credit spreads are checked inversely — premium too small means we collect too little.
+        if width > 0 and debit_credit > 0:  # debit spread
+            debit_per_contract = debit_credit  # already per-contract dollars
+            ratio = debit_per_contract / (width * 100)
+            if ratio > self._settings.max_debit_to_width_ratio:
+                logger.info(
+                    "COST/WIDTH gate: %s debit=%.2f width=%.0f ratio=%.1f%% > max %.0f%% — skip",
+                    conviction.ticker, debit_per_contract, width * 100,
+                    ratio * 100, self._settings.max_debit_to_width_ratio * 100,
+                )
+                return None
 
         contracts = self._size_contracts(
             conviction.size_multiplier, max_loss, self._settings
@@ -242,54 +259,58 @@ class StrategyRulesEngine:
 
     def _bull_call_spread(self, calls: Any, spot: float, expiry: date) -> list[SpreadLeg]:
         """Buy ATM call, sell OTM call at long_delta_target."""
-        long_strike  = self._nearest_delta_strike(calls, self._settings.long_delta_target, "call")
-        short_strike = self._nearest_delta_strike(calls, self._settings.short_delta_target, "call")
+        long_strike  = self._nearest_delta_strike(calls, self._settings.long_delta_target,  "call", spot, expiry)
+        short_strike = self._nearest_delta_strike(calls, self._settings.short_delta_target, "call", spot, expiry)
         if not long_strike or not short_strike or long_strike >= short_strike:
             return []
         return [
-            self._make_leg(calls, long_strike, "call", "buy", expiry),
-            self._make_leg(calls, short_strike, "call", "sell", expiry),
+            self._make_leg(calls, long_strike, "call", "buy", expiry, spot),
+            self._make_leg(calls, short_strike, "call", "sell", expiry, spot),
         ]
 
     def _bear_put_spread(self, puts: Any, spot: float, expiry: date) -> list[SpreadLeg]:
         """Buy ATM put, sell OTM put."""
-        long_strike  = self._nearest_delta_strike(puts, self._settings.long_delta_target, "put")
-        short_strike = self._nearest_delta_strike(puts, self._settings.short_delta_target, "put")
+        long_strike  = self._nearest_delta_strike(puts, self._settings.long_delta_target,  "put", spot, expiry)
+        short_strike = self._nearest_delta_strike(puts, self._settings.short_delta_target, "put", spot, expiry)
         if not long_strike or not short_strike or long_strike <= short_strike:
             return []
         return [
-            self._make_leg(puts, long_strike, "put", "buy", expiry),
-            self._make_leg(puts, short_strike, "put", "sell", expiry),
+            self._make_leg(puts, long_strike, "put", "buy", expiry, spot),
+            self._make_leg(puts, short_strike, "put", "sell", expiry, spot),
         ]
 
     def _bull_put_spread(self, puts: Any, spot: float, expiry: date) -> list[SpreadLeg]:
-        """Sell OTM put (20-delta), buy further OTM put (35-delta lower → actually 10-delta)."""
-        # Short put at 20-delta (above spot for puts — lower strike)
-        short_strike = self._nearest_delta_strike(puts, self._settings.short_delta_target, "put")
-        # Long put ~5 points lower for defined risk
-        long_strike  = self._spread_width_strike(puts, short_strike, "put", -1)
+        """Sell OTM put (20-delta), buy further OTM put for defined risk."""
+        # Only consider OTM puts (strike < spot) — ITM puts cause IBKR GTL rejection
+        otm_puts = puts[puts["strike"] < spot * 0.995] if spot > 0 else puts
+        short_strike = self._nearest_delta_strike(otm_puts, self._settings.short_delta_target, "put", spot, expiry)
+        long_strike  = self._spread_width_strike(otm_puts, short_strike, "put", -1)
         if not short_strike or not long_strike or short_strike <= long_strike:
             return []
         return [
-            self._make_leg(puts, short_strike, "put", "sell", expiry),
-            self._make_leg(puts, long_strike, "put", "buy", expiry),
+            self._make_leg(puts, short_strike, "put", "sell", expiry, spot),
+            self._make_leg(puts, long_strike, "put", "buy", expiry, spot),
         ]
 
     def _bear_call_spread(self, calls: Any, spot: float, expiry: date) -> list[SpreadLeg]:
         """Sell OTM call (20-delta), buy further OTM call."""
-        short_strike = self._nearest_delta_strike(calls, self._settings.short_delta_target, "call")
-        long_strike  = self._spread_width_strike(calls, short_strike, "call", +1)
+        # Only consider OTM calls (strike > spot) — ITM calls cause IBKR GTL rejection
+        otm_calls = calls[calls["strike"] > spot * 1.005] if spot > 0 else calls
+        short_strike = self._nearest_delta_strike(otm_calls, self._settings.short_delta_target, "call", spot, expiry)
+        long_strike  = self._spread_width_strike(otm_calls, short_strike, "call", +1)
         if not short_strike or not long_strike or short_strike >= long_strike:
             return []
         return [
-            self._make_leg(calls, short_strike, "call", "sell", expiry),
-            self._make_leg(calls, long_strike, "call", "buy", expiry),
+            self._make_leg(calls, short_strike, "call", "sell", expiry, spot),
+            self._make_leg(calls, long_strike, "call", "buy", expiry, spot),
         ]
 
     def _iron_condor(self, calls: Any, puts: Any, spot: float, expiry: date) -> list[SpreadLeg]:
         """Sell 20-delta strangle, buy wings."""
-        short_put  = self._nearest_delta_strike(puts,  self._settings.short_delta_target, "put")
-        short_call = self._nearest_delta_strike(calls, self._settings.short_delta_target, "call")
+        otm_puts  = puts[puts["strike"]   < spot * 0.995] if spot > 0 else puts
+        otm_calls = calls[calls["strike"] > spot * 1.005] if spot > 0 else calls
+        short_put  = self._nearest_delta_strike(otm_puts,  self._settings.short_delta_target, "put",  spot, expiry)
+        short_call = self._nearest_delta_strike(otm_calls, self._settings.short_delta_target, "call", spot, expiry)
         if not short_put or not short_call:
             return []
         long_put  = self._spread_width_strike(puts,  short_put,  "put",  -1)
@@ -297,30 +318,66 @@ class StrategyRulesEngine:
         if not long_put or not long_call:
             return []
         return [
-            self._make_leg(puts,  short_put,  "put",  "sell", expiry),
-            self._make_leg(puts,  long_put,   "put",  "buy",  expiry),
-            self._make_leg(calls, short_call, "call", "sell", expiry),
-            self._make_leg(calls, long_call,  "call", "buy",  expiry),
+            self._make_leg(puts,  short_put,  "put",  "sell", expiry, spot),
+            self._make_leg(puts,  long_put,   "put",  "buy",  expiry, spot),
+            self._make_leg(calls, short_call, "call", "sell", expiry, spot),
+            self._make_leg(calls, long_call,  "call", "buy",  expiry, spot),
         ]
 
     # ── Strike helpers ─────────────────────────────────────────────
 
-    def _nearest_delta_strike(
-        self, chain: Any, target_delta: float, opt_type: str
-    ) -> float | None:
-        """Find the strike with delta closest to target_delta."""
+    @staticmethod
+    def _approx_delta(
+        spot: float, strike: float, iv: float, dte: int, opt_type: str
+    ) -> float:
+        """Black-Scholes approximate delta (r=0, no dividend)."""
+        import math
+        if iv <= 0 or dte <= 0 or spot <= 0 or strike <= 0:
+            return 0.0
+        T = dte / 365.0
         try:
-            import pandas as pd
+            d1 = (math.log(spot / strike) + 0.5 * iv ** 2 * T) / (iv * math.sqrt(T))
+            # N(d1) via logistic approximation — good to within 0.005 of delta
+            nd1 = 1.0 / (1.0 + math.exp(-1.7 * d1))
+            return nd1 if opt_type == "call" else nd1 - 1.0
+        except (ValueError, ZeroDivisionError):
+            return 0.0
+
+    def _nearest_delta_strike(
+        self, chain: Any, target_delta: float, opt_type: str,
+        spot: float = 0.0, expiry: "date | None" = None,
+    ) -> float | None:
+        """Find the strike with delta closest to target_delta.
+
+        Uses the chain's `delta` column when present; falls back to
+        Black-Scholes approximation from `impliedVolatility`.
+        """
+        try:
             if chain is None or (hasattr(chain, "empty") and chain.empty):
                 return None
             df = chain.copy()
-            if "delta" not in df.columns:
+
+            if "delta" in df.columns and df["delta"].notna().any():
+                df = df[df["delta"].notna()]
+                df["_delta_abs"] = df["delta"].abs()
+                idx = (df["_delta_abs"] - target_delta).abs().idxmin()
+                return float(df.loc[idx, "strike"])
+
+            # Fallback: approximate delta from IV, spot, and DTE
+            if "impliedVolatility" not in df.columns:
                 return None
-            df = df[df["delta"].notna()]
+            df = df[df["impliedVolatility"].notna() & (df["impliedVolatility"] > 0)]
             if df.empty:
                 return None
-            # For calls: delta is positive. For puts: delta is negative but stored as abs.
-            df["_delta_abs"] = df["delta"].abs()
+            from datetime import date
+            dte = (expiry - date.today()).days if expiry else 30
+            df["_delta"] = df.apply(
+                lambda r: self._approx_delta(
+                    spot, float(r["strike"]), float(r["impliedVolatility"]), dte, opt_type
+                ),
+                axis=1,
+            )
+            df["_delta_abs"] = df["_delta"].abs()
             idx = (df["_delta_abs"] - target_delta).abs().idxmin()
             return float(df.loc[idx, "strike"])
         except Exception:
@@ -353,25 +410,49 @@ class StrategyRulesEngine:
         opt_type: str,
         action: str,
         expiry: date,
+        spot: float = 0.0,
     ) -> SpreadLeg:
         try:
+            from trading_platform.services.options_flow import compute_bs_greeks
+
             row = chain[chain["strike"] == strike].iloc[0]
             bid = float(row.get("bid", 0) or 0)
             ask = float(row.get("ask", 0) or 0)
             mid = (bid + ask) / 2 if (bid > 0 or ask > 0) else 0.0
+
+            delta = float(row.get("delta", 0) or 0)
+            gamma = float(row.get("gamma", 0) or 0)
+            theta = float(row.get("theta", 0) or 0)
+            vega  = float(row.get("vega",  0) or 0)
+
+            # yfinance often returns 0 for all greeks — compute via BS if so
+            if delta == 0 and spot > 0:
+                iv  = float(row.get("impliedVolatility", 0) or 0)
+                dte = max((expiry - date.today()).days, 0.5)
+                # If chain IV is also 0, estimate from mid price via a proxy (30% ATM IV)
+                if iv <= 0:
+                    iv = mid / (spot * 0.04 * (dte / 365) ** 0.5) if mid > 0 else 0.30
+                    iv = max(0.10, min(iv, 2.0))  # clamp to [10%, 200%]
+                bs    = compute_bs_greeks(spot, strike, dte, iv, opt_type)
+                delta = bs["delta"]
+                gamma = bs["gamma"]
+                theta = bs["theta"]
+                vega  = bs["vega"]
+
             return SpreadLeg(
                 option_type=opt_type,
                 strike=strike,
                 expiration=expiry,
                 action=action,
                 contracts=1,
-                delta=float(row.get("delta", 0) or 0),
-                gamma=float(row.get("gamma", 0) or 0),
-                theta=float(row.get("theta", 0) or 0),
-                vega=float(row.get("vega", 0) or 0),
+                delta=delta,
+                gamma=gamma,
+                theta=theta,
+                vega=vega,
                 mid_price=round(mid, 2),
             )
-        except Exception:
+        except Exception as exc:
+            logger.debug("_build_leg fallback for %s strike=%.1f %s: %s", opt_type, strike, action, exc)
             return SpreadLeg(
                 option_type=opt_type, strike=strike,
                 expiration=expiry, action=action,
@@ -380,21 +461,22 @@ class StrategyRulesEngine:
     # ── P&L helpers ────────────────────────────────────────────────
 
     def _max_loss(self, strategy: StrategyType, debit_credit: float, width: float) -> float:
+        # debit_credit is already in per-contract dollar terms (×100 applied by caller).
+        # width is in strike points — multiply by 100 to get dollars.
         if strategy in (StrategyType.BULL_CALL_SPREAD, StrategyType.BEAR_PUT_SPREAD):
-            return abs(debit_credit) * 100  # debit paid
-        elif strategy in (StrategyType.BULL_PUT_SPREAD, StrategyType.BEAR_CALL_SPREAD):
-            return (width * 100) - abs(debit_credit) * 100  # width minus credit
-        elif strategy == StrategyType.IRON_CONDOR:
-            return (width * 100) - abs(debit_credit) * 100
-        return abs(debit_credit) * 100
+            return abs(debit_credit)              # debit paid
+        elif strategy in (StrategyType.BULL_PUT_SPREAD, StrategyType.BEAR_CALL_SPREAD,
+                          StrategyType.IRON_CONDOR):
+            return (width * 100) - abs(debit_credit)   # spread width minus credit received
+        return abs(debit_credit)
 
     def _max_gain(self, strategy: StrategyType, debit_credit: float, width: float) -> float:
         if strategy in (StrategyType.BULL_CALL_SPREAD, StrategyType.BEAR_PUT_SPREAD):
-            return (width * 100) - abs(debit_credit) * 100
+            return (width * 100) - abs(debit_credit)   # spread width minus debit paid
         elif strategy in (StrategyType.BULL_PUT_SPREAD, StrategyType.BEAR_CALL_SPREAD,
                           StrategyType.IRON_CONDOR):
-            return abs(debit_credit) * 100
-        return abs(debit_credit) * 100
+            return abs(debit_credit)              # credit received
+        return abs(debit_credit)
 
     def _breakeven(self, strategy: StrategyType, legs: list[SpreadLeg]) -> float | None:
         if not legs:

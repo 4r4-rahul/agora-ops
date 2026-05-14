@@ -31,29 +31,60 @@ class AgoraSettings(BaseSettings):
         default="claude-haiku-4-5-20251001",
         description="Fast model for high-frequency classification tasks",
     )
+    claude_brief_model: str = Field(
+        default="claude-sonnet-4-6",
+        description="Sonnet model for C-suite departmental briefs — cost-efficient vs Opus for high-frequency brief generation",
+    )
 
     # ── Trading ────────────────────────────────────────────────────
     trading_mode: Literal["paper", "live"] = Field(default="paper")
     account_size: float = Field(default=25_000.0, ge=1_000.0)
     max_position_size_pct: float = Field(default=0.02, ge=0.005, le=0.05)
-    max_open_positions: int = Field(default=10, ge=1, le=20)
+    max_open_positions: int = Field(default=4, ge=1, le=20)
+    max_per_correlation_group: int = Field(default=1, ge=1, le=5)
     daily_loss_limit_pct: float = Field(default=0.02, ge=0.005, le=0.10)
     weekly_loss_limit_pct: float = Field(default=0.06, ge=0.01, le=0.20)
-    min_reward_risk_ratio: float = Field(default=1.5, ge=1.0)
+    min_rr_ratio: float = Field(default=1.3, ge=0.5)
+    max_debit_to_width_ratio: float = Field(
+        default=0.40,
+        description="Max fraction of spread width acceptable as net debit (e.g. 0.40 = 40%). "
+                    "Rejects expensive debit spreads where cost erodes expected value.",
+    )
 
     # ── IBKR ───────────────────────────────────────────────────────
     ibkr_host: str = Field(default="127.0.0.1")
     ibkr_port: int = Field(default=7497)
     ibkr_client_id: int = Field(default=10)  # separate from APEX (client 1)
 
+    # ── IBKR GTC / order lifecycle ─────────────────────────────────
+    gtc_max_concurrent: int = Field(
+        default=20,
+        description="Alert if more than this many GTC orders are live (Error 201 risk). "
+                    "Set this in TWS Precautionary Settings → Options → max combo orders.",
+    )
+    gtc_fill_sync_interval_sec: int = Field(
+        default=1800,
+        description="How often (seconds) IBKRKnowledgeAgent scans TWS fills to sync closed positions.",
+    )
+    startup_tws_sync_client_id: int = Field(
+        default=12,
+        description="clientId used by the startup TWS fill-sync connection (must not conflict with others).",
+    )
+
     # ── Strategy parameters ────────────────────────────────────────
     target_dte_entry: int = Field(default=45, description="Target DTE at entry")
+    target_dte_entry_min: int = Field(default=30, description="Minimum acceptable DTE at entry")
     target_dte_close: int = Field(default=21, description="Close position at this DTE")
+    earnings_blackout_days: int = Field(default=3, description="Block new vol-premium entries within N days of earnings")
     profit_target_pct: float = Field(default=0.50, description="Close at 50% of max profit")
     short_delta_target: float = Field(default=0.20, description="20-delta short strike for credit spreads")
     long_delta_target: float = Field(default=0.35, description="35-delta long strike for debit spreads")
 
     # ── Signal thresholds ──────────────────────────────────────────
+    ivr_bypass_threshold: float = Field(
+        default=60.0,
+        description="Minimum IV rank (0-100) required to activate vol-premium bypass",
+    )
     iv_premium_threshold: float = Field(
         default=0.25,
         description="IV_implied_vs_realized ratio threshold to sell premium",
@@ -71,8 +102,34 @@ class AgoraSettings(BaseSettings):
 
     # ── Universe ───────────────────────────────────────────────────
     etf_universe: list[str] = Field(
-        default=["SPY", "QQQ", "IWM", "GLD", "TLT"],
-        description="ETFs for vol premium credit spreads and event plays",
+        default=[
+            # Broad market ETFs
+            "SPY", "QQQ", "IWM", "GLD", "TLT", "SLV", "COPX", "PPLT",
+            # Mega-cap tech
+            "AAPL", "MSFT", "NVDA", "META", "AMZN", "GOOGL", "TSLA", "AVGO", "AMD",
+            # Semiconductors
+            "TSM", "MU", "INTC", "TXN", "LRCX", "ASML", "SMTC", "AMKR",
+            "HIMX", "TSEM", "VECO",
+            # Defense / space
+            "PLTR", "KTOS", "AVAV", "RKLB",
+            # Energy / power
+            "VST", "CEG", "NEE", "FCEL", "BE", "AMSC", "FLNC", "CCJ",
+            # Finance / brokers
+            "SCHW", "HOOD", "CBOE",
+            # Large-cap diversified
+            "COST", "WMT", "KO", "CAT", "ORCL", "MSI", "JBL", "SANM",
+            # Biotech / healthcare
+            "LLY", "JNJ", "ABT", "BSX", "BIIB", "MDT",
+            # Cloud / software
+            "SNOW", "ZS", "UPST",
+            # Optical / photonics
+            "LITE", "COHR", "AAOI", "AXTI", "AOSL",
+            # Other watchlist
+            "FLEX", "MSTR", "WDC", "IREN", "NOK", "OKLO", "GEV",
+            "MP", "POWL", "KEYS", "ONTO", "SERV", "VICR",
+            "BJ", "BRK-B", "F", "CIFR", "ASTS",
+        ],
+        description="Options universe for vol premium credit spreads and event plays",
     )
     single_name_min_market_cap: float = Field(
         default=300_000_000.0,
@@ -84,14 +141,14 @@ class AgoraSettings(BaseSettings):
     )
 
     # ── Catalyst discovery ─────────────────────────────────────────
-    edgar_poll_seconds: int = Field(default=60, description="How often to poll EDGAR RSS")
+    edgar_poll_seconds: int = Field(default=60, description="How often to poll EDGAR RSS (60s for real-time 8-K/13D detection)")
     max_new_tickers_per_day: int = Field(default=5, description="Cap on catalyst-discovered tickers/day")
     min_contract_value_usd: float = Field(default=50_000_000.0)
     min_funding_round_usd: float = Field(default=25_000_000.0)
     catalyst_max_age_hours: float = Field(default=4.0)
 
     # ── Risk limits ────────────────────────────────────────────────
-    max_portfolio_delta_per_10k: float = Field(default=0.30)
+    max_portfolio_delta_per_10k: float = Field(default=30.0, description="Max net delta-shares per $10k NAV. 1 contract × 0.30 delta = 30 delta-shares.")
     max_portfolio_vega_per_10k: float = Field(default=200.0)
     max_daily_theta_pct: float = Field(default=0.005, description="Max theta decay as % of account/day")
     bid_ask_max_pct: float = Field(default=0.10)
@@ -105,8 +162,8 @@ class AgoraSettings(BaseSettings):
 
     # ── Trade sizing ──────────────────────────────────────────────
     risk_per_trade_dollars: float = Field(
-        default=500.0,
-        description="Max dollar risk per spread (1 contract) before size multiplier",
+        default=150.0,
+        description="Max dollar risk per spread (1 contract) before size multiplier. $150 = 1.5% of $10k account, safely within 2% daily loss cap.",
     )
     max_contracts_per_trade: int = Field(
         default=10,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import ClassVar, Literal
 
 from pydantic import BaseModel, Field
@@ -26,6 +27,76 @@ class Greeks(BaseModel):
             rho=self.rho + other.rho,
             implied_vol=(self.implied_vol + other.implied_vol) / 2,
         )
+
+
+def compute_spread_greeks(
+    underlying: float,
+    legs: list[dict],
+    implied_vol: float,
+    dte_remaining: int,
+    risk_free_rate: float = 0.04,
+) -> "Greeks":
+    """
+    Black-Scholes Greeks for a multi-leg spread.
+
+    legs: list of dicts with keys: action (buy|sell), strike (float), option_type (call|put)
+    implied_vol: annualised σ decimal (e.g. 0.25 for 25%)
+    dte_remaining: calendar days to expiration
+    """
+    from scipy.stats import norm  # lazy import — keeps startup fast when scipy unused
+
+    T = max(dte_remaining, 0) / 365.0
+    if T <= 0 or implied_vol <= 0 or underlying <= 0 or not legs:
+        return Greeks()
+
+    S, r, sigma = underlying, risk_free_rate, implied_vol
+    sqrtT = math.sqrt(T)
+
+    agg_delta = agg_gamma = agg_theta = agg_vega = 0.0
+
+    for leg in legs:
+        try:
+            K = float(leg.get("strike", S))
+            is_call = str(leg.get("option_type", "call")).lower().startswith("c")
+            sign = 1.0 if str(leg.get("action", "buy")).lower() == "buy" else -1.0
+
+            if K <= 0:
+                continue
+
+            d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * sqrtT)
+            d2 = d1 - sigma * sqrtT
+            pdf_d1 = norm.pdf(d1)
+
+            if is_call:
+                delta = norm.cdf(d1)
+                theta = (
+                    -S * pdf_d1 * sigma / (2 * sqrtT)
+                    - r * K * math.exp(-r * T) * norm.cdf(d2)
+                ) / 365
+            else:
+                delta = norm.cdf(d1) - 1.0
+                theta = (
+                    -S * pdf_d1 * sigma / (2 * sqrtT)
+                    + r * K * math.exp(-r * T) * norm.cdf(-d2)
+                ) / 365
+
+            gamma = pdf_d1 / (S * sigma * sqrtT)
+            vega = S * pdf_d1 * sqrtT / 100  # per 1% IV move
+
+            agg_delta += sign * delta
+            agg_gamma += sign * gamma
+            agg_theta += sign * theta
+            agg_vega += sign * vega
+        except Exception:
+            continue
+
+    return Greeks(
+        delta=agg_delta,
+        gamma=agg_gamma,
+        theta=agg_theta,
+        vega=agg_vega,
+        implied_vol=sigma,
+    )
 
 
 class LiquidityCheck(BaseModel):
@@ -119,8 +190,26 @@ class PositionSizing(BaseModel):
         account_size: float,
         max_position_pct: float = 0.05,
         max_risk_pct: float = 0.02,
+        kelly_fraction: float = 0.0,
     ) -> "PositionSizing":
-        max_position_dollars = account_size * max_position_pct
+        """
+        Calculate position sizing.
+
+        If kelly_fraction > 0 (from performance_feedback.json), use half-Kelly
+        to dynamically scale position size: size up during winning periods,
+        size down during drawdowns.  Hard-capped at max_position_pct (5%).
+        Floor at 1% to avoid sizing to zero even in poor-performance phases.
+        """
+        if kelly_fraction > 0:
+            # Half-Kelly: divide by 2 for safety, cap at configured max
+            half_kelly_pct = kelly_fraction / 2.0
+            effective_position_pct = max(0.01, min(max_position_pct, half_kelly_pct))
+            notes = f"Kelly-adjusted: half_kelly={half_kelly_pct:.1%} → effective={effective_position_pct:.1%}"
+        else:
+            effective_position_pct = max_position_pct
+            notes = f"Fixed sizing: {effective_position_pct:.1%} of account"
+
+        max_position_dollars = account_size * effective_position_pct
         max_risk_dollars = account_size * max_risk_pct
 
         if max_loss_per_contract <= 0:
@@ -140,6 +229,7 @@ class PositionSizing(BaseModel):
             max_loss_per_contract=max_loss_per_contract,
             total_max_loss=total_max_loss,
             account_risk_pct=account_risk_pct,
+            notes=notes,
         )
 
 

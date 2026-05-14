@@ -77,18 +77,21 @@ class RiskManagerAgent(BaseAgent):
         )
 
         # ── Hard Rules (deterministic, always applied) ─────────────
+        self._check_strategy_tier(rec, assessment)
         self._check_position_size(rec, assessment)
         self._check_reward_risk(rec, assessment)
         self._check_iv_rank(rec, assessment)
         self._check_earnings_risk(rec, assessment)
         self._check_daily_loss_budget(session_id, assessment)
 
-        # ── Position sizing ────────────────────────────────────────
+        # ── Position sizing (Kelly-adjusted when performance data available) ──
+        kelly_fraction = self._load_kelly_fraction()
         sizing = PositionSizing.calculate(
             ticker=ticker,
             max_loss_per_contract=rec.max_loss_dollars / max(rec.contracts, 1),
             account_size=self._settings.account_size,
             max_position_pct=self._settings.max_position_size_pct,
+            kelly_fraction=kelly_fraction,
         )
         assessment.position_sizing = sizing
 
@@ -143,7 +146,46 @@ class RiskManagerAgent(BaseAgent):
             len(assessment.veto_reasons),
         )
 
+    @staticmethod
+    def _load_kelly_fraction() -> float:
+        """Read half_kelly from performance_feedback.json if available."""
+        import json
+        from pathlib import Path
+        feedback_path = Path("./performance_feedback.json")
+        if not feedback_path.exists():
+            return 0.0
+        try:
+            data = json.loads(feedback_path.read_text())
+            return float(data.get("half_kelly", 0.0))
+        except Exception:
+            return 0.0
+
     # ── Hard Rules ────────────────────────────────────────────────
+
+    # Strategies forbidden at each tier (hard block, no override)
+    _FORBIDDEN_BY_TIER: dict[str, set[str]] = {
+        "starter":      {"iron_condor", "iron_butterfly", "calendar_spread", "covered_call"},
+        "intermediate": {"calendar_spread", "iron_butterfly"},
+        "advanced":     set(),
+        "professional": set(),
+    }
+
+    def _check_strategy_tier(
+        self, rec: TradeRecommendation, assessment: RiskAssessment
+    ) -> None:
+        tier = self._settings.account_tier
+        forbidden = self._FORBIDDEN_BY_TIER.get(tier, set())
+        if rec.strategy.value in forbidden:
+            assessment.add_veto(
+                code="STRATEGY_NOT_APPROVED_FOR_TIER",
+                description=(
+                    f"{rec.strategy.value} is not suitable for your account tier "
+                    f"({tier}, ${self._settings.account_size:,.0f}). "
+                    f"At this tier, forbidden strategies are: {', '.join(sorted(forbidden))}. "
+                    "Use a simple debit or credit vertical spread instead."
+                ),
+                severity="reject",
+            )
 
     def _check_position_size(
         self, rec: TradeRecommendation, assessment: RiskAssessment

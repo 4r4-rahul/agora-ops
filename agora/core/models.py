@@ -207,6 +207,7 @@ class OpenPosition(BaseModel):
     ticker: str
     strategy: StrategyType
     pillar: StrategyPillar
+    direction: str = "neutral"           # "bullish" | "bearish" | "neutral"
     status: PositionStatus = PositionStatus.OPEN
 
     legs: list[SpreadLeg]
@@ -226,6 +227,14 @@ class OpenPosition(BaseModel):
     last_reviewed: datetime = Field(default_factory=datetime.utcnow)
     ibkr_order_ids: list[int] = Field(default_factory=list)
     notes: str = ""
+
+    # Decision context — stored at entry, read back at close for attribution
+    conviction_at_entry: float = 0.0
+    regime_at_entry: str = ""          # macro_stance at time of entry
+
+    # Pre-earnings tracking — set for positions opened T-7 to T-1 before earnings
+    earnings_date: date | None = None  # the actual earnings date
+    is_pre_earnings: bool = False      # True → close T-1 to avoid IV crush
 
 
 # ── Performance attribution ────────────────────────────────────────────────────

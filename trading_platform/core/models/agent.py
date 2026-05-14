@@ -27,6 +27,10 @@ class AgentTopic(StrEnum):
     RECOMMENDATION_READY = "recommendation.ready"
     EXECUTION_STATUS = "execution.status"
     POSITION_UPDATE = "position.update"
+    CONVICTION_SCORE = "conviction.score"
+    SETUP_TRIGGERED = "setup.triggered"
+    PREMARKET_READY = "premarket.ready"
+    UNIVERSE_READY = "universe.ready"
     ALERT = "alert"
     ERROR = "error"
 
@@ -143,6 +147,9 @@ class AnalysisSession(BaseModel):
     news_result: dict[str, Any] | None = None
     strategy_candidates: list[dict[str, Any]] = Field(default_factory=list)
     risk_assessment: dict[str, Any] | None = None
+    conviction_score: dict[str, Any] | None = None
+    premarket_context: dict[str, Any] | None = None
+    universe_watchlist: list[dict[str, Any]] = Field(default_factory=list)
     review_result: dict[str, Any] | None = None
     final_recommendation: dict[str, Any] | None = None
 

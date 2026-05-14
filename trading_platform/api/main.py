@@ -7,14 +7,21 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from ..core.bus import MessageBus
 from ..core.config import get_settings
 from ..core.state import SharedStateStore
+from ..agents.conviction import ConvictionAgent
 from ..agents.execution import ExecutionAgent
+from ..agents.premarket import PreMarketAgent
+from ..agents.setup_watcher import SetupWatcherAgent
+from ..agents.universe_screener import UniverseScreenerAgent
 from ..agents.journal import TradeJournalAgent
 from ..agents.market_data import MarketDataAgent
 from ..agents.monitor import MonitorAgent
@@ -27,7 +34,7 @@ from ..agents.risk_manager import RiskManagerAgent
 from ..agents.technical import TechnicalAnalysisAgent
 from .deps import clear_platform, set_platform
 from .routes import agents as agents_router
-from .routes import analysis, trades
+from .routes import analysis, dashboard, trades
 
 logger = logging.getLogger(__name__)
 
@@ -46,10 +53,13 @@ async def lifespan(app: FastAPI):
     kwargs = {"bus": bus, "state_store": state_store, "settings": settings}
 
     all_agents = [
+        PreMarketAgent(**kwargs),
+        UniverseScreenerAgent(**kwargs),
         MarketDataAgent(**kwargs),
         RegimeAgent(**kwargs),
         TechnicalAnalysisAgent(**kwargs),
         NewsCatalystAgent(**kwargs),
+        ConvictionAgent(**kwargs),
         OptionsStrategyAgent(**kwargs),
         RiskManagerAgent(**kwargs),
         ReviewerAgent(**kwargs),
@@ -60,11 +70,14 @@ async def lifespan(app: FastAPI):
 
     await asyncio.gather(*[agent.start() for agent in all_agents])
 
+    setup_watcher = SetupWatcherAgent(bus=bus, state_store=state_store, settings=settings)
+    await setup_watcher.start()
+
     orchestrator = OrchestratorAgent(bus=bus, state_store=state_store, settings=settings)
     set_platform(bus, state_store, orchestrator, all_agents)
 
     logger.info(
-        "Platform ready — %d agents started | http://%s:%d",
+        "Platform ready — %d agents + SetupWatcher started | http://%s:%d",
         len(all_agents),
         settings.api_host,
         settings.api_port,
@@ -73,6 +86,7 @@ async def lifespan(app: FastAPI):
     yield
 
     logger.info("Shutting down platform...")
+    await setup_watcher.stop()
     await asyncio.gather(*[agent.stop() for agent in all_agents], return_exceptions=True)
     clear_platform()
     logger.info("Platform stopped")
@@ -99,6 +113,16 @@ def create_app() -> FastAPI:
     app.include_router(analysis.router, prefix="/api/v1/analysis", tags=["analysis"])
     app.include_router(trades.router, prefix="/api/v1/trades", tags=["trades"])
     app.include_router(agents_router.router, prefix="/api/v1/agents", tags=["agents"])
+    app.include_router(dashboard.router, prefix="/api/v1/dashboard", tags=["dashboard"])
+
+    # Serve static files (dashboard HTML, JS, CSS)
+    _static = Path(__file__).parent.parent / "static"
+    if _static.exists():
+        app.mount("/static", StaticFiles(directory=str(_static)), name="static")
+
+    @app.get("/dashboard", include_in_schema=False)
+    async def dashboard_redirect() -> RedirectResponse:
+        return RedirectResponse(url="/static/dashboard.html")
 
     @app.get("/health")
     async def health() -> dict[str, str]:

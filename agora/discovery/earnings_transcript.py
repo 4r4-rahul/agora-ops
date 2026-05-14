@@ -129,6 +129,18 @@ class EarningsTranscriptAgent:
         self._client = anthropic.AsyncAnthropic(api_key=self._settings.anthropic_api_key)
         self._seen_hashes: set[str] = set()
         self._running = False
+        self._csuite_manager: Any = None   # RNDAgent — set via register_csuite_manager()
+        self._recent_results: list[dict] = []   # rolling buffer for R&D briefing
+        # Files API cache: text_hash → file_id (avoids re-uploading same filing)
+        self._file_id_cache: dict[str, str] = {}
+
+    def register_csuite_manager(self, manager: Any) -> None:
+        """Wire the RNDAgent as supervising executive."""
+        self._csuite_manager = manager
+
+    def get_recent_results(self) -> list[dict]:
+        """Return last 10 earnings analysis results for R&D briefing."""
+        return self._recent_results[-10:]
 
     async def start(self) -> None:
         self._running = True
@@ -201,8 +213,28 @@ class EarningsTranscriptAgent:
             result.ticker, result.beat_quality, result.guidance_tone, result.beat_type,
         )
 
+        self._recent_results.append({
+            "ticker": result.ticker,
+            "beat_quality": result.beat_quality,
+            "guidance_tone": result.guidance_tone,
+            "beat_type": result.beat_type,
+            "sector_contagion": result.sector_contagion,
+            "ts": datetime.now(tz=ET).isoformat(),
+        })
+        if len(self._recent_results) > 50:
+            self._recent_results = self._recent_results[-50:]
+
         if self._on_earnings:
             await self._on_earnings(result)
+
+        # Notify R&D of strong earnings results
+        if result.beat_quality in ("strong", "miss") and self._csuite_manager:
+            await self._csuite_manager.receive_alert(
+                "EarningsTranscript", "info",
+                f"Earnings: {result.ticker} | beat={result.beat_quality} "
+                f"guide={result.guidance_tone} type={result.beat_type} "
+                f"contagion={result.sector_contagion}",
+            )
 
         # Fire derivative catalysts (T+0 sector contagion)
         await self._fire_derivative_catalysts(result)
@@ -273,29 +305,75 @@ class EarningsTranscriptAgent:
             pass
         return ""
 
+    async def _get_or_upload_filing(self, text: str) -> str | None:
+        """
+        Upload filing text to Files API and return file_id.
+        Caches by content hash so the same filing is never re-uploaded within a session.
+        Falls back gracefully if Files API is unavailable.
+        """
+        import io as _io
+        text_hash = hashlib.md5(text.encode()).hexdigest()
+        if text_hash in self._file_id_cache:
+            return self._file_id_cache[text_hash]
+        try:
+            file_bytes = _io.BytesIO(text.encode("utf-8"))
+            resp = await self._client.beta.files.upload(
+                file=("earnings_filing.txt", file_bytes, "text/plain"),
+                extra_headers={"anthropic-beta": "files-api-2025-04-14"},
+            )
+            self._file_id_cache[text_hash] = resp.id
+            logger.debug("Files API: uploaded filing %s → %s", text_hash[:8], resp.id)
+            return resp.id
+        except Exception as exc:
+            logger.debug("Files API upload failed (will embed text): %s", exc)
+            return None
+
     async def _analyze_earnings(
         self, entity: str, file_num: str, text: str
     ) -> EarningsResult | None:
         """
         Claude Opus with extended thinking for thorough derivative inference.
         Uses prompt-cached system prompt + streaming for fast first token.
+        Filing text uploaded via Files API to avoid re-tokenizing on T+1 re-analysis.
         """
         try:
-            user_msg = (
-                f"Company: {entity}\n"
-                f"Filing number: {file_num}\n\n"
-                f"Earnings release text:\n{text[:5000]}"
-            )
+            filing_text = text[:5000]
+
+            # Try Files API first — avoids re-tokenizing the same filing on T+1 re-analysis
+            file_id = await self._get_or_upload_filing(filing_text)
+
+            if file_id:
+                user_content: list[Any] = [
+                    {
+                        "type": "text",
+                        "text": f"Company: {entity}\nFiling number: {file_num}\n\nAnalyze the attached earnings filing:",
+                    },
+                    {
+                        "type": "document",
+                        "source": {"type": "file", "file_id": file_id},
+                    },
+                ]
+            else:
+                # Fallback: embed text directly
+                user_content = (
+                    f"Company: {entity}\n"
+                    f"Filing number: {file_num}\n\n"
+                    f"Earnings release text:\n{filing_text}"
+                )
 
             # Stream with extended thinking — adaptive lets Claude self-calibrate depth
             full_text = ""
-            async with self._client.messages.stream(
+            stream_kwargs: dict[str, Any] = dict(
                 model=self._settings.claude_model,
                 max_tokens=2048,
                 thinking={"type": "adaptive"},
                 system=_SYSTEM_CACHE_BLOCK,
-                messages=[{"role": "user", "content": user_msg}],
-            ) as stream:
+                messages=[{"role": "user", "content": user_content}],
+            )
+            if file_id:
+                stream_kwargs["extra_headers"] = {"anthropic-beta": "files-api-2025-04-14"}
+
+            async with self._client.messages.stream(**stream_kwargs) as stream:
                 async for text_chunk in stream.text_stream:
                     full_text += text_chunk
 

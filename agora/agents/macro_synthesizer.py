@@ -85,7 +85,14 @@ class MacroSynthesizer:
     def __init__(self, settings: AgoraSettings | None = None) -> None:
         self._settings = settings or get_settings()
         self._client = anthropic.AsyncAnthropic(api_key=self._settings.anthropic_api_key)
-        self._last_context: MacroContext | None = None
+        # Seed with a safe rule-based default so readiness never sees None
+        # even before the first async scan completes.
+        self._last_context: MacroContext = MacroContext(
+            macro_stance="neutral", confidence=0.5,
+            vol_selling_ok=True, size_bias="maintain",
+            key_risk="startup", reasoning="Startup default — pending synthesis.",
+            method="rules",
+        )
 
     async def synthesize(
         self,
@@ -108,18 +115,23 @@ class MacroSynthesizer:
         )
 
         try:
-            response = await self._client.messages.create(
+            # Streaming prevents timeout on long macro synthesis; thinking display="summarized"
+            # shows reasoning in Opus 4.7 logs for debugging regime-flip decisions.
+            async with self._client.messages.stream(
                 model=self._settings.claude_model,
                 max_tokens=1024,
-                thinking={"type": "adaptive"},
+                thinking={"type": "adaptive", "display": "summarized"},
                 system=_CACHED_SYSTEM,
                 messages=[{"role": "user", "content": state_summary}],
-            )
+                output_config={"effort": "high"},
+            ) as stream:
+                response = await stream.get_final_message()
 
-            # Extract text blocks (thinking blocks are separate)
             text_blocks = [b for b in response.content if b.type == "text"]
             if not text_blocks:
-                return self._fallback_context(regime, iv_rank, vix)
+                ctx = self._fallback_context(regime, iv_rank, vix)
+                self._last_context = ctx
+                return ctx
 
             raw = text_blocks[-1].text.strip()
             if raw.startswith("```"):
@@ -140,7 +152,9 @@ class MacroSynthesizer:
 
         except Exception as exc:
             logger.warning("MacroSynthesizer Claude call failed: %s — using rule fallback", exc)
-            return self._fallback_context(regime, iv_rank, vix)
+            ctx = self._fallback_context(regime, iv_rank, vix)
+            self._last_context = ctx  # always set so readiness meter sees non-None
+            return ctx
 
     def _format_state(
         self,

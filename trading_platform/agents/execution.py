@@ -4,33 +4,32 @@ ExecutionAgent — paper and live order management with human approval gate.
 Subscribes to: RECOMMENDATION_READY
 Publishes:     EXECUTION_STATUS
 
-In paper mode: logs the trade and simulates fills.
-In live mode: routes to IBKR (placeholder) after human confirmation.
-Human approval is ALWAYS required before live execution.
+Paper mode: submits to IBKR paper account (port 7497); falls back to
+            local-only simulation if IBKR is unavailable.
+Live mode:  submits to IBKR live account; human approval always required.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 import uuid
-from datetime import datetime
+from datetime import date, datetime, timezone
+from pathlib import Path
 
 from ..core.models.agent import AgentMessage, AgentTopic
-from ..core.models.trade import TradeDecision, TradeJournalEntry, TradeRecommendation
+from ..core.models.trade import TradeDecision, TradeRecommendation
 from .base import BaseAgent
 
 logger = logging.getLogger(__name__)
+
+_DB = Path("./trade_journal.db")
 
 
 class ExecutionAgent(BaseAgent):
     name = "execution"
     subscriptions = [AgentTopic.RECOMMENDATION_READY]
-
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        # Pending approvals: session_id → (rec, future)
-        self._pending: dict[str, tuple[TradeRecommendation, asyncio.Future]] = {}
 
     async def handle(self, message: AgentMessage) -> None:
         session_id = message.session_id
@@ -41,22 +40,27 @@ class ExecutionAgent(BaseAgent):
         ):
             self._log.info(
                 "[%s] skipping execution — decision=%s",
-                session_id,
-                rec.final_decision,
+                session_id, rec.final_decision,
+            )
+            return
+
+        # Dedup: one open position per ticker at a time
+        if self._has_open_position(rec.ticker):
+            self._log.info(
+                "[%s] skipping duplicate — open position for %s already exists",
+                session_id, rec.ticker,
             )
             return
 
         self._log.info(
-            "[%s] %s %s %s — awaiting human approval",
-            session_id,
-            rec.ticker,
-            rec.strategy.value,
-            rec.direction,
+            "[%s] %s %s %s — awaiting approval",
+            session_id, rec.ticker, rec.strategy.value, rec.direction,
         )
-
         self._print_recommendation(rec)
 
-        if self._settings.require_human_approval:
+        if self._settings.trading_mode == "paper":
+            rec.approve(user="auto-paper")
+        elif self._settings.require_human_approval:
             approved = await self._request_human_approval(session_id, rec)
             if not approved:
                 self._log.info("[%s] human rejected trade", session_id)
@@ -72,13 +76,85 @@ class ExecutionAgent(BaseAgent):
                 return
             rec.approve(user="human")
 
+        # Market hours guard — options only trade 9:30–16:00 ET
+        from ..scripts.scheduler import _is_market_open
+        now = datetime.now(timezone.utc)
+        if not _is_market_open(now):
+            if self._settings.trading_mode == "live":
+                self._log.error(
+                    "[%s] BLOCKED — market is closed. No live order sent.",
+                    session_id,
+                )
+                await self.publish(
+                    AgentTopic.EXECUTION_STATUS,
+                    session_id=session_id,
+                    payload={
+                        "status": "blocked_market_closed",
+                        "ticker": rec.ticker,
+                        "session_id": session_id,
+                    },
+                )
+                return
+            self._log.warning(
+                "[%s] market closed — proceeding with paper execution for testing",
+                session_id,
+            )
+
+        # APPROVED alert — fired once, before broker submission
+        from ..services.alerts import alert_trade_approved
+        await alert_trade_approved(
+            self._settings.alert_webhook_url,
+            ticker=rec.ticker,
+            strategy=rec.strategy.value,
+            legs=rec.legs,
+            expiration=rec.expiration,
+            entry_price=rec.entry_price,
+            stop_loss=rec.stop_loss,
+            profit_target=rec.profit_target,
+            max_loss_dollars=rec.max_loss_dollars,
+            contracts=rec.contracts,
+            mode=self._settings.trading_mode,
+        )
+
+        # Single pre-assigned journal ID shared by execution, journal, and monitor
+        journal_id = str(uuid.uuid4())
+
         if self._settings.trading_mode == "paper":
-            await self._execute_paper(session_id, rec)
+            await self._execute_paper(session_id, rec, journal_id)
         else:
-            await self._execute_live(session_id, rec)
+            await self._execute_live(session_id, rec, journal_id)
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _has_open_position(self, ticker: str) -> bool:
+        """Return True if an open position already exists for this ticker."""
+        if not _DB.exists():
+            return False
+        try:
+            with sqlite3.connect(_DB) as conn:
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM trade_journal WHERE ticker=? AND status='open'",
+                    (ticker,),
+                ).fetchone()
+                return (row[0] or 0) > 0
+        except Exception:
+            return False
+
+    def _build_ibkr_legs(self, rec: TradeRecommendation) -> list[dict]:
+        """Convert SpreadLeg objects into the dict format IBKR client expects."""
+        today = date.today()
+        return [
+            {
+                "option_type": leg.option_type,
+                "strike": leg.strike,
+                "expiration_dte": max(0, (leg.expiration - today).days),
+                "action": leg.action,
+                "quantity": leg.quantity,
+            }
+            for leg in rec.legs
+        ]
 
     def _print_recommendation(self, rec: TradeRecommendation) -> None:
-        """Print formatted recommendation to console for human review."""
         border = "=" * 60
         print(f"\n{border}")
         print(f"  TRADE RECOMMENDATION — {rec.ticker} {rec.strategy.value.upper()}")
@@ -109,10 +185,32 @@ class ExecutionAgent(BaseAgent):
     async def _request_human_approval(
         self, session_id: str, rec: TradeRecommendation
     ) -> bool:
-        """
-        In a real system, this sends a push notification / Discord DM.
-        For now, prompt on stdin (non-blocking via executor).
-        """
+        token = getattr(self._settings, "discord_bot_token", None)
+        user_id = getattr(self._settings, "discord_approval_user_id", None)
+        timeout = getattr(self._settings, "discord_approval_timeout_seconds", 300)
+
+        if token and user_id:
+            from ..services.discord_approval import request_approval
+            legs_summary = "  ".join(
+                f"{lg.action.upper()} {lg.strike} {lg.option_type[0].upper()}"
+                for lg in rec.legs
+            )
+            return await request_approval(
+                token=token,
+                user_id=user_id,
+                ticker=rec.ticker,
+                strategy=rec.strategy.value,
+                direction=str(rec.direction),
+                legs_summary=legs_summary,
+                entry_price=rec.entry_price,
+                stop_loss=rec.stop_loss,
+                profit_target=rec.profit_target,
+                max_loss_dollars=rec.max_loss_dollars,
+                reward_risk_ratio=rec.reward_risk_ratio,
+                contracts=rec.contracts,
+                timeout_seconds=timeout,
+            )
+
         loop = asyncio.get_event_loop()
 
         def _prompt() -> bool:
@@ -126,34 +224,45 @@ class ExecutionAgent(BaseAgent):
 
         return await loop.run_in_executor(None, _prompt)
 
+    # ── Paper execution ───────────────────────────────────────────────────────
+
     async def _execute_paper(
-        self, session_id: str, rec: TradeRecommendation
+        self, session_id: str, rec: TradeRecommendation, journal_id: str
     ) -> None:
-        entry = TradeJournalEntry(
-            recommendation_id=rec.id,
-            session_id=session_id,
-            ticker=rec.ticker,
-            strategy=rec.strategy,
-            direction=rec.direction,
-            entry_price=rec.entry_price,
-            contracts=rec.contracts,
-            position_size_dollars=rec.position_size_dollars,
-            max_loss_dollars=rec.max_loss_dollars,
-            max_gain_dollars=rec.max_gain_dollars,
-            stop_loss=rec.stop_loss,
-            profit_target=rec.profit_target,
-            thesis=rec.thesis,
-            raw_recommendation=rec.model_dump(mode="json"),
-        )
+        """Submit to IBKR paper account (port 7497). Falls back to local-only."""
+        ibkr_order_id: int | None = None
+        ibkr_oca_group: str | None = None
+
+        try:
+            from ..services.ibkr_client import place_bracket_order
+            fill_result = await place_bracket_order(
+                ticker=rec.ticker,
+                legs=self._build_ibkr_legs(rec),
+                contracts=rec.contracts,
+                entry_price=rec.entry_price,
+                profit_target=rec.profit_target,
+                stop_loss=rec.stop_loss,
+                session_id=session_id,
+                host=self._settings.ibkr_host,
+                port=self._settings.ibkr_port,
+                client_id=self._settings.ibkr_client_id,
+            )
+            ibkr_order_id = fill_result.get("order_id")
+            ibkr_oca_group = fill_result.get("oca_group")
+            self._log.info(
+                "[PAPER IBKR] Bracket submitted — orderId=%s status=%s",
+                ibkr_order_id, fill_result.get("status"),
+            )
+        except Exception as exc:
+            self._log.warning(
+                "[PAPER LOCAL] IBKR unavailable (%s) — recording trade locally only",
+                exc,
+            )
 
         self._log.info(
             "[PAPER] %s %s %s @ $%.2f x%d — journal_id=%s",
-            rec.ticker,
-            rec.strategy.value,
-            rec.direction,
-            rec.entry_price,
-            rec.contracts,
-            entry.id,
+            rec.ticker, rec.strategy.value, rec.direction,
+            rec.entry_price, rec.contracts, journal_id,
         )
 
         await self.publish(
@@ -162,60 +271,50 @@ class ExecutionAgent(BaseAgent):
             payload={
                 "status": "paper_filled",
                 "ticker": rec.ticker,
-                "strategy": rec.strategy,
+                "strategy": rec.strategy.value,
                 "entry_price": rec.entry_price,
                 "contracts": rec.contracts,
-                "journal_id": str(entry.id),
+                "journal_id": journal_id,
+                "ibkr_order_id": ibkr_order_id,
+                "ibkr_oca_group": ibkr_oca_group,
                 "mode": "paper",
             },
         )
 
-        from ..services.alerts import alert_trade_approved
-        await alert_trade_approved(
+        from ..services.alerts import alert_trade_executed
+        await alert_trade_executed(
             self._settings.alert_webhook_url,
             ticker=rec.ticker,
             strategy=rec.strategy.value,
-            direction=rec.direction.value,
+            legs=rec.legs,
+            expiration=rec.expiration,
             entry_price=rec.entry_price,
-            stop_loss=rec.stop_loss,
-            profit_target=rec.profit_target,
-            max_loss_dollars=rec.max_loss_dollars,
-            reward_risk_ratio=rec.reward_risk_ratio,
             contracts=rec.contracts,
-            thesis=rec.thesis,
-            session_id=session_id,
+            mode="paper",
         )
+
+    # ── Live execution ────────────────────────────────────────────────────────
 
     async def _execute_live(
-        self, session_id: str, rec: TradeRecommendation
+        self, session_id: str, rec: TradeRecommendation, journal_id: str
     ) -> None:
-        from ..services.ibkr_client import place_combo_order
+        from ..services.ibkr_client import place_bracket_order
 
         self._log.warning(
-            "[LIVE] submitting IBKR order — %s %s @ $%.2f x%d",
-            rec.ticker,
-            rec.strategy.value,
-            rec.entry_price,
-            rec.contracts,
+            "[LIVE] submitting bracket — %s %s @ $%.2f x%d (target=%.2f stop=%.2f)",
+            rec.ticker, rec.strategy.value,
+            rec.entry_price, rec.contracts,
+            rec.profit_target, rec.stop_loss,
         )
 
-        legs = [
-            {
-                "option_type": leg.option_type,
-                "strike": leg.strike,
-                "expiration_dte": leg.expiration_dte,
-                "action": leg.action,
-                "quantity": leg.quantity,
-            }
-            for leg in rec.legs
-        ]
-
         try:
-            fill_result = await place_combo_order(
+            fill_result = await place_bracket_order(
                 ticker=rec.ticker,
-                legs=legs,
+                legs=self._build_ibkr_legs(rec),
                 contracts=rec.contracts,
-                limit_price=rec.entry_price,
+                entry_price=rec.entry_price,
+                profit_target=rec.profit_target,
+                stop_loss=rec.stop_loss,
                 session_id=session_id,
                 host=self._settings.ibkr_host,
                 port=self._settings.ibkr_port,
@@ -223,7 +322,7 @@ class ExecutionAgent(BaseAgent):
             )
         except Exception as exc:
             self._log.error(
-                "[LIVE] IBKR order failed — %s: %s",
+                "[LIVE] IBKR bracket order failed — %s: %s",
                 type(exc).__name__, exc,
             )
             await self.publish(
@@ -239,10 +338,8 @@ class ExecutionAgent(BaseAgent):
             raise
 
         self._log.info(
-            "[LIVE] Order filled — orderId=%s status=%s avg_price=%s",
-            fill_result.get("order_id"),
-            fill_result.get("status"),
-            fill_result.get("avg_price"),
+            "[LIVE] Bracket submitted — orderId=%s status=%s",
+            fill_result.get("order_id"), fill_result.get("status"),
         )
 
         await self.publish(
@@ -251,12 +348,27 @@ class ExecutionAgent(BaseAgent):
             payload={
                 "status": "live_filled",
                 "ticker": rec.ticker,
-                "strategy": rec.strategy,
-                "entry_price": fill_result.get("avg_price") or rec.entry_price,
+                "strategy": rec.strategy.value,
+                "entry_price": rec.entry_price,
+                "profit_target": rec.profit_target,
+                "stop_loss": rec.stop_loss,
                 "contracts": rec.contracts,
-                "order_id": fill_result.get("order_id"),
+                "ibkr_order_id": fill_result.get("order_id"),
                 "fill_status": fill_result.get("status"),
+                "journal_id": journal_id,
                 "mode": "live",
                 "session_id": session_id,
             },
+        )
+
+        from ..services.alerts import alert_trade_executed
+        await alert_trade_executed(
+            self._settings.alert_webhook_url,
+            ticker=rec.ticker,
+            strategy=rec.strategy.value,
+            legs=rec.legs,
+            expiration=rec.expiration,
+            entry_price=rec.entry_price,
+            contracts=rec.contracts,
+            mode="live",
         )

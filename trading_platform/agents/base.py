@@ -169,39 +169,69 @@ class BaseAgent(ABC):
             messages.extend(extra_context)
         messages.append({"role": "user", "content": user_message})
 
-        response = await self._client.messages.create(
-            model=self._settings.claude_model,
-            max_tokens=max_tokens,
-            # Note: thinking cannot be enabled when tool_choice forces tool use (API constraint)
-            system=[
-                {
-                    "type": "text",
-                    "text": system_prompt,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
-            tools=[tool_def],
-            tool_choice={"type": "tool", "name": tool_name},
-            messages=messages,
-        )
+        last_exc: Exception | None = None
+        for attempt in range(2):
+            response = await self._client.messages.create(
+                model=self._settings.claude_model,
+                max_tokens=max_tokens,
+                # Note: thinking cannot be enabled when tool_choice forces tool use (API constraint)
+                system=[
+                    {
+                        "type": "text",
+                        "text": system_prompt,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+                tools=[tool_def],
+                tool_choice={"type": "tool", "name": tool_name},
+                messages=messages,
+            )
 
-        # Extract the tool_use block
-        for block in response.content:
-            if block.type == "tool_use" and block.name == tool_name:
-                data = block.input
-                # Opus 4.7 without thinking occasionally wraps the entire output in
-                # a spurious {"$PARAMETER_NAME": <actual_data>} envelope — unwrap it.
-                if (
-                    isinstance(data, dict)
-                    and len(data) == 1
-                    and next(iter(data)).startswith("$")
-                    and isinstance(next(iter(data.values())), dict)
-                ):
-                    data = next(iter(data.values()))
-                return output_schema.model_validate(data)
+            # Extract the tool_use block
+            for block in response.content:
+                if block.type == "tool_use" and block.name == tool_name:
+                    data = block.input
+                    # Claude sometimes wraps output in a single-key dict:
+                    #   {"$PARAM_NAME": {...}}, {"parameter": {...}}, {"output": {...}}, etc.
+                    # Unwrap if the inner value is a dict containing known schema fields.
+                    if isinstance(data, dict) and len(data) == 1:
+                        inner = next(iter(data.values()))
+                        if isinstance(inner, str):
+                            try:
+                                inner = json.loads(inner)
+                            except Exception:
+                                inner = None
+                        if isinstance(inner, dict):
+                            schema_fields = set(output_schema.model_fields.keys())
+                            if schema_fields & set(inner.keys()):
+                                data = inner
+                    try:
+                        return output_schema.model_validate(data)
+                    except Exception as exc:
+                        last_exc = exc
+                        if attempt == 0:
+                            # The API requires a tool_result immediately after each tool_use.
+                            # Send an error result + correction instruction so Claude retries.
+                            messages.append({"role": "assistant", "content": response.content})
+                            messages.append({
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "tool_result",
+                                        "tool_use_id": block.id,
+                                        "is_error": True,
+                                        "content": (
+                                            f"Schema validation failed: {exc}. "
+                                            f"Call {tool_name} again with every required field "
+                                            f"as a separate named JSON property."
+                                        ),
+                                    }
+                                ],
+                            })
+                        break  # retry the outer loop
 
-        raise RuntimeError(
-            f"{self.name}: Claude did not return a {tool_name} tool call"
+        raise last_exc or RuntimeError(
+            f"{self.name}: Claude did not return a valid {tool_name} tool call"
         )
 
     async def _call_claude_text(

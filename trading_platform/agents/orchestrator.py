@@ -10,7 +10,8 @@ This agent:
 Pipeline flow:
   ANALYSIS_REQUEST → MarketData + News (parallel)
   MARKET_DATA_RESULT → Regime + Technical (parallel)
-  TECHNICAL_RESULT → OptionsStrategy (after regime/news settle)
+  TECHNICAL_RESULT → ConvictionAgent (waits ~150ms for regime + news, then scores)
+  CONVICTION_SCORE → OptionsStrategy (gate: skip if no_trade)
   STRATEGY_CANDIDATES → RiskManager
   RISK_ASSESSMENT → Reviewer
   RECOMMENDATION_READY → Execution + Journal
@@ -20,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from ..core.bus import MessageBus
@@ -51,9 +52,16 @@ class OrchestratorAgent:
         self._log = logging.getLogger("platform.agents.orchestrator")
         self._active_sessions: dict[str, asyncio.Event] = {}
 
+        # Per-ticker concurrency lock: prevents duplicate pipelines for the same ticker
+        self._active_tickers: set[str] = set()
+        # Per-ticker last-completed timestamp: cooldown for setup_watcher escalations
+        self._ticker_last_completed: dict[str, datetime] = {}
+
         # Subscribe to terminal events to know when sessions complete
         self._bus.subscribe(AgentTopic.RECOMMENDATION_READY, self._on_recommendation)
         self._bus.subscribe(AgentTopic.ERROR, self._on_error)
+        # Tier-2 fast path: setup watcher triggers escalate to full analysis
+        self._bus.subscribe(AgentTopic.SETUP_TRIGGERED, self._on_setup_triggered)
 
     async def analyze(
         self,
@@ -70,39 +78,50 @@ class OrchestratorAgent:
         Returns the final recommendation dict, or an error dict.
         Waits up to `timeout` seconds for the pipeline to complete.
         """
-        if session_id:
-            session = await self._state.get(session_id)
-            if not session:
+        # Per-ticker concurrency guard — one active pipeline per ticker at a time
+        if ticker in self._active_tickers:
+            self._log.warning(
+                "analysis already in progress for %s — skipping duplicate request", ticker
+            )
+            return {"error": "analysis_in_progress", "ticker": ticker}
+
+        self._active_tickers.add(ticker)
+        try:
+            if session_id:
+                session = await self._state.get(session_id)
+                if not session:
+                    session = await self._state.create_session(ticker)
+                    session_id = session.session_id
+            else:
                 session = await self._state.create_session(ticker)
                 session_id = session.session_id
-        else:
-            session = await self._state.create_session(ticker)
-            session_id = session.session_id
 
-        done_event = asyncio.Event()
-        self._active_sessions[session_id] = done_event
+            done_event = asyncio.Event()
+            self._active_sessions[session_id] = done_event
 
-        self._log.info("starting analysis session %s for %s", session_id, ticker)
+            self._log.info("starting analysis session %s for %s", session_id, ticker)
 
-        # Kick off the pipeline
-        await self._fire_analysis_request(ticker, session_id)
+            await self._fire_analysis_request(ticker, session_id)
 
-        try:
-            await asyncio.wait_for(done_event.wait(), timeout=timeout)
-        except asyncio.TimeoutError:
-            self._log.error("[%s] pipeline timed out after %.0fs", session_id, timeout)
-            await self._state.update(session_id, status="failed", error="pipeline timeout")
+            try:
+                await asyncio.wait_for(done_event.wait(), timeout=timeout)
+            except asyncio.TimeoutError:
+                self._log.error("[%s] pipeline timed out after %.0fs", session_id, timeout)
+                await self._state.update(session_id, status="failed", error="pipeline timeout")
+            finally:
+                self._active_sessions.pop(session_id, None)
+
+            self._ticker_last_completed[ticker] = datetime.now(timezone.utc)
+            session = await self._state.get(session_id)
+            if session and session.final_recommendation:
+                return session.final_recommendation
+            return {
+                "error": session.error if session else "unknown",
+                "session_id": session_id,
+                "ticker": ticker,
+            }
         finally:
-            self._active_sessions.pop(session_id, None)
-
-        session = await self._state.get(session_id)
-        if session and session.final_recommendation:
-            return session.final_recommendation
-        return {
-            "error": session.error if session else "unknown",
-            "session_id": session_id,
-            "ticker": ticker,
-        }
+            self._active_tickers.discard(ticker)
 
     async def analyze_batch(
         self,
@@ -151,6 +170,42 @@ class OrchestratorAgent:
             event = self._active_sessions.get(session_id)
             if event:
                 event.set()
+
+    async def _on_setup_triggered(self, message: AgentMessage) -> None:
+        """Tier-2 escalation: a setup trigger fires the full analysis pipeline."""
+        ticker = message.payload.get("ticker")
+        trigger = message.payload.get("trigger")
+        session_id = message.session_id
+        if not ticker:
+            return
+
+        # Cooldown: don't re-analyse if we finished an analysis within the last 30 min
+        last = self._ticker_last_completed.get(ticker)
+        if last:
+            elapsed = (datetime.now(timezone.utc) - last).total_seconds()
+            if elapsed < 1800:
+                self._log.info(
+                    "[%s] SETUP_TRIGGERED %s %s — skipping, last analysis was %.0fm ago",
+                    session_id, ticker, trigger, elapsed / 60,
+                )
+                return
+
+        # Also skip if analysis is already running
+        if ticker in self._active_tickers:
+            self._log.info(
+                "[%s] SETUP_TRIGGERED %s — skipping, analysis already in progress",
+                session_id, ticker,
+            )
+            return
+
+        self._log.info(
+            "[%s] SETUP_TRIGGERED %s %s — escalating to full analysis",
+            session_id, ticker, trigger,
+        )
+        asyncio.create_task(
+            self.analyze(ticker, session_id=session_id, timeout=120.0),
+            name=f"setup_analyze_{ticker}",
+        )
 
     async def get_session(self, session_id: str) -> AnalysisSession | None:
         return await self._state.get(session_id)

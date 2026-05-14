@@ -82,7 +82,7 @@ def _classify_regime(snapshot: MarketSnapshot) -> dict[str, Any]:
     }
 
 
-def _build_strategy(snapshot: MarketSnapshot, regime_result: dict | None) -> dict[str, Any]:
+def _build_strategy(snapshot: MarketSnapshot, regime_result: dict | None, account_size: float = 10_000.0) -> dict[str, Any]:
     """Rule-based strategy generation matching StrategyOutput schema."""
     price = snapshot.price
     atr = snapshot.atr_14 or (price * 0.01)
@@ -124,18 +124,21 @@ def _build_strategy(snapshot: MarketSnapshot, regime_result: dict | None) -> dic
         call_buy = call_sell + round(atr * 0.8 / 5) * 5
         put_sell = round((price - otm_width) / 5) * 5
         put_buy = put_sell - round(atr * 0.8 / 5) * 5
-        entry = round(atr * 0.20, 2)   # credit received
+        wing = max(5.0, call_buy - call_sell)  # wing width must be positive
+        # Cap credit at 35% of wing so max_loss is always positive
+        entry = round(min(atr * 0.20, wing * 0.35), 2)
         stop = round(entry * 2.0, 2)   # 2× credit = max loss trigger
         target = round(entry * 0.5, 2)
         buy_strike = put_buy
         sell_strike = call_sell
-        wing = call_buy - call_sell
-        max_loss = (wing - entry) * 100
-        max_gain = entry * 100
+        max_loss = round((wing - entry) * 100, 2)   # always > 0 now
+        max_gain = round(entry * 100, 2)
         iv_risk = "high" if iv_rank > 70 else "moderate"
 
     rr = round(max_gain / max_loss, 2) if max_loss > 0 else 1.5
-    contracts = max(1, int(min(500, price * 0.05) / max(1, max_loss)))
+    # Size to 2% account risk per trade — true compound sizing
+    risk_budget = account_size * 0.02
+    contracts = max(1, int(risk_budget / max(1.0, max_loss)))
 
     return {
         "ticker": snapshot.ticker,
@@ -185,7 +188,9 @@ def _assess_risk(strategy: dict, settings_dict: dict) -> dict[str, Any]:
     iv_rank = strategy.get("iv_crush_risk", "low")
     max_loss = strategy.get("max_loss_dollars", 0)
     min_rr = settings_dict.get("min_reward_risk_ratio", 1.5)
-    max_pos = settings_dict.get("max_position_dollars", 2000)
+    # max_position cap scales with account — 5% of current balance
+    account_size = settings_dict.get("account_size", 10_000.0)
+    max_pos = settings_dict.get("max_position_dollars", account_size * 0.05)
 
     vetos = []
     if rr < min_rr:
@@ -259,6 +264,7 @@ def make_mock_client(snapshot_ref: dict) -> MagicMock:
         ).lower()
 
         snap: MarketSnapshot = snapshot_ref.get("snap")
+        account_size: float = snapshot_ref.get("account_size", 10_000.0)
 
         if "quantitative market regime" in text:
             result = _classify_regime(snap)
@@ -266,7 +272,7 @@ def make_mock_client(snapshot_ref: dict) -> MagicMock:
             return _tool_response(result)
 
         if "professional options trader" in text:
-            result = _build_strategy(snap, regime_cache)
+            result = _build_strategy(snap, regime_cache, account_size=account_size)
             regime_cache["_last_strategy"] = result  # share with risk + reviewer
             return _tool_response(result)
 
@@ -274,7 +280,7 @@ def make_mock_client(snapshot_ref: dict) -> MagicMock:
             strategy = regime_cache.get("_last_strategy", {"reward_risk_ratio": 2.0, "max_loss_dollars": 200})
             result = _assess_risk(
                 strategy,
-                {"min_reward_risk_ratio": 1.5, "max_position_dollars": 2000},
+                {"min_reward_risk_ratio": 1.5, "account_size": account_size},
             )
             regime_cache["_risk_result"] = result  # share with reviewer
             return _tool_response(result)

@@ -1,0 +1,298 @@
+"""
+ExecutionQualityAgent — tracks fill rate, reject taxonomy, and slippage.
+
+Records every order attempt and its outcome. Exposes real-time stats so the
+CEO and session can detect systematic execution failure (like Error 201 storms)
+before they burn an entire trading day.
+
+Metrics tracked:
+  fill_rate          — filled / total attempted (session + rolling 7-day)
+  reject_rate        — rejected / total attempted
+  reject_reasons     — dict of IBKR error_code → count
+  avg_slippage_ticks — mean(mid_price - fill_price) per strategy type
+  attempts_by_ticker — per-ticker attempt / fill / reject counts
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import sqlite3
+from collections import defaultdict
+from datetime import date, datetime, timedelta
+from typing import Any
+from zoneinfo import ZoneInfo
+
+from ..core.config import AgoraSettings, get_settings
+
+logger = logging.getLogger(__name__)
+
+ET = ZoneInfo("America/New_York")
+
+
+class ExecutionQualityAgent:
+    """
+    Thread-safe execution quality monitor. Call record_* from any async context.
+    Logs a quality summary every 30 min during market hours.
+    """
+
+    def __init__(
+        self,
+        settings: AgoraSettings | None = None,
+        ceo_agent: Any = None,
+    ) -> None:
+        self._settings = settings or get_settings()
+        self._ceo = ceo_agent
+        self._csuite_manager: Any = None   # COOAgent — set via register_csuite_manager()
+        self._running = False
+        self._db = self._init_db()
+
+        # In-session counters (reset on start, NOT persisted — use DB for history)
+        self._session_attempts = 0
+        self._session_fills = 0
+        self._session_rejects = 0
+        self._session_reject_reasons: dict[str, int] = defaultdict(int)
+        self._session_slippage: list[float] = []
+
+        # Alert threshold: if fill_rate drops below this, dispatch CEO alert
+        self._fill_rate_alert_threshold = 0.30  # 30%
+        self._alert_sent_this_session = False
+
+    def register_csuite_manager(self, manager: Any) -> None:
+        """Wire the COOAgent as supervising executive for alert escalation."""
+        self._csuite_manager = manager
+
+    def _init_db(self) -> sqlite3.Connection:
+        db_path = self._settings.db_path
+        conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS execution_quality (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                attempt_date TEXT NOT NULL,
+                ticker TEXT NOT NULL,
+                strategy TEXT NOT NULL DEFAULT '',
+                mid_price REAL NOT NULL DEFAULT 0,
+                outcome TEXT NOT NULL,        -- 'fill' | 'reject' | 'timeout'
+                fill_price REAL,              -- actual fill price (null if rejected)
+                slippage_ticks REAL,          -- mid - fill (negative = paid more than mid)
+                reject_code TEXT DEFAULT '',  -- IBKR error code string
+                reject_reason TEXT DEFAULT '' -- human-readable reason
+            )
+        """)
+        conn.commit()
+        return conn
+
+    # ── Recording API (called by ibkr_bridge / session) ─────────────
+
+    def record_attempt(self, ticker: str, strategy: str, mid_price: float) -> None:
+        """Call before submitting an order to IBKR."""
+        self._session_attempts += 1
+        self._db.execute(
+            "INSERT INTO execution_quality (attempt_date, ticker, strategy, mid_price, outcome) "
+            "VALUES (?, ?, ?, ?, 'pending')",
+            (date.today().isoformat(), ticker, strategy, mid_price),
+        )
+        self._db.commit()
+
+    def record_fill(
+        self, ticker: str, fill_price: float, mid_price: float, strategy: str = ""
+    ) -> None:
+        """Call when IBKR confirms a fill."""
+        self._session_fills += 1
+        slippage = mid_price - fill_price  # positive = better than mid (rare)
+        self._session_slippage.append(slippage)
+
+        self._db.execute(
+            "UPDATE execution_quality SET outcome='fill', fill_price=?, slippage_ticks=? "
+            "WHERE id = (SELECT id FROM execution_quality WHERE ticker=? AND outcome='pending' "
+            "AND attempt_date=? ORDER BY id DESC LIMIT 1)",
+            (fill_price, slippage, ticker, date.today().isoformat()),
+        )
+        self._db.commit()
+        logger.info(
+            "ExecutionQuality FILL: %s | fill=%.4f mid=%.4f slippage=%.4f",
+            ticker, fill_price, mid_price, slippage,
+        )
+
+    def record_reject(
+        self,
+        ticker: str,
+        error_code: str,
+        reason: str,
+        strategy: str = "",
+    ) -> None:
+        """Call when IBKR rejects an order."""
+        self._session_rejects += 1
+        self._session_reject_reasons[error_code] += 1
+
+        # SQLite UPDATE doesn't support ORDER BY/LIMIT — use a subquery to target latest row
+        self._db.execute(
+            "UPDATE execution_quality SET outcome='reject', reject_code=?, reject_reason=? "
+            "WHERE id = (SELECT id FROM execution_quality WHERE ticker=? AND outcome='pending' "
+            "AND attempt_date=? ORDER BY id DESC LIMIT 1)",
+            (error_code, reason[:500], ticker, date.today().isoformat()),
+        )
+        self._db.commit()
+        logger.warning(
+            "ExecutionQuality REJECT: %s | code=%s | %s",
+            ticker, error_code, reason[:120],
+        )
+
+        # Check for Error 201 storm
+        if error_code == "201":
+            self._session_reject_reasons["201_storm_count"] = (
+                self._session_reject_reasons.get("201_storm_count", 0) + 1
+            )
+
+    # ── Stats ────────────────────────────────────────────────────────
+
+    def get_session_stats(self) -> dict:
+        fill_rate = (
+            self._session_fills / self._session_attempts
+            if self._session_attempts > 0 else 0.0
+        )
+        avg_slippage = (
+            sum(self._session_slippage) / len(self._session_slippage)
+            if self._session_slippage else 0.0
+        )
+        return {
+            "attempts":       self._session_attempts,
+            "fills":          self._session_fills,
+            "rejects":        self._session_rejects,
+            "fill_rate":      fill_rate,
+            "avg_slippage":   avg_slippage,
+            "reject_reasons": dict(self._session_reject_reasons),
+            "error_201_storm": self._session_reject_reasons.get("201", 0) >= 5,
+        }
+
+    def get_today_db_stats(self) -> dict:
+        """
+        DB-accurate today stats — correct even after a session restart.
+        In-memory session counters reset on restart; this doesn't.
+        """
+        today = date.today().isoformat()
+        rows = self._db.execute(
+            "SELECT outcome, COUNT(*) FROM execution_quality WHERE attempt_date=? GROUP BY outcome",
+            (today,),
+        ).fetchall()
+        m = {r[0]: r[1] for r in rows}
+        fills    = m.get("fill", 0)
+        rejects  = m.get("reject", 0)
+        timeouts = m.get("timeout", 0)
+        total    = fills + rejects + timeouts
+        return {
+            "fills":        fills,
+            "rejects":      rejects,
+            "timeouts":     timeouts,
+            "total":        total,
+            "fill_rate":    fills / total if total > 0 else None,
+            "timeout_rate": timeouts / total if total > 0 else None,
+        }
+
+    def count_ghost_fills_today(self, db_path: str) -> int:
+        """
+        Fills recorded in execution_quality today that have no matching position.
+        > 0 means record_fill() ran but _record_position() didn't — prior crash indicator.
+        """
+        try:
+            conn = sqlite3.connect(db_path, check_same_thread=False)
+            count = conn.execute(
+                """SELECT COUNT(*) FROM execution_quality eq
+                   WHERE eq.outcome='fill' AND eq.attempt_date=date('now')
+                   AND eq.ticker NOT IN (SELECT ticker FROM positions)""",
+            ).fetchone()[0]
+            conn.close()
+            return count
+        except Exception:
+            return 0
+
+    def get_7day_stats(self) -> dict:
+        cutoff = (date.today() - timedelta(days=7)).isoformat()
+        rows = self._db.execute(
+            "SELECT outcome, reject_code, slippage_ticks FROM execution_quality "
+            "WHERE attempt_date >= ?",
+            (cutoff,),
+        ).fetchall()
+        total = len(rows)
+        fills = sum(1 for r in rows if r[0] == "fill")
+        rejects = sum(1 for r in rows if r[0] == "reject")
+        reject_codes: dict[str, int] = defaultdict(int)
+        slippages = []
+        for r in rows:
+            if r[0] == "reject" and r[1]:
+                reject_codes[r[1]] += 1
+            if r[2] is not None:
+                slippages.append(r[2])
+        return {
+            "total":          total,
+            "fills":          fills,
+            "rejects":        rejects,
+            "fill_rate":      fills / total if total > 0 else 0.0,
+            "avg_slippage":   sum(slippages) / len(slippages) if slippages else 0.0,
+            "reject_reasons": dict(reject_codes),
+        }
+
+    # ── Async loop ───────────────────────────────────────────────────
+
+    async def start(self) -> None:
+        self._running = True
+        # Mark any stale 'pending' rows as 'timeout' before this session begins.
+        # Pending rows from prior sessions represent DAY orders that expired at EOD
+        # without a fill/reject callback — they are no longer actionable.
+        stale = self._db.execute(
+            "UPDATE execution_quality SET outcome='timeout' WHERE outcome='pending'"
+        ).rowcount
+        self._db.commit()
+        if stale:
+            logger.info("ExecutionQuality: cleared %d stale pending rows from prior sessions", stale)
+
+        while self._running:
+            await asyncio.sleep(1800)  # report every 30 min
+            now_et = datetime.now(tz=ET)
+            if 9 <= now_et.hour < 16:
+                await self._quality_report()
+
+    async def stop(self) -> None:
+        self._running = False
+
+    async def _quality_report(self) -> None:
+        stats = self.get_session_stats()
+        if stats["attempts"] == 0:
+            return
+
+        fill_rate = stats["fill_rate"]
+        summary = (
+            f"Execution Quality: {stats['fills']}/{stats['attempts']} fills "
+            f"({fill_rate:.0%}) | rejects={stats['rejects']} | "
+            f"slippage={stats['avg_slippage']:+.4f}/sh"
+        )
+        logger.info(summary)
+
+        # Escalate Error 201 storm to CEO
+        if stats.get("error_201_storm") and not self._alert_sent_this_session:
+            self._alert_sent_this_session = True
+            reject_breakdown = ", ".join(
+                f"{k}×{v}"
+                for k, v in stats["reject_reasons"].items()
+                if k != "201_storm_count"
+            )
+            await self._notify(
+                "critical",
+                f"🚨 IBKR Error 201 storm: {stats['reject_reasons'].get('201', 0)} "
+                f"consecutive rejections. Run OrphanOrderReconciler.\n"
+                f"Reject breakdown: {reject_breakdown}",
+            )
+
+        elif fill_rate < self._fill_rate_alert_threshold and stats["attempts"] >= 5:
+            await self._notify(
+                "warning",
+                f"⚠️ Low fill rate: {fill_rate:.0%} ({stats['fills']}/{stats['attempts']}) | "
+                f"Reject reasons: {stats['reject_reasons']}",
+            )
+
+    async def _notify(self, level: str, message: str) -> None:
+        """Route alert: ExecutionQualityAgent → COO → CEO."""
+        if self._csuite_manager:
+            await self._csuite_manager.receive_alert("ExecutionQualityAgent", level, message)
+        elif self._ceo:
+            await self._ceo.dispatch_alert(level, message)

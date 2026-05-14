@@ -93,9 +93,28 @@ class PositionManager:
                 rolled_count INTEGER NOT NULL DEFAULT 0,
                 last_reviewed TEXT NOT NULL,
                 ibkr_order_ids TEXT NOT NULL DEFAULT '[]',
-                notes TEXT NOT NULL DEFAULT ''
+                notes TEXT NOT NULL DEFAULT '',
+                direction TEXT NOT NULL DEFAULT 'neutral'
             )
         """)
+        # Incremental migrations — add columns that didn't exist in earlier versions
+        existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(positions)").fetchall()}
+        if "direction" not in existing_cols:
+            conn.execute("ALTER TABLE positions ADD COLUMN direction TEXT NOT NULL DEFAULT 'neutral'")
+        if "conviction_at_entry" not in existing_cols:
+            conn.execute("ALTER TABLE positions ADD COLUMN conviction_at_entry REAL NOT NULL DEFAULT 0")
+        if "regime_at_entry" not in existing_cols:
+            conn.execute("ALTER TABLE positions ADD COLUMN regime_at_entry TEXT NOT NULL DEFAULT ''")
+        if "earnings_date" not in existing_cols:
+            conn.execute("ALTER TABLE positions ADD COLUMN earnings_date TEXT")
+        if "is_pre_earnings" not in existing_cols:
+            conn.execute("ALTER TABLE positions ADD COLUMN is_pre_earnings INTEGER NOT NULL DEFAULT 0")
+        if "close_date" not in existing_cols:
+            conn.execute("ALTER TABLE positions ADD COLUMN close_date TEXT")
+        if "close_price" not in existing_cols:
+            conn.execute("ALTER TABLE positions ADD COLUMN close_price REAL")
+        if "close_source" not in existing_cols:
+            conn.execute("ALTER TABLE positions ADD COLUMN close_source TEXT NOT NULL DEFAULT ''")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS trade_records (
                 trade_id TEXT PRIMARY KEY,
@@ -115,6 +134,30 @@ class PositionManager:
                 conviction_at_entry REAL,
                 signal_hash TEXT NOT NULL DEFAULT '',
                 notes TEXT NOT NULL DEFAULT ''
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS trade_journal (
+                journal_id   TEXT PRIMARY KEY,
+                position_id  TEXT NOT NULL,
+                ticker       TEXT NOT NULL,
+                strategy     TEXT NOT NULL,
+                direction    TEXT NOT NULL,
+                pillar       TEXT NOT NULL,
+                entry_date   TEXT NOT NULL,
+                spot_at_entry REAL NOT NULL DEFAULT 0,
+                entry_price  REAL NOT NULL,
+                max_loss     REAL NOT NULL DEFAULT 0,
+                max_gain     REAL NOT NULL DEFAULT 0,
+                rr_ratio     REAL NOT NULL DEFAULT 0,
+                conviction   REAL NOT NULL DEFAULT 0,
+                gate         TEXT NOT NULL DEFAULT '',
+                legs_summary TEXT NOT NULL DEFAULT '',
+                why_traded   TEXT NOT NULL DEFAULT '',
+                macro_at_entry TEXT NOT NULL DEFAULT '',
+                regime_at_entry TEXT NOT NULL DEFAULT '',
+                ibkr_order_id INTEGER NOT NULL DEFAULT -1,
+                FOREIGN KEY (position_id) REFERENCES positions(position_id)
             )
         """)
         conn.commit()
@@ -160,6 +203,16 @@ class PositionManager:
         if _CLOSE_TIME <= now_time <= time(15, 45):
             await self._auto_close_expiring(positions, now_et.date())
 
+        # Log upcoming 21-DTE closes (warn the day before so the user knows)
+        today = now_et.date()
+        tomorrow_closures = [p for p in positions if (p.expiry_date - today).days == 22]
+        if tomorrow_closures and now_et.time() >= time(9, 30):
+            tickers = ", ".join(p.ticker for p in tomorrow_closures)
+            logger.warning(
+                "TOMORROW 21-DTE CLOSE: %d position(s) will auto-close at market open — %s",
+                len(tomorrow_closures), tickers,
+            )
+
         # Check all P&L targets and stop-losses
         for pos in positions:
             await self._check_position_targets(pos)
@@ -173,34 +226,112 @@ class PositionManager:
 
     # ── Price refresh ──────────────────────────────────────────────
 
-    async def _refresh_position_price(self, position: OpenPosition) -> None:
-        """Fetch current spread mid price from yfinance options chain."""
+    @staticmethod
+    def _fetch_price_data_sync(
+        ticker: str, legs: list[Any], today: date
+    ) -> dict:
+        """Synchronous yfinance work — runs in a thread pool via asyncio.to_thread()."""
+        import yfinance as yf
+        from trading_platform.services.options_flow import compute_bs_greeks
+
+        tk = yf.Ticker(ticker)
+        avail_exps = set(tk.options or [])
+        if not avail_exps:
+            return {}
+
         try:
-            import yfinance as yf
-            tk = yf.Ticker(position.ticker)
-            if not tk.options:
+            fi   = tk.fast_info
+            spot = float(getattr(fi, "last_price", None) or fi.get("lastPrice", 0) or 0)
+        except Exception:
+            spot = 0.0
+        if spot <= 0:
+            info = tk.info or {}
+            spot = float(info.get("regularMarketPrice") or info.get("currentPrice") or 0)
+
+        current_mid = 0.0
+        updated_legs: list[dict] = []
+
+        for leg in legs:
+            exp_str = leg.expiration.isoformat()
+            leg_dict = {
+                "option_type": leg.option_type,
+                "strike":      leg.strike,
+                "expiration":  exp_str,
+                "action":      leg.action,
+                "contracts":   leg.contracts,
+                "mid_price":   leg.mid_price,
+                "delta":       leg.delta,
+                "gamma":       leg.gamma,
+                "theta":       leg.theta,
+                "vega":        leg.vega,
+            }
+
+            if exp_str in avail_exps:
+                chain = tk.option_chain(exp_str)
+                df    = chain.calls if leg.option_type == "call" else chain.puts
+                row   = df[df["strike"] == leg.strike]
+                if not row.empty:
+                    # Convert DataFrame slice to Series so .get() works correctly
+                    r   = row.iloc[0]
+                    bid = float(r.get("bid", 0) or 0)
+                    ask = float(r.get("ask", 0) or 0)
+                    mid = (bid + ask) / 2
+
+                    delta = float(r.get("delta", 0) or 0)
+                    gamma = float(r.get("gamma", 0) or 0)
+                    theta = float(r.get("theta", 0) or 0)
+                    vega  = float(r.get("vega",  0) or 0)
+
+                    if delta == 0 and spot > 0:
+                        iv  = float(r.get("impliedVolatility", 0) or 0)
+                        dte = max((leg.expiration - today).days, 0.5)
+                        if iv <= 0:
+                            iv = mid / (spot * 0.04 * (dte / 365) ** 0.5) if mid > 0 else 0.30
+                            iv = max(0.10, min(iv, 2.0))
+                        bs  = compute_bs_greeks(spot, leg.strike, dte, iv, leg.option_type)
+                        delta, gamma, theta, vega = bs["delta"], bs["gamma"], bs["theta"], bs["vega"]
+
+                    leg_dict.update({
+                        "mid_price": round(mid, 2),
+                        "delta": delta, "gamma": gamma,
+                        "theta": theta, "vega":  vega,
+                    })
+
+                    if leg.action == "buy":
+                        current_mid += mid
+                    else:
+                        current_mid -= mid
+
+            updated_legs.append(leg_dict)
+
+        return {"spot": spot, "current_mid": current_mid, "updated_legs": updated_legs}
+
+    async def _refresh_position_price(self, position: OpenPosition) -> None:
+        """
+        Fetch current spread mid price and live greeks from yfinance options chain.
+
+        Runs the synchronous yfinance calls in a thread pool so the event loop
+        stays unblocked. Updates unrealized P&L and per-leg greeks.
+        """
+        try:
+            result = await asyncio.to_thread(
+                self._fetch_price_data_sync,
+                position.ticker, position.legs, date.today(),
+            )
+            if not result:
                 return
 
-            current_mid = 0.0
-            for leg in position.legs:
-                exp_str = leg.expiration.isoformat()
-                if exp_str not in tk.options:
-                    continue
-                chain = tk.option_chain(exp_str)
-                df = chain.calls if leg.option_type == "call" else chain.puts
-                row = df[df["strike"] == leg.strike]
-                if row.empty:
-                    continue
-                bid = float(row["bid"].iloc[0] or 0)
-                ask = float(row["ask"].iloc[0] or 0)
-                mid = (bid + ask) / 2
-                if leg.action == "buy":
-                    current_mid += mid
-                else:
-                    current_mid -= mid
-
-            unrealized = (current_mid - position.entry_price) * 100 * position.contracts
+            current_mid   = round(result["current_mid"], 4)
+            updated_legs  = result["updated_legs"]
+            unrealized    = round((current_mid - position.entry_price) * 100 * position.contracts, 2)
             self._update_position_price(position.position_id, current_mid, unrealized)
+
+            self._db.execute(
+                "UPDATE positions SET legs_json=? WHERE position_id=?",
+                (json.dumps(updated_legs), position.position_id),
+            )
+            self._db.commit()
+
         except Exception as exc:
             logger.debug("Price refresh failed for %s: %s", position.ticker, exc)
 
@@ -239,16 +370,27 @@ class PositionManager:
         # Mark as TESTED if underlying through short strike
         await self._check_tested_status(position)
 
+    @staticmethod
+    def _fetch_spot_sync(ticker: str) -> float:
+        import yfinance as yf
+        tk = yf.Ticker(ticker)
+        try:
+            fi   = tk.fast_info
+            spot = float(getattr(fi, "last_price", None) or fi.get("lastPrice", 0) or 0)
+        except Exception:
+            spot = 0.0
+        if spot <= 0:
+            info = tk.info or {}
+            spot = float(info.get("regularMarketPrice") or info.get("currentPrice") or 0)
+        return spot
+
     async def _check_tested_status(self, position: OpenPosition) -> None:
         """Mark TESTED if spot has crossed through the short strike."""
         try:
-            import yfinance as yf
-            info = yf.Ticker(position.ticker).info or {}
-            spot = float(info.get("regularMarketPrice") or info.get("currentPrice") or 0)
+            spot = await asyncio.to_thread(self._fetch_spot_sync, position.ticker)
             if spot <= 0:
                 return
 
-            # Find short legs
             short_legs = [l for l in position.legs if l.action == "sell"]
             for leg in short_legs:
                 if leg.option_type == "put" and spot < leg.strike:
@@ -292,7 +434,20 @@ class PositionManager:
             except Exception as exc:
                 logger.error("Close order failed for %s: %s", position.ticker, exc)
 
-        self._update_status(position.position_id, PositionStatus.CLOSED)
+        self._db.execute(
+            "UPDATE positions SET status=?, close_date=?, close_price=?, close_source=?, "
+            "realized_pnl=?, last_reviewed=? WHERE position_id=?",
+            (
+                PositionStatus.CLOSED.value,
+                date.today().isoformat(),
+                round(position.current_price, 4),
+                "lifecycle",
+                round(position.unrealized_pnl, 2),
+                datetime.now(tz=timezone.utc).isoformat(),
+                position.position_id,
+            ),
+        )
+        self._db.commit()
         logger.info("CLOSED: %s | reason: %s | PnL: $%.0f",
                     position.ticker, reason, position.unrealized_pnl)
 
@@ -311,13 +466,14 @@ class PositionManager:
         """T-2 check: warn if short options are ITM within 2 days of expiry."""
         today = date.today()
         try:
-            import yfinance as yf
-            for pos in positions:
-                dte = (pos.expiry_date - today).days
-                if dte > 2:
-                    continue
-                info = yf.Ticker(pos.ticker).info or {}
-                spot = float(info.get("regularMarketPrice") or 0)
+            near_expiry = [pos for pos in positions if (pos.expiry_date - today).days <= 2]
+            spots = await asyncio.gather(
+                *[asyncio.to_thread(self._fetch_spot_sync, pos.ticker) for pos in near_expiry],
+                return_exceptions=True,
+            )
+            for pos, spot_or_exc in zip(near_expiry, spots):
+                dte  = (pos.expiry_date - today).days
+                spot = float(spot_or_exc) if isinstance(spot_or_exc, (int, float)) else 0.0
                 if spot <= 0:
                     continue
                 for leg in pos.legs:
@@ -350,9 +506,10 @@ class PositionManager:
             }
             for l in position.legs
         ])
+        earnings_date = getattr(position, "earnings_date", None)
         self._db.execute("""
             INSERT OR REPLACE INTO positions VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
         """, (
             position.position_id,
@@ -375,8 +532,55 @@ class PositionManager:
             datetime.now(tz=timezone.utc).isoformat(),
             json.dumps(position.ibkr_order_ids),
             position.notes,
+            getattr(position, "direction", "neutral"),
+            getattr(position, "conviction_at_entry", 0.0),
+            getattr(position, "regime_at_entry", ""),
+            earnings_date.isoformat() if earnings_date else None,
+            1 if getattr(position, "is_pre_earnings", False) else 0,
         ))
         self._db.commit()
+
+    def add_journal_entry(
+        self,
+        position: "OpenPosition",
+        spot_at_entry: float = 0.0,
+        why_traded: str = "",
+        macro_at_entry: str = "",
+        ibkr_order_id: int = -1,
+    ) -> None:
+        """Write a human-readable trade journal entry explaining WHY this trade was taken."""
+        import uuid as _uuid
+        legs_summary = " / ".join(
+            f"{l.action.upper()} {l.option_type[0].upper()} {l.strike:.0f} Δ{l.delta:.2f}"
+            for l in position.legs
+        )
+        self._db.execute("""
+            INSERT OR IGNORE INTO trade_journal VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            str(_uuid.uuid4()),
+            position.position_id,
+            position.ticker,
+            position.strategy.value,
+            getattr(position, "direction", ""),
+            position.pillar.value,
+            position.entry_date.isoformat(),
+            round(spot_at_entry, 2),
+            round(position.entry_price, 4),
+            round(position.max_loss_dollars, 2),
+            round(position.max_gain_dollars, 2),
+            round(getattr(position, "reward_risk_ratio", position.max_gain_dollars / max(position.max_loss_dollars, 1)), 2),
+            round(getattr(position, "conviction_at_entry", 0.0), 1),
+            getattr(position, "gate_at_entry", "standard"),
+            legs_summary,
+            why_traded[:2000],
+            macro_at_entry[:500],
+            getattr(position, "regime_at_entry", ""),
+            ibkr_order_id,
+        ))
+        self._db.commit()
+        logger.info("JOURNAL: %s | %s | conv=%.0f | why=%s",
+                    position.ticker, legs_summary,
+                    getattr(position, "conviction_at_entry", 0), why_traded[:120])
 
     def get_open_positions(self) -> list[OpenPosition]:
         rows = self._db.execute(
@@ -394,6 +598,10 @@ class PositionManager:
                         action=l["action"],
                         contracts=l.get("contracts", 1),
                         mid_price=l.get("mid_price", 0.0),
+                        delta=l.get("delta", 0.0),
+                        gamma=l.get("gamma", 0.0),
+                        theta=l.get("theta", 0.0),
+                        vega=l.get("vega", 0.0),
                     )
                     for l in legs_data
                 ]
@@ -417,6 +625,11 @@ class PositionManager:
                     rolled_count=row[16],
                     ibkr_order_ids=json.loads(row[18]),
                     notes=row[19],
+                    direction=row[20] if len(row) > 20 else "neutral",
+                    conviction_at_entry=float(row[21]) if len(row) > 21 and row[21] is not None else 0.0,
+                    regime_at_entry=row[22] if len(row) > 22 and row[22] else "",
+                    earnings_date=date.fromisoformat(row[23]) if len(row) > 23 and row[23] else None,
+                    is_pre_earnings=bool(row[24]) if len(row) > 24 and row[24] is not None else False,
                 )
                 positions.append(pos)
             except Exception as exc:
@@ -431,6 +644,57 @@ class PositionManager:
             (current_price, unrealized_pnl, datetime.now(tz=timezone.utc).isoformat(), position_id),
         )
         self._db.commit()
+
+    def mark_position_closed(
+        self,
+        position_id: str,
+        realized_pnl: float = 0.0,
+        close_price: float = 0.0,
+        source: str = "tws_reconcile",
+    ) -> bool:
+        """
+        Mark a position closed from an external source (TWS fill detector, startup sync).
+        Called when IBKR executes a GTC profit-target or stop-loss that our session
+        didn't receive a live callback for. Returns True if a row was actually updated.
+        """
+        cursor = self._db.execute(
+            "UPDATE positions SET status='closed', realized_pnl=?, close_price=?, "
+            "close_date=?, close_source=?, last_reviewed=? "
+            "WHERE position_id=? AND status IN ('open','tested','rolled')",
+            (
+                round(realized_pnl, 2),
+                round(close_price, 4),
+                date.today().isoformat(),
+                source,
+                datetime.now(tz=timezone.utc).isoformat(),
+                position_id,
+            ),
+        )
+        self._db.commit()
+        updated = cursor.rowcount > 0
+        if updated:
+            logger.info(
+                "POSITION CLOSED (external): id=%s pnl=$%.2f source=%s",
+                position_id[:12], realized_pnl, source,
+            )
+        return updated
+
+    def get_open_position_by_ticker(self, ticker: str) -> "OpenPosition | None":
+        """Return the first active position for a ticker, or None."""
+        for p in self.get_open_positions():
+            if p.ticker == ticker:
+                return p
+        return None
+
+    def get_realized_pnl_today(self) -> float:
+        """Sum of realized_pnl for positions closed today. Used by kill switch reset logic."""
+        today = date.today().isoformat()
+        row = self._db.execute(
+            "SELECT COALESCE(SUM(realized_pnl), 0) FROM positions "
+            "WHERE close_date=? AND status='closed'",
+            (today,),
+        ).fetchone()
+        return float(row[0]) if row else 0.0
 
     def _update_status(self, position_id: str, status: PositionStatus) -> None:
         self._db.execute(
@@ -456,12 +720,92 @@ class PositionManager:
             position.unrealized_pnl,
             0.0,  # commission tracked separately by IBKR callback
             0.0,  # slippage filled in by execution layer
-            None,
-            None,
+            position.regime_at_entry or None,
+            position.conviction_at_entry or None,
             "",
             notes,
         ))
         self._db.commit()
+
+    def get_performance_summary(self, lookback_days: int = 30) -> dict:
+        """
+        Aggregate closed trade outcomes for the last `lookback_days` days.
+
+        Returns win rates, average P&L, and trade counts broken down by:
+          - strategy type
+          - regime at entry
+          - conviction band (0-40, 40-60, 60-80, 80-100)
+
+        Used by the afterhours attribution report and future feedback scoring.
+        """
+        cutoff = (date.today() - timedelta(days=lookback_days)).isoformat()
+        rows = self._db.execute("""
+            SELECT strategy, regime_at_entry, conviction_at_entry,
+                   realized_pnl, close_date
+            FROM trade_records
+            WHERE close_date IS NOT NULL AND close_date >= ?
+        """, (cutoff,)).fetchall()
+
+        if not rows:
+            return {"period_days": lookback_days, "total_trades": 0}
+
+        total = len(rows)
+        wins = sum(1 for r in rows if (r[3] or 0) > 0)
+        total_pnl = sum((r[3] or 0) for r in rows)
+
+        # By strategy
+        by_strategy: dict[str, dict] = {}
+        for strategy, _, _, pnl, _ in rows:
+            s = by_strategy.setdefault(strategy, {"trades": 0, "wins": 0, "pnl": 0.0})
+            s["trades"] += 1
+            s["wins"]   += 1 if (pnl or 0) > 0 else 0
+            s["pnl"]    += pnl or 0
+        for s in by_strategy.values():
+            s["win_rate"] = round(s["wins"] / s["trades"], 3) if s["trades"] else 0.0
+            s["avg_pnl"]  = round(s["pnl"] / s["trades"], 2) if s["trades"] else 0.0
+
+        # By regime at entry
+        by_regime: dict[str, dict] = {}
+        for _, regime, _, pnl, _ in rows:
+            key = regime or "unknown"
+            r = by_regime.setdefault(key, {"trades": 0, "wins": 0, "pnl": 0.0})
+            r["trades"] += 1
+            r["wins"]   += 1 if (pnl or 0) > 0 else 0
+            r["pnl"]    += pnl or 0
+        for r in by_regime.values():
+            r["win_rate"] = round(r["wins"] / r["trades"], 3) if r["trades"] else 0.0
+            r["avg_pnl"]  = round(r["pnl"] / r["trades"], 2) if r["trades"] else 0.0
+
+        # By conviction band
+        def _band(score: float | None) -> str:
+            if score is None: return "unknown"
+            if score < 40:    return "0-40"
+            if score < 60:    return "40-60"
+            if score < 80:    return "60-80"
+            return "80-100"
+
+        by_conviction: dict[str, dict] = {}
+        for _, _, conviction, pnl, _ in rows:
+            key = _band(conviction)
+            c = by_conviction.setdefault(key, {"trades": 0, "wins": 0, "pnl": 0.0})
+            c["trades"] += 1
+            c["wins"]   += 1 if (pnl or 0) > 0 else 0
+            c["pnl"]    += pnl or 0
+        for c in by_conviction.values():
+            c["win_rate"] = round(c["wins"] / c["trades"], 3) if c["trades"] else 0.0
+            c["avg_pnl"]  = round(c["pnl"] / c["trades"], 2) if c["trades"] else 0.0
+
+        return {
+            "period_days":    lookback_days,
+            "total_trades":   total,
+            "wins":           wins,
+            "win_rate":       round(wins / total, 3),
+            "total_pnl":      round(total_pnl, 2),
+            "avg_pnl":        round(total_pnl / total, 2),
+            "by_strategy":    by_strategy,
+            "by_regime":      by_regime,
+            "by_conviction":  by_conviction,
+        }
 
     def get_portfolio_greeks(self) -> dict[str, float]:
         """Aggregate Greeks across all open positions for risk council."""
