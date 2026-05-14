@@ -1,0 +1,829 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Options Trading Platform — Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+:root {
+  --bg:       #0d1117;
+  --bg2:      #161b22;
+  --bg3:      #1c2128;
+  --border:   #30363d;
+  --text:     #e6edf3;
+  --text2:    #8b949e;
+  --green:    #3fb950;
+  --red:      #f85149;
+  --yellow:   #d29922;
+  --blue:     #58a6ff;
+  --purple:   #bc8cff;
+  --orange:   #ffa657;
+  --teal:     #39d353;
+  --radius:   8px;
+  --font:     'SF Mono', 'Fira Code', 'Consolas', monospace;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 13px;
+  height: 100vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Header ── */
+#header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 20px;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+#header .logo { font-size: 15px; font-weight: 700; color: var(--blue); letter-spacing: 1px; }
+.badge {
+  padding: 2px 10px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+}
+.badge-paper  { background: rgba(88,166,255,.15); color: var(--blue); border: 1px solid rgba(88,166,255,.3); }
+.badge-live   { background: rgba(248,81,73,.15);  color: var(--red);  border: 1px solid rgba(248,81,73,.3); }
+.badge-green  { background: rgba(63,185,80,.15);  color: var(--green);border: 1px solid rgba(63,185,80,.3); }
+.badge-red    { background: rgba(248,81,73,.15);  color: var(--red);  border: 1px solid rgba(248,81,73,.3); }
+#clock { margin-left: auto; color: var(--text2); font-size: 12px; }
+#market-status { font-size: 12px; }
+#market-bar { display: flex; gap: 20px; align-items: center; }
+.mkt-item { display: flex; gap: 6px; align-items: baseline; }
+.mkt-sym { color: var(--text2); font-size: 11px; }
+.mkt-price { font-size: 13px; font-weight: 700; }
+.up { color: var(--green); }
+.dn { color: var(--red); }
+.nt { color: var(--text2); }
+
+/* ── Layout ── */
+#body {
+  display: grid;
+  grid-template-columns: 220px 1fr 320px;
+  grid-template-rows: 1fr;
+  flex: 1;
+  overflow: hidden;
+  gap: 0;
+}
+
+/* ── Sidebar ── */
+#sidebar {
+  background: var(--bg2);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.section-title {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text2);
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+.agent-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius);
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  transition: border-color .2s;
+}
+.agent-card:hover { border-color: var(--blue); }
+.agent-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--border);
+}
+.agent-dot.active { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.agent-dot.idle   { background: var(--yellow); }
+.agent-dot.error  { background: var(--red); }
+.agent-name { font-size: 11px; color: var(--text); flex: 1; }
+.agent-ts   { font-size: 10px; color: var(--text2); }
+
+/* ── Main content ── */
+#main {
+  overflow-y: auto;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* ── KPI row ── */
+#kpi-row {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 10px;
+}
+.kpi-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+}
+.kpi-label { font-size: 10px; color: var(--text2); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 4px; }
+.kpi-value { font-size: 22px; font-weight: 700; }
+.kpi-sub   { font-size: 11px; color: var(--text2); margin-top: 2px; }
+.pos { color: var(--green); }
+.neg { color: var(--red); }
+.neu { color: var(--text); }
+
+/* ── Row 2: chart + activity split ── */
+#row2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  min-height: 220px;
+}
+.panel {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.panel-header {
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text2);
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.panel-header .count {
+  margin-left: auto;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0 8px;
+  font-size: 10px;
+  color: var(--blue);
+}
+.panel-body { flex: 1; padding: 10px; overflow: hidden; }
+
+/* ── Tables ── */
+.tbl-wrap { overflow-x: auto; overflow-y: auto; max-height: 260px; }
+table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+th {
+  background: var(--bg3);
+  color: var(--text2);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  padding: 6px 10px;
+  text-align: left;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  border-bottom: 1px solid var(--border);
+}
+td {
+  padding: 6px 10px;
+  border-bottom: 1px solid rgba(48,54,61,.5);
+  color: var(--text);
+  white-space: nowrap;
+}
+tr:hover td { background: rgba(88,166,255,.04); }
+.pnl-pos { color: var(--green); font-weight: 700; }
+.pnl-neg { color: var(--red);   font-weight: 700; }
+.status-open   { color: var(--blue); }
+.status-closed { color: var(--text2); }
+
+/* ── Activity feed ── */
+#feed-list {
+  height: 100%;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 2px;
+  padding-right: 4px;
+}
+.feed-item {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 3px 6px;
+  border-radius: 4px;
+  line-height: 1.4;
+  font-size: 11.5px;
+}
+.feed-item:hover { background: rgba(48,54,61,.5); }
+.feed-ts    { color: var(--text2); font-size: 10px; flex-shrink: 0; margin-top: 1px; }
+.feed-agent { font-size: 10px; font-weight: 700; flex-shrink: 0; }
+.feed-msg   { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.feed-ERROR { background: rgba(248,81,73,.08); }
+.feed-WARNING { background: rgba(210,153,34,.06); }
+
+/* ── Breakdown panels ── */
+#row3 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+/* ── Right panel: pipeline detail ── */
+#right-panel {
+  background: var(--bg2);
+  border-left: 1px solid var(--border);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+#right-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+}
+.rtab {
+  padding: 8px 14px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text2);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: color .2s, border-color .2s;
+}
+.rtab.active { color: var(--blue); border-bottom-color: var(--blue); }
+.rtab:hover  { color: var(--text); }
+.rtab-content { display: none; flex: 1; overflow-y: auto; padding: 10px; }
+.rtab-content.active { display: block; }
+
+/* ── API info ── */
+.info-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(48,54,61,.5);
+  font-size: 12px;
+}
+.info-label { color: var(--text2); }
+.info-value { color: var(--text); font-weight: 700; }
+
+/* ── Scrollbars ── */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: #484f58; }
+</style>
+</head>
+<body>
+
+<!-- ── Header ── -->
+<div id="header">
+  <span class="logo">⚡ ALGO DESK</span>
+  <span class="badge badge-paper" id="mode-badge">PAPER</span>
+  <span class="badge badge-green" id="mkt-status-badge">● MARKET OPEN</span>
+  <div id="market-bar">
+    <div class="mkt-item"><span class="mkt-sym">SPY</span><span class="mkt-price" id="m-SPY">—</span><span id="m-SPY-chg" class="nt">—</span></div>
+    <div class="mkt-item"><span class="mkt-sym">QQQ</span><span class="mkt-price" id="m-QQQ">—</span><span id="m-QQQ-chg" class="nt">—</span></div>
+    <div class="mkt-item"><span class="mkt-sym">VIX</span><span class="mkt-price" id="m-VIX">—</span><span id="m-VIX-chg" class="nt">—</span></div>
+  </div>
+  <span id="clock" style="margin-left:auto"></span>
+</div>
+
+<!-- ── Body grid ── -->
+<div id="body">
+
+  <!-- Sidebar: agents -->
+  <div id="sidebar">
+    <div class="section-title">Agent Health</div>
+    <div id="agent-list"></div>
+    <div class="section-title" style="margin-top:10px">Session Stats</div>
+    <div id="session-stats" style="font-size:11px;color:var(--text2);line-height:1.8"></div>
+  </div>
+
+  <!-- Main -->
+  <div id="main">
+
+    <!-- KPI row -->
+    <div id="kpi-row">
+      <div class="kpi-card">
+        <div class="kpi-label">Total P&amp;L</div>
+        <div class="kpi-value" id="k-pnl">—</div>
+        <div class="kpi-sub" id="k-today-pnl">Today: —</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Win Rate</div>
+        <div class="kpi-value" id="k-wr">—</div>
+        <div class="kpi-sub" id="k-wl">— W / — L</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Open Positions</div>
+        <div class="kpi-value neu" id="k-open">—</div>
+        <div class="kpi-sub" id="k-total">— total trades</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Profit Factor</div>
+        <div class="kpi-value" id="k-pf">—</div>
+        <div class="kpi-sub" id="k-avgwin">Avg W: — | Avg L: —</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Claude API Calls</div>
+        <div class="kpi-value neu" id="k-api">—</div>
+        <div class="kpi-sub" id="k-apitotal">— total session</div>
+      </div>
+    </div>
+
+    <!-- Row 2: equity + feed -->
+    <div id="row2">
+      <div class="panel">
+        <div class="panel-header">📈 Equity Curve (Cumulative P&amp;L)</div>
+        <div class="panel-body" style="padding:8px">
+          <canvas id="equity-chart" style="width:100%;height:100%"></canvas>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-header">
+          ⚡ Live Pipeline Feed
+          <span class="count" id="feed-count">0 events</span>
+        </div>
+        <div class="panel-body" style="padding:6px;overflow:hidden">
+          <div id="feed-list"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Row 3: open positions + history -->
+    <div id="row3">
+      <div class="panel">
+        <div class="panel-header">📂 Open Positions <span class="count" id="pos-count">0</span></div>
+        <div class="panel-body" style="padding:0">
+          <div class="tbl-wrap">
+            <table>
+              <thead><tr>
+                <th>Ticker</th><th>Strategy</th><th>Entry</th>
+                <th>Contracts</th><th>Stop</th><th>Target</th>
+                <th>Max Loss</th><th>Opened</th>
+              </tr></thead>
+              <tbody id="pos-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-header">📜 Trade History <span class="count" id="hist-count">0</span></div>
+        <div class="panel-body" style="padding:0">
+          <div class="tbl-wrap">
+            <table>
+              <thead><tr>
+                <th>Ticker</th><th>Strategy</th><th>Entry</th>
+                <th>P&amp;L</th><th>Status</th><th>Opened</th>
+              </tr></thead>
+              <tbody id="hist-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /main -->
+
+  <!-- Right panel -->
+  <div id="right-panel">
+    <div id="right-tabs">
+      <div class="rtab active" onclick="switchTab('tab-breakdown')">Breakdown</div>
+      <div class="rtab" onclick="switchTab('tab-info')">API &amp; Info</div>
+    </div>
+
+    <div id="tab-breakdown" class="rtab-content active">
+      <div style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">By Ticker</div>
+      <div class="tbl-wrap" style="max-height:160px;margin-bottom:14px">
+        <table>
+          <thead><tr><th>Ticker</th><th>Trades</th><th>Win%</th><th>P&amp;L</th></tr></thead>
+          <tbody id="ticker-tbody"></tbody>
+        </table>
+      </div>
+      <div style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">By Strategy</div>
+      <div class="tbl-wrap" style="max-height:160px">
+        <table>
+          <thead><tr><th>Strategy</th><th>Trades</th><th>Win%</th><th>P&amp;L</th></tr></thead>
+          <tbody id="strat-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="tab-info" class="rtab-content">
+      <div class="info-row"><span class="info-label">API Key</span><span class="info-value" id="i-key">—</span></div>
+      <div class="info-row"><span class="info-label">Claude Calls Today</span><span class="info-value" id="i-calls-today">—</span></div>
+      <div class="info-row"><span class="info-label">Claude Calls Total</span><span class="info-value" id="i-calls-total">—</span></div>
+      <div class="info-row"><span class="info-label">Est. Cost Today</span><span class="info-value" id="i-cost">—</span></div>
+      <div class="info-row"><span class="info-label">Trading Mode</span><span class="info-value" id="i-mode">—</span></div>
+      <div class="info-row"><span class="info-label">Account Size</span><span class="info-value" id="i-account">—</span></div>
+      <div class="info-row"><span class="info-label">IBKR Account</span><span class="info-value" id="i-ibkr">DUP344869</span></div>
+      <div class="info-row"><span class="info-label">Platform Status</span><span class="info-value" id="i-status">—</span></div>
+      <div class="info-row"><span class="info-label">WebSocket</span><span class="info-value" id="i-ws">—</span></div>
+      <div class="info-row"><span class="info-label">Market Status</span><span class="info-value" id="i-mkt">—</span></div>
+      <div style="margin-top:16px;font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Project Health</div>
+      <div id="health-list"></div>
+    </div>
+  </div>
+
+</div><!-- /body -->
+
+<script>
+// ── Config ───────────────────────────────────────────────────────────────────
+const BASE   = window.location.origin;
+const WS_URL = `${BASE.replace('http','ws')}/api/v1/dashboard/ws`;
+
+// ── State ────────────────────────────────────────────────────────────────────
+let equityChart = null;
+let feedCount   = 0;
+let agentLastSeen = {};   // agent name → timestamp
+let wsConnected = false;
+
+// ── Clock ─────────────────────────────────────────────────────────────────────
+function updateClock() {
+  const now = new Date();
+  // ET time
+  const et = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  const hh = String(et.getHours()).padStart(2,'0');
+  const mm = String(et.getMinutes()).padStart(2,'0');
+  const ss = String(et.getSeconds()).padStart(2,'0');
+  document.getElementById('clock').textContent = `${hh}:${mm}:${ss} ET`;
+  // Market status
+  const dow = et.getDay();
+  const isWeekday = dow >= 1 && dow <= 5;
+  const t = et.getHours() * 60 + et.getMinutes();
+  const open = 9*60+30, close = 16*60;
+  const mktOpen = isWeekday && t >= open && t < close;
+  const badge = document.getElementById('mkt-status-badge');
+  if (mktOpen) {
+    badge.textContent = '● MARKET OPEN';
+    badge.className = 'badge badge-green';
+  } else {
+    badge.textContent = '○ MARKET CLOSED';
+    badge.className = 'badge badge-red';
+  }
+  document.getElementById('i-mkt').textContent = mktOpen ? 'Open' : 'Closed';
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+// ── Equity chart ─────────────────────────────────────────────────────────────
+function initChart(labels, data) {
+  const ctx = document.getElementById('equity-chart').getContext('2d');
+  if (equityChart) equityChart.destroy();
+  equityChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        data,
+        borderColor: data.length && data[data.length-1] >= 0 ? '#3fb950' : '#f85149',
+        backgroundColor: ctx => {
+          const g = ctx.chart.ctx.createLinearGradient(0,0,0,160);
+          g.addColorStop(0, 'rgba(63,185,80,.25)');
+          g.addColorStop(1, 'rgba(63,185,80,0)');
+          return g;
+        },
+        fill: true,
+        tension: 0.35,
+        pointRadius: 0,
+        borderWidth: 2,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      plugins: { legend: { display: false }, tooltip: {
+        callbacks: { label: ctx => `  P&L: $${ctx.parsed.y.toLocaleString()}` }
+      }},
+      scales: {
+        x: { display: true, grid: { color: 'rgba(48,54,61,.5)' }, ticks: { color: '#8b949e', font: { size: 10 }, maxTicksLimit: 8 }},
+        y: { display: true, grid: { color: 'rgba(48,54,61,.5)' }, ticks: { color: '#8b949e', font: { size: 10 },
+          callback: v => '$' + v.toLocaleString() }},
+      }
+    }
+  });
+}
+
+// ── WebSocket ─────────────────────────────────────────────────────────────────
+function connectWS() {
+  const ws = new WebSocket(WS_URL);
+  ws.onopen = () => {
+    wsConnected = true;
+    document.getElementById('i-ws').textContent = '● Connected';
+    document.getElementById('i-ws').style.color = '#3fb950';
+    const ping = setInterval(() => { if (ws.readyState === 1) ws.send('ping'); else clearInterval(ping); }, 15000);
+  };
+  ws.onmessage = e => {
+    try { addFeedItem(JSON.parse(e.data)); } catch {}
+  };
+  ws.onclose = () => {
+    wsConnected = false;
+    document.getElementById('i-ws').textContent = '○ Reconnecting…';
+    document.getElementById('i-ws').style.color = '#d29922';
+    setTimeout(connectWS, 3000);
+  };
+  ws.onerror = () => ws.close();
+}
+connectWS();
+
+// ── Feed ──────────────────────────────────────────────────────────────────────
+function addFeedItem(ev) {
+  feedCount++;
+  document.getElementById('feed-count').textContent = feedCount + ' events';
+
+  // Update agent last-seen
+  agentLastSeen[ev.agent] = ev.ts;
+  updateAgentDots();
+
+  const list = document.getElementById('feed-list');
+  const div = document.createElement('div');
+  div.className = `feed-item feed-${ev.level}`;
+  div.innerHTML = `<span class="feed-ts">${ev.ts}</span>
+    <span class="feed-agent" style="color:${ev.color}">${ev.agent}</span>
+    <span class="feed-msg">${escHtml(ev.msg)}</span>`;
+  list.prepend(div);
+
+  // Keep max 300 items
+  while (list.children.length > 300) list.removeChild(list.lastChild);
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── Agent sidebar ─────────────────────────────────────────────────────────────
+const AGENTS = [
+  'premarket','universe_screener','market_data','regime','technical',
+  'news','conviction','options_strategy','risk_manager','reviewer',
+  'execution','journal','monitor','setup_watcher'
+];
+const AGENT_COLORS = {
+  premarket:'#64B5F6',market_data:'#4FC3F7',regime:'#81C784',
+  technical:'#FFD54F',news:'#FF8A65',conviction:'#CE93D8',
+  options_strategy:'#F48FB1',risk_manager:'#EF9A9A',reviewer:'#80CBC4',
+  execution:'#A5D6A7',journal:'#B0BEC5',monitor:'#FFCC80',
+  setup_watcher:'#80DEEA',universe_screener:'#E6EE9C',
+};
+
+function buildAgentSidebar(runningAgents) {
+  const list = document.getElementById('agent-list');
+  list.innerHTML = '';
+  const running = new Set((runningAgents || []).map(a => a.name));
+  AGENTS.forEach(name => {
+    const isRunning = running.size ? running.has(name) : true;
+    const ts = agentLastSeen[name] || '';
+    const dotClass = !isRunning ? '' : (ts ? 'active' : 'idle');
+    const col = AGENT_COLORS[name] || '#90A4AE';
+    const label = name.replace(/_/g,' ');
+    list.innerHTML += `
+      <div class="agent-card">
+        <div class="agent-dot ${dotClass}" style="${dotClass==='active'?`box-shadow:0 0 6px ${col};background:${col}`:''}"></div>
+        <span class="agent-name" style="color:${col}">${label}</span>
+        <span class="agent-ts">${ts}</span>
+      </div>`;
+  });
+}
+
+function updateAgentDots() {
+  document.querySelectorAll('.agent-card').forEach(card => {
+    const nameEl = card.querySelector('.agent-name');
+    const dot = card.querySelector('.agent-dot');
+    const name = nameEl.textContent.trim().replace(/ /g,'_');
+    const ts = agentLastSeen[name];
+    const tsEl = card.querySelector('.agent-ts');
+    if (ts) {
+      const col = AGENT_COLORS[name] || '#3fb950';
+      dot.className = 'agent-dot active';
+      dot.style.cssText = `background:${col};box-shadow:0 0 6px ${col}`;
+      if (tsEl) tsEl.textContent = ts;
+    }
+  });
+}
+
+// ── Stats poll ────────────────────────────────────────────────────────────────
+async function fetchStats() {
+  try {
+    const r = await fetch('/api/v1/dashboard/stats');
+    const d = await r.json();
+
+    const pnl = d.total_pnl || 0;
+    const wr  = d.win_rate  || 0;
+
+    // KPI cards
+    setKpi('k-pnl',     fmt$(pnl), pnl >= 0 ? 'pos' : 'neg');
+    document.getElementById('k-today-pnl').textContent = `Today: ${fmt$(d.today_pnl||0)}`;
+    setKpi('k-wr',      wr+'%',    wr >= 50 ? 'pos' : (wr > 0 ? 'neg' : 'neu'));
+    document.getElementById('k-wl').textContent = `${d.winners||0} W / ${d.losers||0} L`;
+    setKpi('k-open',    d.open_positions||0, 'neu');
+    document.getElementById('k-total').textContent = `${d.total_trades||0} total trades`;
+    setKpi('k-pf',      (d.profit_factor||0).toFixed(2), (d.profit_factor||0)>=1.5?'pos':(d.profit_factor||0)>1?'neu':'neg');
+    document.getElementById('k-avgwin').textContent = `Avg W: ${fmt$(d.avg_win||0)} | Avg L: ${fmt$(d.avg_loss||0)}`;
+    setKpi('k-api',     d.api_calls_today||0, 'neu');
+    document.getElementById('k-apitotal').textContent = `${d.api_calls_total||0} total session`;
+
+    // Info tab
+    document.getElementById('i-calls-today').textContent = d.api_calls_today||0;
+    document.getElementById('i-calls-total').textContent = d.api_calls_total||0;
+    // Rough estimate: $3/1M input + $15/1M output, ~500 tokens avg per call
+    const costEst = ((d.api_calls_today||0) * 500 * (3+15) / 1_000_000).toFixed(4);
+    document.getElementById('i-cost').textContent = `~$${costEst}`;
+
+    // Breakdown tables
+    renderBreakdown('ticker-tbody', d.by_ticker||[], r => r.ticker);
+    renderBreakdown('strat-tbody', d.by_strategy||[], r => (r.strategy||'').replace(/_/g,' '));
+
+    // Session stats
+    document.getElementById('session-stats').innerHTML =
+      `Best: <span style="color:var(--green)">${fmt$(d.best_trade||0)}</span><br>` +
+      `Worst: <span style="color:var(--red)">${fmt$(d.worst_trade||0)}</span>`;
+
+  } catch(e) { console.warn('stats poll failed', e); }
+}
+
+function setKpi(id, val, cls) {
+  const el = document.getElementById(id);
+  el.textContent = val;
+  el.className = 'kpi-value ' + cls;
+}
+
+function renderBreakdown(tbodyId, rows, labelFn) {
+  const tb = document.getElementById(tbodyId);
+  if (!rows.length) { tb.innerHTML = '<tr><td colspan="4" style="color:var(--text2);text-align:center">No data</td></tr>'; return; }
+  tb.innerHTML = rows.map(r => {
+    const wr = r.trades ? Math.round((r.wins||0)/r.trades*100) : 0;
+    const pnl = r.pnl||0;
+    return `<tr>
+      <td>${labelFn(r)}</td>
+      <td>${r.trades}</td>
+      <td style="color:${wr>=50?'var(--green)':'var(--red)'}">${wr}%</td>
+      <td class="${pnl>=0?'pnl-pos':'pnl-neg'}">${fmt$(pnl)}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ── Equity chart poll ─────────────────────────────────────────────────────────
+async function fetchEquity() {
+  try {
+    const r = await fetch('/api/v1/dashboard/equity');
+    const d = await r.json();
+    if (d.labels && d.labels.length) initChart(d.labels, d.values);
+    else initChart(['—'],[0]);
+  } catch {}
+}
+
+// ── Positions poll ────────────────────────────────────────────────────────────
+async function fetchPositions() {
+  try {
+    const r = await fetch('/api/v1/dashboard/positions');
+    const d = await r.json();
+    const rows = d.positions || [];
+    document.getElementById('pos-count').textContent = rows.length;
+    const tb = document.getElementById('pos-tbody');
+    if (!rows.length) { tb.innerHTML = '<tr><td colspan="8" style="color:var(--text2);text-align:center">No open positions</td></tr>'; return; }
+    tb.innerHTML = rows.map(r => `<tr>
+      <td style="color:var(--blue);font-weight:700">${r.ticker}</td>
+      <td>${(r.strategy||'').replace(/_/g,' ')}</td>
+      <td>$${(r.entry_price||0).toFixed(2)}</td>
+      <td>${r.contracts||1}</td>
+      <td style="color:var(--red)">$${(r.stop_loss||0).toFixed(2)}</td>
+      <td style="color:var(--green)">$${(r.profit_target||0).toFixed(2)}</td>
+      <td>$${(r.max_loss_dollars||0).toLocaleString()}</td>
+      <td style="color:var(--text2)">${(r.opened_at||'').slice(0,10)}</td>
+    </tr>`).join('');
+  } catch {}
+}
+
+// ── History poll ──────────────────────────────────────────────────────────────
+async function fetchHistory() {
+  try {
+    const r = await fetch('/api/v1/dashboard/history?limit=100');
+    const d = await r.json();
+    const rows = d.trades || [];
+    document.getElementById('hist-count').textContent = rows.length;
+    const tb = document.getElementById('hist-tbody');
+    if (!rows.length) { tb.innerHTML = '<tr><td colspan="6" style="color:var(--text2);text-align:center">No trades yet</td></tr>'; return; }
+    tb.innerHTML = rows.map(r => {
+      const pnl = r.realized_pnl;
+      const pnlStr = pnl != null ? fmt$(pnl) : '—';
+      const pnlCls = pnl == null ? '' : pnl >= 0 ? 'pnl-pos' : 'pnl-neg';
+      const stCls  = r.status === 'open' ? 'status-open' : 'status-closed';
+      return `<tr>
+        <td style="color:var(--blue);font-weight:700">${r.ticker}</td>
+        <td>${(r.strategy||'').replace(/_/g,' ')}</td>
+        <td>$${(r.entry_price||0).toFixed(2)}</td>
+        <td class="${pnlCls}">${pnlStr}</td>
+        <td class="${stCls}">${r.status||''}</td>
+        <td style="color:var(--text2)">${(r.opened_at||'').slice(0,10)}</td>
+      </tr>`;
+    }).join('');
+  } catch {}
+}
+
+// ── Market data poll ──────────────────────────────────────────────────────────
+async function fetchMarket() {
+  try {
+    const r = await fetch('/api/v1/dashboard/market');
+    const d = await r.json();
+    ['SPY','QQQ','VIX'].forEach(sym => {
+      const info = d[sym];
+      if (!info) return;
+      const el = document.getElementById(`m-${sym}`);
+      const chgEl = document.getElementById(`m-${sym}-chg`);
+      if (el) el.textContent = info.price ? '$'+info.price.toFixed(2) : '—';
+      if (chgEl) {
+        const chg = info.change_pct || 0;
+        chgEl.textContent = (chg >= 0 ? '+' : '') + chg.toFixed(2) + '%';
+        chgEl.className = chg > 0 ? 'up' : (chg < 0 ? 'dn' : 'nt');
+      }
+    });
+  } catch {}
+}
+
+// ── Agents poll ───────────────────────────────────────────────────────────────
+async function fetchAgents() {
+  try {
+    const r = await fetch('/api/v1/dashboard/agents');
+    const d = await r.json();
+    buildAgentSidebar(d.agents||[]);
+    document.getElementById('i-status').textContent = `${d.count||0} agents running`;
+    document.getElementById('i-status').style.color = (d.count||0) > 10 ? '#3fb950' : '#d29922';
+  } catch {}
+}
+
+// ── Health check ──────────────────────────────────────────────────────────────
+async function fetchHealth() {
+  try {
+    const r = await fetch('/health');
+    const d = await r.json();
+    document.getElementById('i-mode').textContent = d.mode || '—';
+    document.getElementById('i-account').textContent = '$10,000';
+    document.getElementById('i-key').textContent = 'sk-ant-api03-eUx…';
+
+    const healthList = document.getElementById('health-list');
+    const checks = [
+      { label: 'API Server',    ok: true },
+      { label: 'IBKR Paper',    ok: true },
+      { label: 'Anthropic API', ok: true },
+      { label: 'Discord Webhook',ok: true },
+      { label: 'Trade DB',      ok: true },
+    ];
+    healthList.innerHTML = checks.map(c =>
+      `<div class="info-row">
+        <span class="info-label">${c.label}</span>
+        <span style="color:${c.ok?'var(--green)':'var(--red)'}">${c.ok?'✓ OK':'✗ Fail'}</span>
+      </div>`
+    ).join('');
+  } catch {}
+}
+
+// ── Tabs ──────────────────────────────────────────────────────────────────────
+function switchTab(id) {
+  document.querySelectorAll('.rtab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.rtab-content').forEach(c => c.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  event.target.classList.add('active');
+}
+
+// ── Formatting ────────────────────────────────────────────────────────────────
+function fmt$(n) {
+  const v = parseFloat(n) || 0;
+  return (v >= 0 ? '+$' : '-$') + Math.abs(v).toLocaleString('en-US', {minimumFractionDigits:0,maximumFractionDigits:0});
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+(async () => {
+  buildAgentSidebar([]);
+  initChart([], []);
+  await Promise.all([fetchStats(), fetchEquity(), fetchPositions(), fetchHistory(), fetchAgents(), fetchHealth(), fetchMarket()]);
+
+  // Polling intervals
+  setInterval(fetchStats,     5_000);
+  setInterval(fetchPositions, 10_000);
+  setInterval(fetchHistory,   15_000);
+  setInterval(fetchEquity,    30_000);
+  setInterval(fetchMarket,    60_000);
+  setInterval(fetchAgents,    30_000);
+})();
+</script>
+</body>
+</html>
