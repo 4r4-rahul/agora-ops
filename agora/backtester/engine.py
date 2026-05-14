@@ -118,6 +118,8 @@ class AgoraBacktestEngine:
         stop_loss_multiplier: float = 2.0,
         iv_premium_threshold: float = 0.25,
         iv_premium_min_days: int = 3,
+        use_claude_macro: bool = False,
+        settings: AgoraSettings | None = None,
     ) -> None:
         self.tickers = [t.upper() for t in (tickers or ["SPY", "QQQ", "IWM", "GLD", "TLT"])]
         self.start_date = date.fromisoformat(start)
@@ -128,6 +130,8 @@ class AgoraBacktestEngine:
         self.target_dte = target_dte
         self.profit_target_pct = profit_target_pct
         self.stop_loss_multiplier = stop_loss_multiplier
+        self.use_claude_macro = use_claude_macro
+        self._settings = settings
 
         # AGORA signal components (deterministic — no Claude needed)
         self._vol_classifier = VolRegimeClassifier()
@@ -179,6 +183,21 @@ class AgoraBacktestEngine:
         _COOLDOWN_DAYS = 7
 
         logger.info("Simulating %d trading days", len(trading_days))
+
+        # ── Optional: pre-compute all daily macro contexts via Batch API ──────
+        # Costs 50% less than real-time calls; runs once before the day loop.
+        batch_macro: dict[str, MacroContext] = {}
+        if self.use_claude_macro:
+            batch_macro = await self._run_batch_macro(
+                trading_days=trading_days,
+                macro_data=macro_data,
+                history=history,
+            )
+            claude_hits = sum(1 for c in batch_macro.values() if c.method == "claude")
+            logger.info(
+                "Batch macro: %d/%d days from Claude, %d rule-based",
+                claude_hits, len(batch_macro), len(batch_macro) - claude_hits,
+            )
 
         for today in trading_days:
             # ── Mark-to-market and lifecycle checks ──────────────────
@@ -297,6 +316,7 @@ class AgoraBacktestEngine:
                     balance=balance,
                     macro_data=macro_data,
                     open_positions=open_positions,
+                    macro_override=batch_macro.get(today.isoformat()),
                 )
 
                 if trade:
@@ -322,6 +342,67 @@ class AgoraBacktestEngine:
 
         return result
 
+    # ── Batch macro pre-computation ────────────────────────────────
+
+    async def _run_batch_macro(
+        self,
+        trading_days: list[date],
+        macro_data: dict[str, list[dict]],
+        history: dict[str, list[dict]],
+    ) -> dict[str, MacroContext]:
+        """
+        Submit all trading days to BacktestBatchAnalyzer in one Batch API call.
+        Returns dict[date_iso → MacroContext]. Falls back to rules on error.
+        """
+        from .batch_analyzer import BacktestBatchAnalyzer
+
+        vix_bars  = macro_data.get("^VIX",   [])
+        vix3m_bars = macro_data.get("^VIX3M", [])
+        spy_bars  = history.get("SPY", [])
+
+        scenarios = []
+        for today in trading_days:
+            vix  = self._get_macro_val(vix_bars, today)
+            vix3m = self._get_macro_val(vix3m_bars, today)
+            vix3m_ratio = (vix / vix3m) if (vix and vix3m and vix3m > 0) else None
+            spy_rsi = self._get_rsi(spy_bars, today, 14)
+            iv_rank = self._get_vix_rank(vix_bars, today, vix or 20.0)
+
+            regime_result = self._vol_classifier.classify(
+                iv_rank=iv_rank,
+                vix=vix or 20.0,
+                vix3m=vix3m or vix or 20.0,
+                hv10=None, hv30=None,
+                spy_rsi=spy_rsi,
+                atm_iv=(vix or 20.0) / 100,
+                hv21=None,
+            )
+            regime = regime_result["regime"]
+
+            days_to_fomc = min(
+                ((d - today).days for d in _FOMC_DATES if d >= today),
+                default=None,
+            )
+            days_to_cpi = min(
+                ((d - today).days for d in _CPI_DATES if d >= today),
+                default=None,
+            )
+
+            scenarios.append({
+                "custom_id":    today.isoformat(),
+                "regime":       regime,
+                "vix":          vix,
+                "iv_rank":      iv_rank,
+                "vix_vix3m":    vix3m_ratio,
+                "spy_rsi":      spy_rsi,
+                "days_to_fomc": days_to_fomc,
+                "days_to_cpi":  days_to_cpi,
+                "fed_rate":     None,
+            })
+
+        analyzer = BacktestBatchAnalyzer(self._settings)
+        return await analyzer.analyze_batch(scenarios)
+
     # ── Day evaluation ─────────────────────────────────────────────
 
     def _evaluate_day(
@@ -334,6 +415,7 @@ class AgoraBacktestEngine:
         balance: float,
         macro_data: dict[str, list[dict]] | None = None,
         open_positions: list[AgoraBacktestTrade] | None = None,
+        macro_override: MacroContext | None = None,
     ) -> AgoraBacktestTrade | None:
         """Run the full signal stack for one ticker on one day."""
         macro_data = macro_data or {}
@@ -449,14 +531,17 @@ class AgoraBacktestEngine:
             atm_iv=atm_iv_proxy,
         )
 
-        # Macro context — yield curve + VIX level drives stance
-        macro_ctx = MacroContext(
-            macro_stance=macro_stance if macro_stance != "risk_off" else "neutral",
-            confidence=macro_confidence,
-            vol_selling_ok=(iv_active or iv_rank > 40) and macro_stance != "risk_off",
-            size_bias="reduce" if macro_stance == "risk_off" else "maintain",
-            method="rules",
-        )
+        # Macro context — use Batch API result when available, else yield-curve rules
+        if macro_override is not None:
+            macro_ctx = macro_override
+        else:
+            macro_ctx = MacroContext(
+                macro_stance=macro_stance if macro_stance != "risk_off" else "neutral",
+                confidence=macro_confidence,
+                vol_selling_ok=(iv_active or iv_rank > 40) and macro_stance != "risk_off",
+                size_bias="reduce" if macro_stance == "risk_off" else "maintain",
+                method="rules",
+            )
 
         # Score conviction
         conviction = self._scorer.score(
@@ -912,7 +997,17 @@ async def _cli_main() -> None:
     parser.add_argument("--balance", type=float, default=25_000.0)
     parser.add_argument("--dte", type=int, default=45)
     parser.add_argument("--risk", type=float, default=500.0, help="Max $ risk per spread (1 contract)")
+    parser.add_argument(
+        "--claude-macro", action="store_true", default=False,
+        help="Use Anthropic Batch API for macro synthesis (50%% cost vs real-time; "
+             "requires ANTHROPIC_API_KEY in environment)",
+    )
     args = parser.parse_args()
+
+    settings = None
+    if args.claude_macro:
+        from ..core.config import get_settings
+        settings = get_settings()
 
     engine = AgoraBacktestEngine(
         tickers=args.tickers,
@@ -921,6 +1016,8 @@ async def _cli_main() -> None:
         starting_balance=args.balance,
         target_dte=args.dte,
         risk_per_trade=args.risk,
+        use_claude_macro=args.claude_macro,
+        settings=settings,
     )
     result = await engine.run()
     result.print_summary()
