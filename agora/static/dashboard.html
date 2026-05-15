@@ -358,20 +358,7 @@ tr.pos-detail-row td { padding: 0; background: var(--bg1); }
 .rp-partial { color: var(--yellow); }
 .rp-degraded { color: var(--orange); }
 .rp-critical { color: var(--red); }
-.golive-row { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
-#golive-btn {
-  padding: 5px 16px; border-radius: var(--radius);
-  font-size: 11px; font-weight: 700; font-family: var(--font);
-  cursor: pointer; transition: all .2s;
-  background: rgba(63,185,80,.12); color: var(--green);
-  border: 1px solid rgba(63,185,80,.35);
-}
-#golive-btn:hover { background: rgba(63,185,80,.22); }
-#golive-btn.approved { background: rgba(63,185,80,.25); animation: glow 2s ease-in-out infinite; }
-@keyframes glow {
-  0%,100% { box-shadow: 0 0 0 0 rgba(63,185,80,.4); }
-  50%      { box-shadow: 0 0 12px 3px rgba(63,185,80,.3); }
-}
+.golive-row { display: flex; align-items: center; gap: 10px; margin-top: 0; }
 #board-btn {
   padding: 5px 16px; border-radius: var(--radius);
   font-size: 11px; font-weight: 700; font-family: var(--font);
@@ -409,34 +396,6 @@ tr.pos-detail-row td { padding: 0; background: var(--bg1); }
 .cd-key { color: var(--text2); }
 .cd-val { color: var(--text); font-weight: 600; max-width: 60%; text-align: right; word-break: break-all; }
 
-/* ── Fireworks overlay ── */
-#fireworks-overlay {
-  display: none; position: fixed; inset: 0; z-index: 200;
-  pointer-events: none; overflow: hidden;
-}
-#fireworks-overlay.show { display: block; }
-.firework-msg {
-  position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-  text-align: center; pointer-events: auto;
-  background: linear-gradient(135deg, rgba(13,17,23,.95), rgba(22,27,34,.95));
-  border: 2px solid var(--green); border-radius: 20px; padding: 32px 48px;
-  animation: pop-in .4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-}
-@keyframes pop-in {
-  0% { transform: translate(-50%, -50%) scale(0.5); opacity: 0; }
-  100% { transform: translate(-50%, -50%) scale(1); opacity: 1; }
-}
-.fw-emoji { font-size: 48px; display: block; margin-bottom: 8px; }
-.fw-title { font-size: 24px; font-weight: 900; color: var(--green); margin-bottom: 4px; letter-spacing: 2px; }
-.fw-sub { font-size: 13px; color: var(--text2); }
-.fw-close {
-  margin-top: 20px; padding: 8px 24px; border-radius: var(--radius);
-  background: rgba(63,185,80,.2); color: var(--green); border: 1px solid rgba(63,185,80,.4);
-  font-family: var(--font); font-size: 12px; font-weight: 700; cursor: pointer;
-}
-canvas.fw-canvas {
-  position: absolute; inset: 0; width: 100%; height: 100%;
-}
 
 /* ── Scrollbars ── */
 ::-webkit-scrollbar { width: 4px; height: 4px; }
@@ -558,8 +517,7 @@ canvas.fw-canvas {
         <span class="readiness-score" id="rm-score">—</span>
         <span style="font-size:11px;color:var(--text2)">/100</span>
         <span class="readiness-status" id="rm-status">Computing...</span>
-        <div class="golive-row" style="margin-left:auto;margin-top:0">
-          <button id="golive-btn" onclick="onGoLiveClick()">🟢 APPROVE GO LIVE</button>
+        <div class="golive-row" style="margin-left:auto">
           <button id="board-btn" onclick="triggerBoardMeeting()">🏛 BOARD MEETING</button>
         </div>
       </div>
@@ -1821,11 +1779,8 @@ function renderReadiness(d) {
 
   const status = document.getElementById('rm-status');
   if (status) {
-    if (d.go_live_approved) {
-      status.innerHTML = '<span style="color:var(--green);font-weight:700">✅ GO LIVE APPROVED</span>';
-      document.getElementById('golive-btn')?.classList.add('approved');
-    } else if (score >= 80) {
-      status.innerHTML = '<span style="color:var(--yellow)">⚡ Ready for approval</span>';
+    if (score >= 80) {
+      status.innerHTML = '<span style="color:var(--yellow)">⚡ Infrastructure ready — awaiting profitable paper trades</span>';
     } else {
       status.innerHTML = `<span style="color:var(--text2)">${Math.round(score)}% ready</span>`;
     }
@@ -1845,17 +1800,19 @@ function renderReadiness(d) {
     </div>`;
   }).join('');
 
-  // Fireworks on go-live
-  if (d.fireworks) triggerFireworks(d.go_live_approved_by);
 }
 
 async function onGoLiveClick() {
+  // Go-live approval removed — reinstate after first profitable paper trade.
+  alert('Go-live approval is locked until AGORA completes a profitable paper trade end-to-end (fill → position tracked → closed at profit target).');
+}
+
+async function _onGoLiveClick_disabled() {
   if (!confirm('CEO: Approve AGORA for LIVE trading? This is a real-money decision.')) return;
   try {
     const d = await fetch('/agora/golive', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({approved_by:'CEO'})}).then(r => r.json());
     if (d.approved) {
       await fetchReadiness();
-      triggerFireworks('CEO');
     } else {
       alert('Go-live blocked: ' + d.reason);
     }
@@ -1986,74 +1943,6 @@ function renderCsuiteDetail(key) {
   detail.innerHTML = `<div class="cd-title">${meta.icon} ${meta.name} — Intelligence Snapshot</div>${rows || '<div style="color:var(--text2);font-size:11px">No data available</div>'}${auditHtml}`;
 }
 
-// ── Fireworks animation ────────────────────────────────────────────
-function triggerFireworks(approvedBy) {
-  // Show the overlay message
-  const overlay = document.getElementById('fireworks-overlay');
-  if (!overlay) return;
-  overlay.classList.add('show');
-
-  // Simple canvas particle system
-  const canvas = overlay.querySelector('.fw-canvas');
-  if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-  canvas.width = window.innerWidth;
-  canvas.height = window.innerHeight;
-
-  const particles = [];
-  const colors = ['#3fb950','#58a6ff','#bc8cff','#ffa657','#f85149','#d29922'];
-
-  for (let i = 0; i < 200; i++) {
-    const angle = Math.random() * Math.PI * 2;
-    const speed = 2 + Math.random() * 6;
-    particles.push({
-      x: Math.random() * canvas.width,
-      y: Math.random() * canvas.height * 0.5,
-      vx: Math.cos(angle) * speed,
-      vy: Math.sin(angle) * speed - 3,
-      alpha: 1, size: 3 + Math.random() * 4,
-      color: colors[Math.floor(Math.random() * colors.length)],
-    });
-  }
-
-  let frame;
-  function animate() {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    for (const p of particles) {
-      p.x += p.vx; p.y += p.vy; p.vy += 0.15; p.alpha -= 0.008;
-      if (p.alpha <= 0) continue;
-      ctx.globalAlpha = p.alpha;
-      ctx.fillStyle = p.color;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, p.size, 0, Math.PI*2);
-      ctx.fill();
-    }
-    if (particles.some(p => p.alpha > 0)) frame = requestAnimationFrame(animate);
-    else ctx.clearRect(0, 0, canvas.width, canvas.height);
-  }
-  animate();
-
-  const msgDiv = overlay.querySelector('.firework-msg');
-  if (msgDiv) {
-    overlay.querySelector('.fw-sub').textContent = `Approved by: ${approvedBy || 'CEO'} | ${new Date().toLocaleString()}`;
-  }
-}
-
-function closeFireworks() {
-  const overlay = document.getElementById('fireworks-overlay');
-  if (overlay) overlay.classList.remove('show');
-}
 </script>
-
-<!-- ── Fireworks Overlay ── -->
-<div id="fireworks-overlay">
-  <canvas class="fw-canvas"></canvas>
-  <div class="firework-msg">
-    <span class="fw-emoji">🎉🚀🎊</span>
-    <div class="fw-title">AGORA IS LIVE!</div>
-    <div class="fw-sub">The system is now trading with real capital.</div>
-    <button class="fw-close" onclick="closeFireworks()">Continue to Dashboard</button>
-  </div>
-</div>
 </body>
 </html>
