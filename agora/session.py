@@ -591,7 +591,12 @@ class AgoraSession:
                 await self._premarket_macro_scan()
             except Exception as exc:
                 logger.error("Cold-start premarket synthesis failed: %s", exc)
-            # Run an immediate universe scan so we don't wait up to 30 min after restart
+            # Wait for the startup synthesis task (may already be in-progress) to finish,
+            # then run an immediate scan with fresh macro context.
+            for _wait in range(120):
+                if not self._synthesis_in_progress:
+                    break
+                await asyncio.sleep(1)
             try:
                 logger.info("Session loop: cold-start universe scan (immediate)")
                 await self._universe_scan()
