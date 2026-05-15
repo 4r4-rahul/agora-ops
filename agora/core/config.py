@@ -46,9 +46,10 @@ class AgoraSettings(BaseSettings):
     weekly_loss_limit_pct: float = Field(default=0.06, ge=0.01, le=0.20)
     min_rr_ratio: float = Field(default=1.3, ge=0.5)
     min_credit_spread_rr_ratio: float = Field(
-        default=0.20,
-        description="Minimum R/R for credit spreads (collect ≥20% of spread width as premium). "
-                    "Credit spreads structurally have R/R < 1; using the debit-spread threshold would block all vol-premium trades.",
+        default=0.10,
+        description="Minimum R/R for credit spreads (collect ≥10% of spread width as premium). "
+                    "Matches the rules_engine floor; credit spreads structurally have R/R < 1. "
+                    "TLT at 11.5% IV yields R/R≈0.12; debit-spread threshold of 1.3 blocks all vol-premium trades.",
     )
     max_debit_to_width_ratio: float = Field(
         default=0.40,
