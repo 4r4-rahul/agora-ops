@@ -267,11 +267,22 @@ class LiveReadinessMeter:
             snap = perf.get_latest_snapshot()
             has_data = snap.get("status") != "no_data"
             if not has_data:
-                # No closed trades yet — acceptable if we have open positions (early session).
-                # The monitor is wired; it just hasn't seen a close event yet.
                 pm = self._agents.get("position_mgr")
                 has_open = pm is not None and len(pm.get_open_positions()) > 0
-                has_data = has_open  # treat as "available" when actively holding positions
+                # Also acceptable: no fills attempted today — monitor is wired,
+                # the session simply hasn't traded yet (pre-market or early session).
+                try:
+                    import sqlite3 as _sql
+                    from ..core.config import get_settings
+                    _conn = _sql.connect(str(get_settings().db_path), check_same_thread=False)
+                    fills_today = _conn.execute(
+                        "SELECT COUNT(*) FROM execution_quality "
+                        "WHERE outcome='fill' AND attempt_date=date('now')"
+                    ).fetchone()[0]
+                    _conn.close()
+                except Exception:
+                    fills_today = 0
+                has_data = has_open or (fills_today == 0)
             checks.append(("performance_data_available", has_data))
 
         pm = self._agents.get("position_mgr")

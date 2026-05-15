@@ -137,7 +137,7 @@ class AgoraSettings(BaseSettings):
             # Other watchlist
             "FLEX", "MSTR", "WDC", "IREN", "NOK", "OKLO", "GEV",
             "MP", "POWL", "KEYS", "ONTO", "SERV", "VICR",
-            "BJ", "BRK B", "F", "CIFR", "ASTS",
+            "BJ", "F", "CIFR", "ASTS",
         ],
         description="Options universe for vol premium credit spreads and event plays",
     )

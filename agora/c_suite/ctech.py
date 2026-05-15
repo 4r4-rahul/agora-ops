@@ -16,7 +16,7 @@ Sub-agents supervised:
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -192,6 +192,7 @@ class CTechAgent(ExecutiveAgent):
         self._macro       = macro_synthesizer
         self._sector      = sector_intel
         self._universe    = universe_disc
+        self._started_at  = datetime.now(tz=timezone.utc)
 
     @property
     def _system_prompt(self) -> str:
@@ -236,12 +237,14 @@ class CTechAgent(ExecutiveAgent):
             ))
 
         # ── Conviction scorer: no scans after startup period ──
+        uptime_minutes = (datetime.now(tz=timezone.utc) - self._started_at).total_seconds() / 60
         if self._scorer and is_market_hours:
             try:
                 stats = self._scorer.get_session_stats()
                 scored = stats.get("scored", 0)
-                # If we're past 10:30 AM and still 0 scans, something is wrong
-                if now_et.hour >= 10 and scored == 0:
+                # Grace period: don't alarm within first 15 min (premarket synthesis can take ~90s,
+                # and the first evaluation cycle starts after that completes)
+                if now_et.hour >= 10 and scored == 0 and uptime_minutes >= 15:
                     findings.append((
                         "conviction_scorer_no_scans",
                         "critical",

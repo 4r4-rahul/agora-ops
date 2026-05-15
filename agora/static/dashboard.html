@@ -209,6 +209,21 @@ tr.pos-detail-row td { padding: 0; background: var(--bg1); }
 .leg-chip .ls { color: var(--text); }
 .leg-chip .lp { margin-left: auto; color: var(--yellow); }
 
+/* ── Position charts ── */
+.pos-charts-row {
+  grid-column: 1 / -1;
+  display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px;
+  border-top: 1px solid var(--border); padding-top: 10px; margin-top: 4px;
+}
+.chart-mini-label {
+  font-size: 9px; text-transform: uppercase; letter-spacing: .8px;
+  color: var(--text2); margin-bottom: 5px; font-weight: 700;
+  display: flex; justify-content: space-between; align-items: center;
+}
+.chart-mini-loading {
+  color: var(--text2); font-size: 10px; text-align: center; padding: 18px 0;
+}
+
 /* ── WS feed ── */
 #feed-list {
   height: 100%; overflow-y: auto;
@@ -1242,9 +1257,29 @@ async function fetchPositions() {
             <div class="detail-kv"><span class="dk">DTE</span><span class="dv" style="color:${dteCol}">${dte}d</span></div>
             <div class="detail-kv"><span class="dk">Status</span><span class="dv">${pos.status || 'open'}</span></div>
           </div>
+          <div class="pos-charts-row">
+            <div class="chart-mini">
+              <div class="chart-mini-label">5-Day Price</div>
+              <div class="chart-mini-loading" id="cload-price-${pid}">Loading…</div>
+              <canvas id="c-price-${pid}" height="90" style="display:none"></canvas>
+            </div>
+            <div class="chart-mini">
+              <div class="chart-mini-label">P&amp;L at Expiry</div>
+              <div class="chart-mini-loading" id="cload-pnl-${pid}">Loading…</div>
+              <canvas id="c-pnl-${pid}" height="90" style="display:none"></canvas>
+            </div>
+            <div class="chart-mini">
+              <div class="chart-mini-label">
+                30-Day Realized Vol
+                <span id="c-ivbadge-${pid}" style="font-size:10px;font-weight:700;color:var(--yellow)">—</span>
+              </div>
+              <div class="chart-mini-loading" id="cload-iv-${pid}">Loading…</div>
+              <canvas id="c-iv-${pid}" height="90" style="display:none"></canvas>
+            </div>
+          </div>
         </div>`;
 
-      return `<tr class="pos-row" onclick="togglePosDetail('${pid}')">
+      return `<tr class="pos-row" onclick="togglePosDetail('${pid}','${pos.ticker}')">
         <td style="color:var(--blue);font-weight:700"><span class="chevron">▶</span>${pos.ticker}</td>
         <td>${(pos.strategy||'').replace(/_/g,' ')}</td>
         <td style="color:${dirCol};font-weight:700">${dirIcon} ${dir}</td>
@@ -1260,13 +1295,230 @@ async function fetchPositions() {
   } catch {}
 }
 
-function togglePosDetail(pid) {
+// ── Position chart instances (keyed by "type-pid") ───────────────────────────
+const _posCharts = {};
+
+function _killChart(key) {
+  if (_posCharts[key]) { _posCharts[key].destroy(); delete _posCharts[key]; }
+}
+
+function _chartDefaults(extra) {
+  return Object.assign({
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: false,
+    plugins: { legend: { display: false } },
+    scales: {
+      x: { display: false },
+      y: {
+        display: true,
+        grid: { color: 'rgba(48,54,61,0.5)' },
+        ticks: { color: '#8b949e', font: { size: 9 }, maxTicksLimit: 4 },
+      },
+    },
+  }, extra);
+}
+
+async function _loadPriceChart(pid, ticker) {
+  try {
+    const r = await fetch(`/agora/chart/price/${ticker}`);
+    const d = await r.json();
+    if (!d.close || !d.close.length) return;
+    const loading = document.getElementById(`cload-price-${pid}`);
+    const canvas  = document.getElementById(`c-price-${pid}`);
+    if (!canvas) return;
+    loading.style.display = 'none';
+    canvas.style.display = 'block';
+    _killChart(`price-${pid}`);
+    _posCharts[`price-${pid}`] = new Chart(canvas, {
+      type: 'line',
+      data: {
+        labels: d.times.map(t => t.slice(11, 16)),
+        datasets: [{
+          data: d.close,
+          borderColor: '#58a6ff',
+          backgroundColor: 'rgba(88,166,255,0.08)',
+          borderWidth: 1.5,
+          pointRadius: 0,
+          fill: true,
+          tension: 0.15,
+        }],
+      },
+      options: _chartDefaults({
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: { label: ctx => `$${ctx.parsed.y.toFixed(2)}` } },
+        },
+        scales: {
+          x: { display: false },
+          y: {
+            display: true,
+            grid: { color: 'rgba(48,54,61,0.5)' },
+            ticks: { color: '#8b949e', font: { size: 9 }, maxTicksLimit: 4,
+                     callback: v => `$${v}` },
+          },
+        },
+      }),
+    });
+  } catch {}
+}
+
+async function _loadPnlChart(pid) {
+  try {
+    const r = await fetch(`/agora/chart/pnl/${pid}`);
+    const d = await r.json();
+    if (!d.prices || !d.pnl) return;
+    const loading = document.getElementById(`cload-pnl-${pid}`);
+    const canvas  = document.getElementById(`c-pnl-${pid}`);
+    if (!canvas) return;
+    loading.style.display = 'none';
+    canvas.style.display = 'block';
+    _killChart(`pnl-${pid}`);
+
+    const beLabels = (d.breakevens || []).map(b => `BE $${b.toFixed(0)}`).join('  ');
+    _posCharts[`pnl-${pid}`] = new Chart(canvas, {
+      type: 'line',
+      data: {
+        labels: d.prices.map(p => `$${p.toFixed(0)}`),
+        datasets: [
+          // zero line
+          {
+            data: d.prices.map(() => 0),
+            borderColor: 'rgba(139,148,158,0.25)',
+            borderWidth: 1,
+            pointRadius: 0,
+            fill: false,
+          },
+          // P&L curve — segment coloring green/red
+          {
+            data: d.pnl,
+            borderWidth: 1.5,
+            pointRadius: 0,
+            fill: false,
+            segment: {
+              borderColor: ctx => (ctx.p0.parsed.y >= 0 ? '#3fb950' : '#f85149'),
+            },
+          },
+        ],
+      },
+      options: _chartDefaults({
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              label: ctx => ctx.datasetIndex === 1 ? `P&L: ${fmt$(ctx.parsed.y)}` : null,
+            },
+          },
+          // Title shows breakeven(s) so the user can read them without hovering
+          ...(beLabels ? {
+            title: {
+              display: true, text: beLabels,
+              color: '#d29922', font: { size: 9 }, padding: { bottom: 2 },
+            },
+          } : {}),
+        },
+        scales: {
+          x: { display: true, ticks: { color: '#8b949e', font: { size: 8 }, maxTicksLimit: 6 },
+               grid: { color: 'rgba(48,54,61,0.3)' } },
+          y: { display: true, grid: { color: 'rgba(48,54,61,0.4)' },
+               ticks: { color: '#8b949e', font: { size: 9 }, maxTicksLimit: 4,
+                        callback: v => `$${v}` } },
+        },
+      }),
+    });
+  } catch {}
+}
+
+async function _loadIvChart(pid, ticker) {
+  try {
+    const r = await fetch(`/agora/chart/ivrank/${ticker}`);
+    const d = await r.json();
+    if (!d.hv || !d.hv.length) return;
+    const loading = document.getElementById(`cload-iv-${pid}`);
+    const canvas  = document.getElementById(`c-iv-${pid}`);
+    const badge   = document.getElementById(`c-ivbadge-${pid}`);
+    if (!canvas) return;
+    loading.style.display = 'none';
+    canvas.style.display = 'block';
+
+    if (badge) {
+      const ivText = d.iv_rank != null
+        ? `IVR ${d.iv_rank.toFixed(0)}`
+        : (d.iv_current != null ? `IV ${d.iv_current.toFixed(0)}%` : '—');
+      const ivCol = d.iv_rank != null
+        ? (d.iv_rank >= 60 ? '#3fb950' : d.iv_rank >= 30 ? '#d29922' : '#8b949e')
+        : '#8b949e';
+      badge.textContent = ivText;
+      badge.style.color = ivCol;
+    }
+
+    const datasets = [{
+      label: '30d HV',
+      data: d.hv,
+      borderColor: '#58a6ff',
+      backgroundColor: 'rgba(88,166,255,0.08)',
+      borderWidth: 1.5,
+      pointRadius: 0,
+      fill: true,
+      tension: 0.2,
+    }];
+    if (d.iv_current != null) {
+      datasets.push({
+        label: 'ATM IV',
+        data: Array(d.hv.length).fill(d.iv_current),
+        borderColor: 'rgba(210,153,34,0.7)',
+        borderWidth: 1,
+        borderDash: [4, 3],
+        pointRadius: 0,
+        fill: false,
+      });
+    }
+
+    _killChart(`iv-${pid}`);
+    _posCharts[`iv-${pid}`] = new Chart(canvas, {
+      type: 'line',
+      data: { labels: d.dates, datasets },
+      options: _chartDefaults({
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              label: ctx => `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(1)}%`,
+            },
+          },
+        },
+        scales: {
+          x: { display: false },
+          y: {
+            display: true,
+            grid: { color: 'rgba(48,54,61,0.5)' },
+            ticks: { color: '#8b949e', font: { size: 9 }, maxTicksLimit: 4,
+                     callback: v => `${v}%` },
+          },
+        },
+      }),
+    });
+  } catch {}
+}
+
+function togglePosDetail(pid, ticker) {
   const detailRow = document.getElementById('detail-' + pid);
   if (!detailRow) return;
   const summaryRow = detailRow.previousElementSibling;
   const isOpen = detailRow.classList.contains('open');
   detailRow.classList.toggle('open', !isOpen);
   if (summaryRow) summaryRow.classList.toggle('expanded', !isOpen);
+  if (!isOpen) {
+    // Opening — lazy-load all three charts in parallel
+    _loadPriceChart(pid, ticker);
+    _loadPnlChart(pid);
+    _loadIvChart(pid, ticker);
+  } else {
+    // Closing — destroy to free memory
+    _killChart(`price-${pid}`);
+    _killChart(`pnl-${pid}`);
+    _killChart(`iv-${pid}`);
+  }
 }
 
 // ── Fetch: attribution ────────────────────────────────────────────────────────

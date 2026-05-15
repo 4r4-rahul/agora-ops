@@ -412,6 +412,7 @@ class AgoraSession:
         self._last_macro_spy: float | None = None   # SPY price at last macro synthesis
         self._last_macro_vix: float | None = None   # VIX level at last macro synthesis
         self._last_macro_refresh_et: datetime | None = None  # time of last synthesis
+        self._synthesis_in_progress: bool = False   # guard against concurrent synthesis calls
 
         # ── Event deduplication ────────────────────────────────────
         # Tracks tickers with active pre-earnings setups (ticker → earnings_date).
@@ -575,7 +576,22 @@ class AgoraSession:
         - 9:30–15:30:  universe scan every 30 min during market hours
         - 4:05 PM ET:  after-hours attribution report
         - Every cycle:  pre-earnings IV crush close check (T-1 close)
+
+        Cold-start recovery: if the session starts during market hours without
+        premarket synthesis (restart after 7 AM), run it immediately so the
+        conviction scorer has macro context on the first scan.
         """
+        # ── Cold-start catch-up ────────────────────────────────────────
+        now_et = datetime.now(tz=ET)
+        if 9 <= now_et.hour < 16 and self._last_macro_spy is None:
+            logger.info(
+                "Session loop: cold-start during market hours — running premarket synthesis now"
+            )
+            try:
+                await self._premarket_macro_scan()
+            except Exception as exc:
+                logger.error("Cold-start premarket synthesis failed: %s", exc)
+
         while self._running:
             now_et = datetime.now(tz=ET)
             hour, minute = now_et.hour, now_et.minute
@@ -693,7 +709,13 @@ class AgoraSession:
     # ── Pre-market macro synthesis ─────────────────────────────────
 
     async def _premarket_macro_scan(self, reason: str = "7:00 AM schedule") -> None:
+        if self._synthesis_in_progress:
+            logger.debug("Macro synthesis already in progress — skipping duplicate (%s)", reason)
+            return
+        self._synthesis_in_progress = True
         logger.info("Macro synthesis starting — trigger: %s", reason)
+        import time as _t
+        _scan_start = _t.monotonic()
         try:
             import yfinance as yf
 
@@ -705,14 +727,20 @@ class AgoraSession:
                 except Exception:
                     return fallback
 
-            vix   = _fast_price("^VIX",  20.0)
-            vix3m = _fast_price("^VIX3M", 20.0)
+            # Run blocking yfinance calls in thread so the event loop stays free.
+            vix, vix3m = await asyncio.gather(
+                asyncio.to_thread(_fast_price, "^VIX",  20.0),
+                asyncio.to_thread(_fast_price, "^VIX3M", 20.0),
+            )
+            logger.info("Macro VIX fetch: %.1fs | VIX=%.2f VIX3M=%.2f", _t.monotonic()-_scan_start, vix, vix3m)
             spy_info = {}  # no longer needed for price; snapshot covers it
 
             from trading_platform.services.market_data.yfinance_provider import YFinanceProvider
             provider = YFinanceProvider()
+            _t1 = _t.monotonic()
             try:
                 spy_snap = await provider.get_snapshot("SPY")
+                logger.info("Macro SPY snapshot: %.1fs", _t.monotonic()-_t1)
             except Exception as snap_exc:
                 logger.warning("SPY snapshot failed during macro scan: %s — using defaults", snap_exc)
                 # Use a minimal synthetic snapshot so synthesis can still run
@@ -775,6 +803,8 @@ class AgoraSession:
             )
         except Exception as exc:
             logger.error("Pre-market scan failed: %s", exc)
+        finally:
+            self._synthesis_in_progress = False
 
     # ── Universe scan ──────────────────────────────────────────────
 
@@ -798,14 +828,18 @@ class AgoraSession:
             try:
                 import yfinance as yf
                 universe = self._settings.etf_universe
-                raw = yf.download(
-                    " ".join(universe),
-                    period="1d",
-                    interval="5m",
-                    auto_adjust=True,
-                    progress=False,
-                    threads=True,
-                )
+
+                def _download_batch() -> Any:
+                    return yf.download(
+                        " ".join(universe),
+                        period="1d",
+                        interval="5m",
+                        auto_adjust=True,
+                        progress=False,
+                        threads=True,
+                    )
+
+                raw = await asyncio.to_thread(_download_batch)
                 if raw.empty:
                     await asyncio.sleep(300)
                     continue
@@ -1211,7 +1245,13 @@ class AgoraSession:
                             break
                 return chain_dict
 
-            chain_dict = await asyncio.to_thread(_fetch_chains_sync, ticker)
+            try:
+                chain_dict = await asyncio.wait_for(
+                    asyncio.to_thread(_fetch_chains_sync, ticker), timeout=45.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Options chain fetch timed out for %s — skipping ticker", ticker)
+                return
             if not chain_dict:
                 logger.info("No options chain data for %s — skipping", ticker)
                 return
@@ -1341,7 +1381,13 @@ class AgoraSession:
                         _spot = float(info.get("regularMarketPrice") or info.get("currentPrice") or 0)
                 return _chain, _spot
 
-            chain_dict, spot = await asyncio.to_thread(_fetch_catalyst_data, catalyst.ticker)
+            try:
+                chain_dict, spot = await asyncio.wait_for(
+                    asyncio.to_thread(_fetch_catalyst_data, catalyst.ticker), timeout=45.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Options chain fetch timed out for catalyst %s — skipping", catalyst.ticker)
+                return
             if not chain_dict or spot <= 0:
                 return
 
@@ -1433,7 +1479,13 @@ class AgoraSession:
                             continue
                 return _chain, _spot
 
-            chain_dict, spot = await asyncio.to_thread(_fetch_preearnings, setup.ticker, setup.spot)
+            try:
+                chain_dict, spot = await asyncio.wait_for(
+                    asyncio.to_thread(_fetch_preearnings, setup.ticker, setup.spot), timeout=45.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Options chain fetch timed out for pre-earnings %s — skipping", setup.ticker)
+                return
             if not chain_dict or spot <= 0:
                 return
 
@@ -1530,7 +1582,13 @@ class AgoraSession:
                             continue
                 return _chain, _spot
 
-            chain_dict, spot = await asyncio.to_thread(_fetch_postearnings, result.ticker)
+            try:
+                chain_dict, spot = await asyncio.wait_for(
+                    asyncio.to_thread(_fetch_postearnings, result.ticker), timeout=45.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Options chain fetch timed out for post-earnings %s — skipping", result.ticker)
+                return
             if not chain_dict or spot <= 0:
                 return
 
@@ -1995,7 +2053,13 @@ class AgoraSession:
                             continue
                 return _chain, _spot
 
-            chain_dict, spot = await asyncio.to_thread(_fetch_roll_data, position.ticker)
+            try:
+                chain_dict, spot = await asyncio.wait_for(
+                    asyncio.to_thread(_fetch_roll_data, position.ticker), timeout=45.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Options chain fetch timed out for roll %s — skipping", position.ticker)
+                return
             if not chain_dict or spot <= 0:
                 logger.warning("Roll reopen aborted for %s — no chain data", position.ticker)
                 return

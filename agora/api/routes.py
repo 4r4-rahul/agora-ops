@@ -886,6 +886,189 @@ async def get_trade_journal(limit: int = 50) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+# ── Chart data endpoints ──────────────────────────────────────────────────────
+
+_chart_cache: dict[str, tuple[float, Any]] = {}
+_CHART_CACHE_TTL = 900  # 15 minutes
+
+
+@router.get("/chart/price/{ticker}")
+async def chart_price(ticker: str) -> JSONResponse:
+    """5-day hourly OHLCV for position mini-chart. Cached 15 minutes."""
+    cache_key = f"price:{ticker}"
+    ts_now = datetime.now().timestamp()
+    if cache_key in _chart_cache:
+        ts, data = _chart_cache[cache_key]
+        if ts_now - ts < _CHART_CACHE_TTL:
+            return JSONResponse(data)
+
+    loop = asyncio.get_event_loop()
+    try:
+        def _fetch():
+            import yfinance as yf
+            df = yf.download(ticker, period="5d", interval="1h", progress=False, auto_adjust=True)
+            if df.empty:
+                return None
+            if hasattr(df.columns, "get_level_values"):
+                df.columns = df.columns.get_level_values(0)
+            return {
+                "ticker": ticker,
+                "times":  [str(t) for t in df.index],
+                "close":  [round(float(v), 2) for v in df["Close"]],
+                "high":   [round(float(v), 2) for v in df["High"]],
+                "low":    [round(float(v), 2) for v in df["Low"]],
+                "volume": [int(v) for v in df["Volume"]],
+            }
+
+        data = await loop.run_in_executor(None, _fetch)
+        if not data:
+            return JSONResponse({"error": "no data"}, status_code=404)
+        _chart_cache[cache_key] = (ts_now, data)
+        return JSONResponse(data)
+    except Exception as exc:
+        logger.error("chart_price %s: %s", ticker, exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@router.get("/chart/ivrank/{ticker}")
+async def chart_ivrank(ticker: str) -> JSONResponse:
+    """30-day rolling realized vol + current ATM IV. Cached 15 minutes."""
+    cache_key = f"ivrank:{ticker}"
+    ts_now = datetime.now().timestamp()
+    if cache_key in _chart_cache:
+        ts, data = _chart_cache[cache_key]
+        if ts_now - ts < _CHART_CACHE_TTL:
+            return JSONResponse(data)
+
+    loop = asyncio.get_event_loop()
+    try:
+        def _fetch():
+            import math
+            import yfinance as yf
+            t = yf.Ticker(ticker)
+            hist = t.history(period="1y")
+            if hist.empty:
+                return None
+
+            closes = list(hist["Close"])
+            log_ret = []
+            for i in range(1, len(closes)):
+                prev, cur = closes[i - 1], closes[i]
+                if prev > 0 and cur > 0:
+                    log_ret.append(math.log(cur / prev))
+
+            # 21-day rolling realized vol (annualized, in %)
+            hv_series = []
+            for i in range(20, len(log_ret)):
+                w = log_ret[i - 20: i + 1]
+                mean = sum(w) / len(w)
+                var  = sum((x - mean) ** 2 for x in w) / len(w)
+                hv_series.append(round(math.sqrt(var * 252) * 100, 1))
+
+            hist_dates = list(hist.index)
+            date_offset = len(hist_dates) - len(hv_series)
+            all_dates = [str(hist_dates[date_offset + i])[:10] for i in range(len(hv_series))]
+
+            hv_last30    = hv_series[-30:]
+            dates_last30 = all_dates[-30:]
+
+            hv_min = min(hv_series) if hv_series else 0.0
+            hv_max = max(hv_series) if hv_series else 100.0
+            hv_now = hv_last30[-1] if hv_last30 else None
+            iv_rank = None
+            if hv_now is not None and (hv_max - hv_min) > 0:
+                iv_rank = round((hv_now - hv_min) / (hv_max - hv_min) * 100, 1)
+
+            iv_current = None
+            try:
+                exps = t.options
+                if exps:
+                    chain = t.option_chain(exps[0])
+                    spot  = float(closes[-1])
+                    calls = chain.calls
+                    if not calls.empty:
+                        idx = (calls["strike"] - spot).abs().idxmin()
+                        iv_val = calls.loc[idx, "impliedVolatility"]
+                        if iv_val and float(iv_val) > 0:
+                            iv_current = round(float(iv_val) * 100, 1)
+            except Exception:
+                pass
+
+            return {
+                "ticker":     ticker,
+                "dates":      dates_last30,
+                "hv":         hv_last30,
+                "iv_current": iv_current,
+                "iv_rank":    iv_rank,
+                "hv_min":     round(hv_min, 1),
+                "hv_max":     round(hv_max, 1),
+            }
+
+        data = await loop.run_in_executor(None, _fetch)
+        if not data:
+            return JSONResponse({"error": "no data"}, status_code=404)
+        _chart_cache[cache_key] = (ts_now, data)
+        return JSONResponse(data)
+    except Exception as exc:
+        logger.error("chart_ivrank %s: %s", ticker, exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@router.get("/chart/pnl/{position_id}")
+async def chart_pnl(position_id: str) -> JSONResponse:
+    """P&L at expiry curve — pure math from leg strikes, no external data."""
+    session = get_session()
+    if session is None:
+        return JSONResponse({"error": "session not ready"}, status_code=503)
+
+    positions = session._position_mgr.get_open_positions()
+    pos = next(
+        (p for p in positions
+         if str(p.position_id) == position_id or p.ticker == position_id),
+        None,
+    )
+    if pos is None:
+        return JSONResponse({"error": "position not found"}, status_code=404)
+
+    legs = pos.legs
+    contracts = max(pos.contracts or 1, 1)
+
+    strikes = [l.strike for l in legs if l.strike]
+    ref = sum(strikes) / len(strikes) if strikes else 100.0
+    lo, hi = ref * 0.75, ref * 1.25
+    prices = [round(lo + (hi - lo) * i / 100, 2) for i in range(101)]
+
+    def _payoff(leg, S: float) -> float:
+        k = leg.strike or 0.0
+        is_call = (leg.option_type or "").lower().startswith("c")
+        intrinsic = max(S - k, 0.0) if is_call else max(k - S, 0.0)
+        sign = 1 if (leg.action or "").lower() == "buy" else -1
+        return sign * intrinsic * 100 * contracts
+
+    entry_total = (pos.entry_price or 0.0) * 100 * contracts
+
+    pnl_curve = [round(sum(_payoff(l, S) for l in legs) - entry_total, 2) for S in prices]
+
+    breakevens = []
+    for i in range(len(pnl_curve) - 1):
+        a, b = pnl_curve[i], pnl_curve[i + 1]
+        if a * b <= 0 and b != a:
+            be = prices[i] + (prices[i + 1] - prices[i]) * (-a) / (b - a)
+            breakevens.append(round(be, 2))
+
+    return JSONResponse({
+        "ticker":      pos.ticker,
+        "position_id": position_id,
+        "prices":      prices,
+        "pnl":         pnl_curve,
+        "max_gain":    pos.max_gain_dollars,
+        "max_loss":    pos.max_loss_dollars,
+        "breakevens":  breakevens,
+        "strikes":     [l.strike for l in legs],
+        "entry_price": pos.entry_price,
+    })
+
+
 @router.websocket("/ws")
 async def websocket_feed(ws: WebSocket) -> None:
     """

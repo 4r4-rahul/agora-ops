@@ -202,6 +202,9 @@ class OrphanOrderReconciler:
                     len(all_open_trades),
                 )
 
+            # ── Step 4: Mark ghost fills confirmed-closed by TWS ─────────
+            await self._mark_confirmed_closed_fills(ib, active_tickers)
+
             return (cancelled, synced)
 
         finally:
@@ -270,6 +273,57 @@ class OrphanOrderReconciler:
             )
 
         return synced
+
+    async def _mark_confirmed_closed_fills(self, ib: Any, active_tickers: set[str]) -> None:
+        """
+        For any fill in execution_quality with no shadow-book position AND
+        no open TWS option position, mark outcome='fill_closed' so the ghost
+        fill readiness check doesn't keep failing after reconcile has run.
+        """
+        try:
+            import sqlite3
+            from ..core.config import get_settings
+            db_path = str(get_settings().db_path)
+            conn = sqlite3.connect(db_path, check_same_thread=False)
+            ghost_rows = conn.execute(
+                "SELECT id, ticker FROM execution_quality "
+                "WHERE outcome='fill' AND attempt_date=date('now') "
+                "AND ticker NOT IN (SELECT ticker FROM positions)"
+            ).fetchall()
+            conn.close()
+
+            if not ghost_rows:
+                return
+
+            # Fetch live option positions from TWS
+            portfolio = ib.portfolio()
+            tws_option_tickers = {
+                item.contract.symbol for item in portfolio
+                if getattr(item.contract, "secType", "") == "OPT"
+            }
+
+            # Mark fills as closed only when TWS also shows no open position
+            to_close = [
+                row_id for row_id, ticker in ghost_rows
+                if ticker not in tws_option_tickers and ticker not in active_tickers
+            ]
+            if not to_close:
+                return
+
+            conn = sqlite3.connect(db_path, check_same_thread=False)
+            conn.execute(
+                f"UPDATE execution_quality SET outcome='fill_closed' "
+                f"WHERE id IN ({','.join('?' * len(to_close))})",
+                to_close,
+            )
+            conn.commit()
+            conn.close()
+            logger.info(
+                "OrphanReconciler: marked %d ghost fill(s) as fill_closed (TWS confirms no open position)",
+                len(to_close),
+            )
+        except Exception as exc:
+            logger.debug("OrphanReconciler: _mark_confirmed_closed_fills failed — %s", exc)
 
     async def _notify(self, level: str, message: str) -> None:
         if self._csuite_manager:

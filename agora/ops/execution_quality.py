@@ -176,7 +176,8 @@ class ExecutionQualityAgent:
             (today,),
         ).fetchall()
         m = {r[0]: r[1] for r in rows}
-        fills    = m.get("fill", 0)
+        # fill_closed = confirmed round-trip (opened+closed, no open position)
+        fills    = m.get("fill", 0) + m.get("fill_closed", 0)
         rejects  = m.get("reject", 0)
         timeouts = m.get("timeout", 0)
         total    = fills + rejects + timeouts

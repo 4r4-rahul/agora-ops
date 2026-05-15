@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time as _time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -115,17 +116,18 @@ class MacroSynthesizer:
         )
 
         try:
-            # Streaming prevents timeout on long macro synthesis; thinking display="summarized"
-            # shows reasoning in Opus 4.7 logs for debugging regime-flip decisions.
-            async with self._client.messages.stream(
-                model=self._settings.claude_model,
-                max_tokens=1024,
-                thinking={"type": "adaptive", "display": "summarized"},
+            # Non-streaming create() for macro synthesis: JSON output is tiny (512 tokens).
+            # Explicit longer connect timeout — startup contention from 20+ agents opening
+            # connections simultaneously can delay TCP handshake beyond the 5s default.
+            _t0 = _time.monotonic()
+            response = await self._client.messages.create(
+                model=self._settings.claude_brief_model,
+                max_tokens=512,
                 system=_CACHED_SYSTEM,
                 messages=[{"role": "user", "content": state_summary}],
-                output_config={"effort": "high"},
-            ) as stream:
-                response = await stream.get_final_message()
+                timeout=anthropic.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0),
+            )
+            logger.info("MacroSynthesizer Claude call OK in %.1fs", _time.monotonic() - _t0)
 
             text_blocks = [b for b in response.content if b.type == "text"]
             if not text_blocks:
@@ -151,7 +153,10 @@ class MacroSynthesizer:
             return ctx
 
         except Exception as exc:
-            logger.warning("MacroSynthesizer Claude call failed: %s — using rule fallback", exc)
+            logger.warning(
+                "MacroSynthesizer Claude call failed [%s]: %s — using rule fallback",
+                type(exc).__name__, exc,
+            )
             ctx = self._fallback_context(regime, iv_rank, vix)
             self._last_context = ctx  # always set so readiness meter sees non-None
             return ctx
