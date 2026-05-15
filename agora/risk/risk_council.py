@@ -30,7 +30,15 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from ..core.config import AgoraSettings, get_settings
-from ..core.models import TradeRecommendation
+from ..core.models import StrategyType, TradeRecommendation
+
+_CREDIT_STRATEGIES = frozenset({
+    StrategyType.BULL_PUT_SPREAD,
+    StrategyType.BEAR_CALL_SPREAD,
+    StrategyType.IRON_CONDOR,
+    StrategyType.IRON_BUTTERFLY,
+    StrategyType.CASH_SECURED_PUT,
+})
 
 logger = logging.getLogger(__name__)
 
@@ -186,12 +194,16 @@ class RiskCouncil:
         if not group_ok:
             return {"approved": False, "reason": group_msg, "checks": checks}
 
-        # 9. Reward/risk minimum
-        checks["reward_risk"] = recommendation.reward_risk_ratio >= self._settings.min_rr_ratio
+        # 9. Reward/risk minimum — credit and debit spreads have different structural R/R
+        if recommendation.strategy in _CREDIT_STRATEGIES:
+            min_rr = self._settings.min_credit_spread_rr_ratio
+        else:
+            min_rr = self._settings.min_rr_ratio
+        checks["reward_risk"] = recommendation.reward_risk_ratio >= min_rr
         if not checks["reward_risk"]:
             return {
                 "approved": False,
-                "reason": f"R/R ratio {recommendation.reward_risk_ratio:.2f} below minimum {self._settings.min_rr_ratio}",
+                "reason": f"R/R ratio {recommendation.reward_risk_ratio:.2f} below minimum {min_rr:.2f}",
                 "checks": checks,
             }
 
