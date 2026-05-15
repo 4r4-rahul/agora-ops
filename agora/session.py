@@ -1167,10 +1167,12 @@ class AgoraSession:
 
             if resolution["gate"] == "no_trade":
                 # Vol-premium bypass: when IV rank is elevated and macro allows selling,
-                # sell premium non-directionally. Conviction floor still enforced.
+                # sell premium non-directionally. Uses a lower conviction floor than
+                # directional trades since credit spreads are non-directional.
                 ivr_threshold = self._settings.ivr_bypass_threshold
                 iv_rank_elevated = snap.iv_rank is not None and snap.iv_rank >= ivr_threshold
-                conviction_ok = conviction.total_score >= self._settings.min_conviction_score
+                vol_floor = self._settings.vol_premium_conviction_floor
+                conviction_ok = conviction.total_score >= vol_floor
                 vol_selling_ok = (
                     iv_rank_elevated
                     and conviction_ok
@@ -1188,7 +1190,7 @@ class AgoraSession:
                     elif iv_rank_elevated and not conviction_ok:
                         logger.info(
                             "No trade for %s: vol bypass blocked — conviction %.0f < %.0f floor",
-                            ticker, conviction.total_score, self._settings.min_conviction_score,
+                            ticker, conviction.total_score, vol_floor,
                         )
                     else:
                         logger.info("No trade for %s: %s (IVR=%s)",
@@ -1221,28 +1223,39 @@ class AgoraSession:
 
             def _fetch_chains_sync(t: str) -> dict:
                 chain_dict: dict = {}
-                with _YF_OPTIONS_LOCK:
-                    tk = yf.Ticker(t)
-                    exps = tk.options or []
-                    today_d = _date.today()
-                    filled: set[int] = set()
-                    for exp in exps:
-                        try:
-                            exp_date = _date.fromisoformat(exp)
-                        except ValueError:
-                            continue
-                        dte = (exp_date - today_d).days
-                        for i, (lo, hi) in enumerate(_DTE_BRACKETS):
-                            if i not in filled and lo <= dte <= hi:
+                for _attempt in range(2):  # retry once on 401 with fresh Ticker
+                    try:
+                        with _YF_OPTIONS_LOCK:
+                            tk = yf.Ticker(t)
+                            exps = tk.options or []
+                            if not exps and _attempt == 0:
+                                # Empty may mean crumb expired — force refresh by
+                                # re-creating Ticker with a new session implicitly
+                                import time as _tm; _tm.sleep(0.5)
+                                continue
+                            today_d = _date.today()
+                            filled: set[int] = set()
+                            for exp in exps:
                                 try:
-                                    c = tk.option_chain(exp)
-                                    chain_dict[exp] = {"calls": c.calls, "puts": c.puts}
-                                    filled.add(i)
-                                except Exception:
-                                    pass
-                                break
-                        if len(filled) == len(_DTE_BRACKETS):
-                            break
+                                    exp_date = _date.fromisoformat(exp)
+                                except ValueError:
+                                    continue
+                                dte = (exp_date - today_d).days
+                                for i, (lo, hi) in enumerate(_DTE_BRACKETS):
+                                    if i not in filled and lo <= dte <= hi:
+                                        try:
+                                            c = tk.option_chain(exp)
+                                            chain_dict[exp] = {"calls": c.calls, "puts": c.puts}
+                                            filled.add(i)
+                                        except Exception:
+                                            pass
+                                        break
+                                if len(filled) == len(_DTE_BRACKETS):
+                                    break
+                        break  # success
+                    except Exception:
+                        if _attempt == 0:
+                            import time as _tm; _tm.sleep(1.0)
                 return chain_dict
 
             try:

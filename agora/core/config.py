@@ -108,6 +108,7 @@ class AgoraSettings(BaseSettings):
         description="GEX below this is considered 'negative' (trending/amplifying regime)",
     )
     min_conviction_score: float = Field(default=60.0, description="Minimum score to enter any trade")
+    vol_premium_conviction_floor: float = Field(default=50.0, description="Lower conviction floor for non-directional vol-premium plays (IVR bypass path)")
     high_conviction_score: float = Field(default=80.0, description="Score for 1.5x size multiplier")
 
     # ── Universe ───────────────────────────────────────────────────
