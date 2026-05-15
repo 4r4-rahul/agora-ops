@@ -63,10 +63,12 @@ Critical Error Codes:
 
 IBKR Client ID Architecture:
   Each connection must have unique clientId. AGORA uses:
-    clientId=2:  Main session (paper trading) — order submission
-    clientId=4:  IBKRNewsAgent — real-time news subscription
+    clientId=4:  IBKRNewsAgent — real-time news subscription (persistent)
     clientId=9:  OrphanOrderReconciler — reconciliation
-    clientId=10: Main session (live trading)
+    clientId=10: ibkr_bridge order submission (settings.ibkr_client_id)
+    clientId=11: ibkr_bridge close_position (settings.ibkr_client_id + 1)
+    clientId=12: startup_tws_sync (settings.startup_tws_sync_client_id)
+    clientId=13: IBKRKnowledgeAgent health scans
   Rule: NEVER reuse clientId across concurrent connections. Causes conflict.
 
 GTC Order Management:
@@ -246,14 +248,14 @@ class COOAgent(ExecutiveAgent):
         findings: list[tuple[str, str, str]] = []
         import sqlite3 as _sql
 
-        # ── Ghost fills: fills in execution_quality with no matching position ──
+        # ── Ghost fills: fills TODAY in execution_quality with no matching position ──
         try:
             conn = _sql.connect(str(self._settings.db_path), check_same_thread=False)
             ghost_rows = conn.execute(
                 """SELECT eq.ticker, eq.fill_price, eq.attempt_date
                    FROM execution_quality eq
                    WHERE eq.outcome='fill'
-                   AND eq.attempt_date >= date('now', '-7 days')
+                   AND eq.attempt_date = date('now')
                    AND eq.ticker NOT IN (SELECT ticker FROM positions)"""
             ).fetchall()
             conn.close()
@@ -425,7 +427,7 @@ class COOAgent(ExecutiveAgent):
                 """SELECT eq.ticker, eq.fill_price, eq.attempt_date
                    FROM execution_quality eq
                    WHERE eq.outcome='fill'
-                   AND eq.attempt_date >= date('now', '-7 days')
+                   AND eq.attempt_date = date('now')
                    AND eq.ticker NOT IN (SELECT ticker FROM positions)"""
             ).fetchall()
             conn.close()

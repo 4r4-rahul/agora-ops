@@ -56,7 +56,7 @@ class AgoraSettings(BaseSettings):
     ibkr_port: int = Field(default=7497)
     ibkr_client_id: int = Field(default=10)  # separate from APEX (client 1)
     ibkr_news_client_id: int = Field(
-        default=11,
+        default=4,
         description="clientId for IBKRNewsAgent (must differ from ibkr_client_id and startup_tws_sync_client_id).",
     )
 
@@ -137,7 +137,7 @@ class AgoraSettings(BaseSettings):
             # Other watchlist
             "FLEX", "MSTR", "WDC", "IREN", "NOK", "OKLO", "GEV",
             "MP", "POWL", "KEYS", "ONTO", "SERV", "VICR",
-            "BJ", "BRK-B", "F", "CIFR", "ASTS",
+            "BJ", "BRK B", "F", "CIFR", "ASTS",
         ],
         description="Options universe for vol premium credit spreads and event plays",
     )

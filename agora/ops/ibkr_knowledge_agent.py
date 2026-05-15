@@ -82,12 +82,12 @@ For the SetupWatcher, a _IBKRPersistentClient singleton exists (client_id=10) bu
 separate from the execution path.
 
 Client ID Allocation (NEVER reuse concurrently):
-  client_id=2  → main session PAPER (place_bracket_order, close_position)
-  client_id=3  → close_position (ibkr_bridge uses client_id + 1 for closes)
-  client_id=4  → IBKRNewsAgent (real-time news streaming)
+  client_id=4  → IBKRNewsAgent (real-time news streaming, persistent)
   client_id=9  → OrphanOrderReconciler (GTC cleanup)
-  client_id=10 → _IBKRPersistentClient (SetupWatcher, historical bars)
-  client_id=11 → IBKRKnowledgeAgent health scans
+  client_id=10 → ibkr_bridge order submission (settings.ibkr_client_id)
+  client_id=11 → ibkr_bridge close_position (settings.ibkr_client_id + 1)
+  client_id=12 → startup_tws_sync (settings.startup_tws_sync_client_id)
+  client_id=13 → IBKRKnowledgeAgent health scans
 
 Live trading uses port 7496; these same client IDs shift to the live account.
 
@@ -756,7 +756,7 @@ class IBKRKnowledgeAgent:
             await ib.connectAsync(
                 self._settings.ibkr_host,
                 self._settings.ibkr_port,
-                clientId=11,
+                clientId=13,
                 timeout=8,
             )
             result["connected"] = True
@@ -855,7 +855,7 @@ class IBKRKnowledgeAgent:
             await ib.connectAsync(
                 self._settings.ibkr_host,
                 self._settings.ibkr_port,
-                clientId=11,
+                clientId=13,
                 timeout=6,
             )
             accounts = ib.managedAccounts()

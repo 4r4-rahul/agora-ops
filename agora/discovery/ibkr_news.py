@@ -188,7 +188,9 @@ class IBKRNewsAgent:
         # 10197: "No market data permissions" — fires when a competing live session
         #        holds a market data subscription. Harmless for news-tick-292 workflow.
         # 10090: "Part of requested market data is not subscribed" — same class.
-        _SUPPRESS_CODES = {10197, 10090, 2104, 2106, 2158}
+        # 10089: "Requires additional subscription" — paper account limitation,
+        #        not actionable. News still flows for subscribed tickers.
+        _SUPPRESS_CODES = {10197, 10090, 10089, 2104, 2106, 2158}
 
         def _on_ib_error(req_id, error_code, error_str, contract):
             if error_code in _SUPPRESS_CODES:
