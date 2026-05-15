@@ -80,15 +80,29 @@ async def submit_trade(rec: Any, settings: Any, session_id: str) -> dict:
     """
     Route a TradeRecommendation to IBKR (live) or log it (paper).
 
-    Profit target = 50 % of credit/debit received (matches backtest rule).
-    Stop loss     = 2× credit/debit (informational — enforced by PositionManager).
+    Profit target:
+      Credit spreads: 50% of credit received (buy back at half the premium).
+      Debit spreads:  entry + 50% of max_gain (sell when spread rises by half its remaining room).
+    Stop loss: 2× entry debit/credit (informational — enforced by PositionManager).
     """
     # IBKR combo (BAG) orders use per-share pricing; entry_debit_credit is total dollars.
     # Divide by (contracts × 100) to get the per-share limit price TWS expects.
-    per_share_divisor = max(1, rec.contracts) * 100
-    entry_per_share   = rec.entry_debit_credit / per_share_divisor
-    profit_target     = abs(entry_per_share) * 0.50
-    stop_loss         = abs(entry_per_share) * 2.00
+    per_share_divisor  = max(1, rec.contracts) * 100
+    entry_per_share    = rec.entry_debit_credit / per_share_divisor
+    max_gain_per_share = getattr(rec, "max_gain_dollars", 0.0) / per_share_divisor
+
+    if entry_per_share > 0:
+        # Debit spread (BUY): close when spread value rises above entry.
+        # profit_target = entry + 50% of remaining max gain.
+        # Bug guard: abs(entry) * 0.50 is WRONG here — it prices the GTC SELL below
+        # entry, which fires immediately when bid > half of debit paid.
+        profit_target = entry_per_share + max_gain_per_share * 0.50
+    else:
+        # Credit spread (SELL): close when the spread can be bought back cheaply.
+        # profit_target = 50% of credit received = the price to buy back.
+        profit_target = max_gain_per_share * 0.50
+
+    stop_loss = abs(entry_per_share) * 2.00
 
     mode_label = "PAPER" if settings.trading_mode == "paper" else "LIVE"
     logger.info(
