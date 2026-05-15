@@ -217,6 +217,7 @@ async def place_bracket_order(
     port: int = 7497,
     client_id: int = 1,
     timeout: float = 30.0,
+    price_step_size: float = 0.05,
 ) -> dict[str, Any]:
     """
     Submit entry + GTC profit-target for a multi-leg spread.
@@ -228,9 +229,12 @@ async def place_bracket_order(
 
     Parameters
     ----------
-    entry_price:   Net debit (positive) or credit (negative) for the spread
-    profit_target: Price at which to take profit (GTC limit child order)
-    stop_loss:     Informational only — enforced by MonitorAgent, not submitted here
+    entry_price:    Net debit (positive) or credit (negative) for the spread
+    profit_target:  Price at which to take profit (GTC limit child order)
+    stop_loss:      Informational only — enforced by MonitorAgent, not submitted here
+    price_step_size: Dollars to step toward market each 30s interval. Options combo
+                    bid-ask spreads are typically $0.15–$0.50 wide; 6 × $0.05 = $0.30
+                    sweep covers most liquid names. Default 0.05, NOT 0.01 (minimum tick).
     """
     if not _IB_AVAILABLE:
         raise RuntimeError("ib_insync not installed. Run: pip install ib_insync")
@@ -304,10 +308,11 @@ async def place_bracket_order(
 
         _PRICE_STEP_SEC  = 30    # seconds between price adjustments
         _MAX_PRICE_STEPS = 6     # 6 steps × 30s = 3 minutes total
-        _TICK            = 0.01  # minimum option tick size
         # Credit spreads (SELL): accept less credit each step → step price down
         # Debit spreads  (BUY):  pay more each step            → step price up
-        price_step = -_TICK if order_action == "SELL" else +_TICK
+        # Use price_step_size not the $0.01 minimum tick — combo bid-ask is $0.15–$0.50 wide;
+        # $0.01/step only sweeps $0.06 total, which never crosses the spread.
+        price_step = -price_step_size if order_action == "SELL" else +price_step_size
 
         logger.info(
             "[%s] Bracket submitted — parentId=%d entry=%.2f target=%.2f "

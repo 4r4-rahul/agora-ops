@@ -163,6 +163,12 @@ class AgoraSettings(BaseSettings):
     max_daily_theta_pct: float = Field(default=0.005, description="Max theta decay as % of account/day")
     bid_ask_max_pct: float = Field(default=0.10)
     min_open_interest: int = Field(default=500)
+    pricing_step_size: float = Field(
+        default=0.05,
+        description="Dollars to step limit price toward market every 30s during adaptive pricing. "
+                    "6 steps × $0.05 = $0.30 sweep — covers typical $0.15–$0.50 combo bid-ask. "
+                    "Do NOT set to $0.01 (min tick): 6 × $0.01 = $0.06 sweep, never crosses.",
+    )
 
     # ── Paths ──────────────────────────────────────────────────────
     iv_cache_dir: Path = Field(default=Path(".agora/iv_cache"))

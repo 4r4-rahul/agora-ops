@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -423,6 +423,12 @@ class AgoraSession:
         # DJ-RTPRO) from triggering duplicate entries. 30-minute window.
         self._catalyst_cooldown: dict[tuple, datetime] = {}
         self._CATALYST_COOLDOWN_SECS: int = 1800  # 30 minutes
+
+        # Execution cooldown: block re-submission of a ticker that failed to fill.
+        # Key = ticker, value = UTC datetime after which re-submission is allowed.
+        # Prevents the same illiquid spread from consuming execution budget on every scan.
+        self._exec_cooldowns: dict[str, datetime] = {}
+        self._EXEC_COOLDOWN_SECS: int = 7200  # 2 hours after a timeout/reject
 
         # ── Earnings proximity cache ───────────────────────────────
         # Per-session cache of next earnings dates from yfinance.calendar.
@@ -1607,6 +1613,18 @@ class AgoraSession:
         if hasattr(strategy_str, "value"):
             strategy_str = strategy_str.value
         mid_price = abs(recommendation.entry_debit_credit / max(1, recommendation.contracts * 100))
+
+        # 4c. Execution cooldown gate — block re-submission of a ticker that recently failed to fill.
+        #     Illiquid spreads can time out on every scan cycle without this guard.
+        _cooldown_until = self._exec_cooldowns.get(ticker)
+        if _cooldown_until and datetime.now(tz=timezone.utc) < _cooldown_until:
+            _mins_left = (_cooldown_until - datetime.now(tz=timezone.utc)).seconds // 60
+            logger.debug(
+                "ENTRY SKIPPED by exec cooldown: %s — %d min remaining after prior timeout",
+                ticker, _mins_left,
+            )
+            return
+
         self._exec_quality.record_attempt(ticker, str(strategy_str), mid_price)
 
         # 4b. Open combo order gate — IBKR paper limits riskless-combination orders (Error 201)
@@ -1661,6 +1679,15 @@ class AgoraSession:
             reason = order.get("reason", "")
             self._exec_quality.record_reject(ticker, error_code, reason, str(strategy_str))
             logger.warning("ORDER REJECTED: %s | code=%s | %s", ticker, error_code, reason)
+            # Execution cooldown: if the order timed out after all price steps, the spread
+            # is too illiquid to fill at mid+step. Block re-submission for 2 hours.
+            if "price steps" in reason or "Unfilled" in reason:
+                _cooldown_until = datetime.now(tz=timezone.utc) + timedelta(seconds=self._EXEC_COOLDOWN_SECS)
+                self._exec_cooldowns[ticker] = _cooldown_until
+                logger.info(
+                    "EXEC COOLDOWN set: %s blocked until %s (spread too illiquid at current pricing)",
+                    ticker, _cooldown_until.strftime("%H:%M ET"),
+                )
             # If Error 201 detected, trigger orphan reconciliation immediately
             if error_code == "201" or "201" in reason:
                 asyncio.create_task(self._orphan_reconciler.reconcile_now())

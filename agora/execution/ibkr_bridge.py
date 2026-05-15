@@ -117,6 +117,7 @@ async def submit_trade(rec: Any, settings: Any, session_id: str) -> dict:
         host=settings.ibkr_host,
         port=settings.ibkr_port,
         client_id=settings.ibkr_client_id,
+        price_step_size=getattr(settings, "pricing_step_size", 0.05),
     )
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(
