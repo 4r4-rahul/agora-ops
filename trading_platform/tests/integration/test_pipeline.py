@@ -22,6 +22,7 @@ from trading_platform.core.config import Settings
 from trading_platform.core.models.market import Bar, MarketSnapshot
 from trading_platform.core.models.trade import TradeDecision
 from trading_platform.core.state import SharedStateStore
+from trading_platform.agents.conviction import ConvictionAgent
 from trading_platform.agents.execution import ExecutionAgent
 from trading_platform.agents.journal import TradeJournalAgent
 from trading_platform.agents.market_data import MarketDataAgent
@@ -250,6 +251,7 @@ def all_agents(bus, state_store, settings, mock_anthropic):
         RegimeAgent(**kwargs),
         TechnicalAnalysisAgent(**kwargs),
         NewsCatalystAgent(**kwargs),
+        ConvictionAgent(**kwargs),
         OptionsStrategyAgent(**kwargs),
         RiskManagerAgent(**kwargs),
         ReviewerAgent(**kwargs),
@@ -379,9 +381,9 @@ class TestFullPipeline:
             agents = [
                 MarketDataAgent(**kwargs), RegimeAgent(**kwargs),
                 TechnicalAnalysisAgent(**kwargs), NewsCatalystAgent(**kwargs),
-                OptionsStrategyAgent(**kwargs), RiskManagerAgent(**kwargs),
-                ReviewerAgent(**kwargs), ExecutionAgent(**kwargs),
-                TradeJournalAgent(**kwargs),
+                ConvictionAgent(**kwargs), OptionsStrategyAgent(**kwargs),
+                RiskManagerAgent(**kwargs), ReviewerAgent(**kwargs),
+                ExecutionAgent(**kwargs), TradeJournalAgent(**kwargs),
             ]
 
             patches = _yf_patches(spy_snapshot)

@@ -89,7 +89,7 @@ class YFinanceProvider:
             ticker=ticker.upper(),
             timestamp=datetime.now(timezone.utc).replace(tzinfo=None),
             price=price or (recent.close if recent else 0.0),
-            volume=int(stock_info.get("regularMarketVolume", 0)),
+            volume=int(stock_info.get("regularMarketVolume") or 0),
             vwap=None,
             day_open=stock_info.get("open") or (recent.open if recent else None),
             day_high=stock_info.get("dayHigh") or stock_info.get("regularMarketDayHigh"),
@@ -136,9 +136,12 @@ class YFinanceProvider:
 
     def _fetch_vix(self) -> float | None:
         try:
-            vix = yf.Ticker("^VIX")
-            info = vix.info
-            return info.get("regularMarketPrice") or info.get("currentPrice")
+            fi = yf.Ticker("^VIX").fast_info
+            try:
+                price = float(fi.last_price or 0)
+            except AttributeError:
+                price = float(fi.get("lastPrice", 0) or 0)
+            return price if price > 0 else None
         except Exception:
             return None
 
@@ -226,6 +229,7 @@ class YFinanceProvider:
                 (atm_iv - min_iv) / (max_iv - min_iv) * 100
                 if max_iv > min_iv else 50.0
             )
+            iv_rank = max(0.0, min(100.0, iv_rank))   # clamp — live IV can exceed cached max
             below = sum(1 for v in ivs if v <= atm_iv)
             iv_percentile = below / len(ivs) * 100
 

@@ -2,8 +2,6 @@
 Unit tests for the IBKR client service.
 
 ib_insync is mocked at the IB class level — no TWS or IB Gateway needed.
-The Option, Contract, ComboLeg, LimitOrder classes run as-is (ib_insync is
-installed); only the network-touching IB instance is replaced.
 """
 
 from __future__ import annotations
@@ -13,10 +11,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from trading_platform.services.ibkr_client import _next_expiry, place_combo_order
+from trading_platform.services.ibkr_client import _next_expiry, place_bracket_order
 
 
-# ── _next_expiry helper ───────────────────────────────────────────────────
+# ── _next_expiry helper ───────────────────────────────────────────────────────
 
 class TestNextExpiry:
     def test_returns_friday(self):
@@ -43,7 +41,7 @@ class TestNextExpiry:
         assert expiry.weekday() == 4
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _make_ib_mock(order_status: str = "Submitted", fills: list | None = None):
     """Build a realistic ib_insync.IB mock — no real network calls."""
@@ -55,15 +53,22 @@ def _make_ib_mock(order_status: str = "Submitted", fills: list | None = None):
     qualified_contract.conId = 999_001
     ib.qualifyContractsAsync = AsyncMock(return_value=[qualified_contract])
 
-    trade = MagicMock()
-    trade.order.orderId = 42
-    trade.orderStatus.status = order_status
-    trade.fills = fills or []
-    ib.placeOrder.return_value = trade
+    parent_trade = MagicMock()
+    parent_trade.order.orderId = 42
+    parent_trade.orderStatus.status = order_status
+    parent_trade.fills = fills or []
+
+    child_trade = MagicMock()
+    child_trade.order.orderId = 43
+    child_trade.orderStatus.status = order_status
+    child_trade.fills = []
+
+    # First placeOrder call = parent (entry), second = child (profit target)
+    ib.placeOrder.side_effect = [parent_trade, child_trade]
     ib.sleep = MagicMock()
     ib.disconnect = MagicMock()
 
-    return ib, trade
+    return ib, parent_trade
 
 
 _LEGS = [
@@ -74,23 +79,24 @@ _LEGS = [
 ]
 
 
-# ── place_combo_order ─────────────────────────────────────────────────────
+# ── place_bracket_order ───────────────────────────────────────────────────────
 
-class TestPlaceComboOrder:
+class TestPlaceBracketOrder:
 
     @pytest.mark.asyncio
     async def test_submitted_order_returns_status(self):
         ib_mock, _ = _make_ib_mock(order_status="Submitted")
         with patch("trading_platform.services.ibkr_client.IB", return_value=ib_mock):
-            result = await place_combo_order(
+            result = await place_bracket_order(
                 ticker="SPY", legs=_LEGS, contracts=1,
-                limit_price=2.20, session_id="test-session", timeout=2.0,
+                entry_price=2.20, profit_target=5.00, stop_loss=1.10,
+                session_id="test-session", timeout=2.0,
             )
         assert result["status"] == "Submitted"
         assert result["order_id"] == 42
 
     @pytest.mark.asyncio
-    async def test_filled_order_computes_avg_price(self):
+    async def test_filled_order_returns_fills(self):
         fill = MagicMock()
         fill.execution.execId = "exec-001"
         fill.execution.shares = 1
@@ -99,12 +105,12 @@ class TestPlaceComboOrder:
 
         ib_mock, _ = _make_ib_mock(order_status="Filled", fills=[fill])
         with patch("trading_platform.services.ibkr_client.IB", return_value=ib_mock):
-            result = await place_combo_order(
+            result = await place_bracket_order(
                 ticker="SPY", legs=_LEGS, contracts=1,
-                limit_price=2.20, session_id="test-session", timeout=2.0,
+                entry_price=2.20, profit_target=5.00, stop_loss=1.10,
+                session_id="test-session", timeout=2.0,
             )
         assert result["status"] == "Filled"
-        assert result["avg_price"] == pytest.approx(2.15)
         assert len(result["fills"]) == 1
 
     @pytest.mark.asyncio
@@ -112,22 +118,24 @@ class TestPlaceComboOrder:
         ib_mock, _ = _make_ib_mock(order_status="Cancelled")
         with patch("trading_platform.services.ibkr_client.IB", return_value=ib_mock):
             with pytest.raises(RuntimeError, match="rejected"):
-                await place_combo_order(
+                await place_bracket_order(
                     ticker="SPY", legs=_LEGS, contracts=1,
-                    limit_price=2.20, session_id="test-session", timeout=2.0,
+                    entry_price=2.20, profit_target=5.00, stop_loss=1.10,
+                    session_id="test-session", timeout=2.0,
                 )
         ib_mock.disconnect.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_connection_failure_raises(self):
         ib_mock, _ = _make_ib_mock()
-        ib_mock.connectAsync = AsyncMock(side_effect=ConnectionRefusedError("no IB Gateway"))
+        ib_mock.connectAsync = AsyncMock(side_effect=ConnectionRefusedError("no TWS"))
         ib_mock.isConnected.return_value = False
         with patch("trading_platform.services.ibkr_client.IB", return_value=ib_mock):
             with pytest.raises(ConnectionRefusedError):
-                await place_combo_order(
+                await place_bracket_order(
                     ticker="SPY", legs=_LEGS, contracts=1,
-                    limit_price=2.20, session_id="test-session",
+                    entry_price=2.20, profit_target=5.00, stop_loss=1.10,
+                    session_id="test-session",
                 )
 
     @pytest.mark.asyncio
@@ -136,46 +144,22 @@ class TestPlaceComboOrder:
         ib_mock.qualifyContractsAsync = AsyncMock(return_value=[])
         with patch("trading_platform.services.ibkr_client.IB", return_value=ib_mock):
             with pytest.raises(RuntimeError, match="Could not qualify"):
-                await place_combo_order(
+                await place_bracket_order(
                     ticker="SPY", legs=_LEGS, contracts=1,
-                    limit_price=2.20, session_id="test-session",
+                    entry_price=2.20, profit_target=5.00, stop_loss=1.10,
+                    session_id="test-session",
                 )
         ib_mock.disconnect.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_credit_spread_uses_sell_action(self):
-        """Negative limit_price (credit received) → order action must be SELL."""
-        ib_mock, _ = _make_ib_mock(order_status="Submitted")
-        captured: list = []
-
-        def _capture(contract, order):
-            captured.append(order)
-            t = MagicMock()
-            t.order.orderId = 99
-            t.orderStatus.status = "Submitted"
-            t.fills = []
-            return t
-
-        ib_mock.placeOrder.side_effect = _capture
-
-        with patch("trading_platform.services.ibkr_client.IB", return_value=ib_mock):
-            await place_combo_order(
-                ticker="SPY", legs=_LEGS, contracts=1,
-                limit_price=-0.80, session_id="test-session", timeout=2.0,
-            )
-
-        assert captured[0].action == "SELL"
-
-    @pytest.mark.asyncio
     async def test_session_id_written_to_order_ref(self):
-        """session_id (truncated to 40 chars) must appear in order.orderRef."""
         ib_mock, _ = _make_ib_mock(order_status="Submitted")
         captured: list = []
 
         def _capture(contract, order):
             captured.append(order)
             t = MagicMock()
-            t.order.orderId = 1
+            t.order.orderId = len(captured)
             t.orderStatus.status = "Submitted"
             t.fills = []
             return t
@@ -184,9 +168,10 @@ class TestPlaceComboOrder:
         session_id = "abc-1234-very-long-session-id-that-exceeds-forty-chars-surely"
 
         with patch("trading_platform.services.ibkr_client.IB", return_value=ib_mock):
-            await place_combo_order(
+            await place_bracket_order(
                 ticker="SPY", legs=_LEGS, contracts=1,
-                limit_price=2.20, session_id=session_id, timeout=2.0,
+                entry_price=2.20, profit_target=5.00, stop_loss=1.10,
+                session_id=session_id, timeout=2.0,
             )
 
         ref = captured[0].orderRef

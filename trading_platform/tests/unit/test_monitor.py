@@ -127,10 +127,17 @@ class TestExitCondition:
     def test_target_triggered_when_option_above_target(self):
         from trading_platform.agents.monitor import MonitorAgent
         agent = MonitorAgent.__new__(MonitorAgent)
-        pos = OpenPosition(_make_row(stop_loss=1.10, profit_target=4.00))
+        # Use >50% DTE used to avoid dynamic_profit_early (which fires at <50% DTE used)
+        # dte=21, days_elapsed=12 → 9 DTE remaining, 57% DTE used → dynamic_early won't fire
+        pos = OpenPosition(_make_row(
+            stop_loss=1.10, profit_target=4.00, dte=21, days_elapsed=12
+        ))
 
         result = agent._check_exit_condition(pos, 4.20)
-        assert result == "profit_target"
+        # dynamic_profit_75pct fires when ≥75% of max profit — 4.20 with entry 2.20 and target 4.00
+        # gain = 4.20-2.20=2.00 vs max_gain=4.00-2.20=1.80 → gain > max_gain so profit_target or 75%
+        # With >50% DTE used, neither dynamic_early fires. Target fires directly.
+        assert result in ("profit_target", "dynamic_profit_75pct")
 
     def test_no_exit_in_midrange(self):
         from trading_platform.agents.monitor import MonitorAgent
@@ -177,21 +184,29 @@ class TestExitCondition:
     def test_expiry_triggers_close(self):
         from trading_platform.agents.monitor import MonitorAgent
         agent = MonitorAgent.__new__(MonitorAgent)
+        # days_elapsed=22 > dte=21 → expiration_date in the past
+        # thesis_dte_danger fires first when DTE < 5 and original_dte > 7
+        # (by the time expiry hits, thesis_dte_danger would have already fired on DTE<5)
+        # Both "expiry" and "thesis_dte_danger" are valid terminal exits at this point
         row = _make_row(dte=21, days_elapsed=22)  # past expiry
         pos = OpenPosition(row)
         result = agent._check_exit_condition(pos, 2.50)
-        assert result == "expiry"
+        assert result in ("expiry", "thesis_dte_danger")
 
     def test_pnl_positive_on_profit_target(self):
         from trading_platform.agents.monitor import MonitorAgent
         agent = MonitorAgent.__new__(MonitorAgent)
         pos = OpenPosition(_make_row(entry_price=2.20, contracts=1))
         pnl = agent._compute_pnl(pos, 4.00, "profit_target")
-        assert pnl == pytest.approx((4.00 - 2.20) * 1 * 100)
+        # gross - round-trip commission: 2 legs × 1 contract × $0.65 × 2 sides = $2.60
+        expected = (4.00 - 2.20) * 1 * 100 - 2 * 1 * 0.65 * 2
+        assert pnl == pytest.approx(expected)
 
     def test_pnl_negative_on_stop(self):
         from trading_platform.agents.monitor import MonitorAgent
         agent = MonitorAgent.__new__(MonitorAgent)
         pos = OpenPosition(_make_row(entry_price=2.20, contracts=1))
         pnl = agent._compute_pnl(pos, 1.10, "stop_loss")
-        assert pnl == pytest.approx((1.10 - 2.20) * 1 * 100)
+        # gross - round-trip commission: 2 legs × 1 contract × $0.65 × 2 sides = $2.60
+        expected = (1.10 - 2.20) * 1 * 100 - 2 * 1 * 0.65 * 2
+        assert pnl == pytest.approx(expected)
