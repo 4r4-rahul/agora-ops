@@ -591,6 +591,12 @@ class AgoraSession:
                 await self._premarket_macro_scan()
             except Exception as exc:
                 logger.error("Cold-start premarket synthesis failed: %s", exc)
+            # Run an immediate universe scan so we don't wait up to 30 min after restart
+            try:
+                logger.info("Session loop: cold-start universe scan (immediate)")
+                await self._universe_scan()
+            except Exception as exc:
+                logger.error("Cold-start universe scan failed: %s", exc)
 
         while self._running:
             now_et = datetime.now(tz=ET)
