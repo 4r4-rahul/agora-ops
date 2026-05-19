@@ -24,6 +24,7 @@ import anthropic
 
 from ..core.config import AgoraSettings, get_settings
 from ..ops.llm_cost_log import log_call as _log_llm
+from ..ops.payload_compressor import compress_text as _compress_text
 
 logger = logging.getLogger(__name__)
 
@@ -250,7 +251,7 @@ class PreMarketSetupAgent:
                 max_tokens=250,
                 messages=[{
                     "role": "user",
-                    "content": (
+                    "content": _compress_text(
                         f"Pre-market position review. Write 2-3 sentences summarizing:\n"
                         f"Open positions:\n{pos_str}\n\n"
                         f"Alerts:\n{alert_str}\n\n"

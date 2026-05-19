@@ -28,6 +28,7 @@ from ib_insync import IB, Stock
 
 from ..core.models import Catalyst, CatalystType
 from ..ops.llm_cost_log import log_call as _log_llm
+from ..ops.payload_compressor import compress_text as _compress_text
 
 logger = logging.getLogger(__name__)
 
@@ -319,7 +320,7 @@ class IBKRNewsAgent:
                     "text": _SYSTEM_PROMPT,
                     "cache_control": {"type": "ephemeral"},
                 }],
-                messages=[{"role": "user", "content": body}],
+                messages=[{"role": "user", "content": _compress_text(body, max_chars=4000)}],
             )
             if hasattr(response, "usage") and hasattr(self._settings, "db_path"):
                 _log_llm(str(self._settings.db_path), "IBKRNews", "claude-haiku-4-5-20251001",

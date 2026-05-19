@@ -39,6 +39,7 @@ import anthropic
 
 from agora.ops.llm_cost_log import log_call as _log_llm
 from agora.ops.lessons_store import load_approved_lessons as _load_lessons
+from agora.ops.payload_compressor import compress_payload as _compress
 
 logger = logging.getLogger(__name__)
 
@@ -194,7 +195,7 @@ class ExitIntelligenceAgent:
                 model=_MODEL,
                 max_tokens=1024,
                 system=_SYSTEM,
-                messages=[{"role": "user", "content": json.dumps(payload, default=str)}],
+                messages=[{"role": "user", "content": _compress(payload)}],
                 timeout=anthropic.Timeout(connect=30.0, read=60.0, write=30.0, pool=30.0),
             )
             latency_ms = int((time.monotonic() - t0) * 1000)

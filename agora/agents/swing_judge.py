@@ -35,6 +35,7 @@ import anthropic
 
 from ..core.config import AgoraSettings, get_settings
 from ..ops.llm_cost_log import log_call as _log_llm
+from ..ops.payload_compressor import compress_text as _compress_text
 from .swing_scorer import SwingFactors
 
 logger = logging.getLogger(__name__)
@@ -141,7 +142,7 @@ class SwingJudgeAgent:
                 max_tokens=600,
                 thinking={"type": "adaptive"},
                 system=_CACHED_SYSTEM,
-                messages=[{"role": "user", "content": user_content}],
+                messages=[{"role": "user", "content": _compress_text(user_content)}],
                 timeout=anthropic.Timeout(connect=30.0, read=180.0, write=30.0, pool=30.0),
             )
             elapsed = time.monotonic() - t0

@@ -32,6 +32,7 @@ import anthropic
 
 from ..core.config import AgoraSettings, get_settings
 from ..ops.llm_cost_log import log_call as _log_llm
+from ..ops.payload_compressor import compress_text as _compress_text
 
 logger = logging.getLogger(__name__)
 
@@ -309,7 +310,7 @@ class SectorIntelligenceAgent:
                 max_tokens=120,
                 messages=[{
                     "role": "user",
-                    "content": (
+                    "content": _compress_text(
                         f"Sector: {sector}. Peers that already reported this quarter:\n{peer_str}\n\n"
                         f"In one sentence: what does this peer earnings pattern read-through suggest "
                         f"for remaining {sector} companies yet to report? Be specific about direction."

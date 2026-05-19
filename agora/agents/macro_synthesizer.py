@@ -34,6 +34,7 @@ import anthropic
 
 from ..core.config import AgoraSettings, get_settings
 from ..ops.llm_cost_log import log_call as _log_llm
+from ..ops.payload_compressor import compress_text as _compress_text
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +126,7 @@ class MacroSynthesizer:
                 model=self._settings.claude_brief_model,
                 max_tokens=512,
                 system=_CACHED_SYSTEM,
-                messages=[{"role": "user", "content": state_summary}],
+                messages=[{"role": "user", "content": _compress_text(state_summary)}],
                 timeout=anthropic.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0),
             )
             logger.info("MacroSynthesizer Claude call OK in %.1fs", _time.monotonic() - _t0)

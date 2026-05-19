@@ -28,6 +28,8 @@ from typing import Any
 
 import anthropic
 
+from agora.ops.payload_compressor import compress_payload as _compress
+
 logger = logging.getLogger(__name__)
 
 _MODEL_FAST = "claude-haiku-4-5-20251001"
@@ -114,7 +116,7 @@ class LessonsGenerator:
                 model=model,
                 max_tokens=1024,
                 system=_SYSTEM,
-                messages=[{"role": "user", "content": json.dumps(payload, default=str)}],
+                messages=[{"role": "user", "content": _compress(payload)}],
                 timeout=anthropic.Timeout(connect=30.0, read=60.0, write=30.0, pool=30.0),
             )
         except Exception as exc:

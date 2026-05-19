@@ -29,6 +29,7 @@ import anthropic
 
 from ..core.config import AgoraSettings, get_settings
 from ..ops.llm_cost_log import log_call as _log_llm
+from ..ops.payload_compressor import compress_text as _compress_text
 
 logger = logging.getLogger(__name__)
 
@@ -209,7 +210,7 @@ Output JSON:
                 model=self._settings.claude_model,
                 max_tokens=512,
                 thinking={"type": "adaptive"},
-                messages=[{"role": "user", "content": prompt}],
+                messages=[{"role": "user", "content": _compress_text(prompt)}],
             )
             if hasattr(resp, "usage"):
                 _log_llm(str(self._settings.db_path), "PriceTarget", self._settings.claude_model,
