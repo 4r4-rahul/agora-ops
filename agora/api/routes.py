@@ -1707,6 +1707,45 @@ async def trigger_swing_audit(body: _SwingAuditBody) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+@router.get("/calibration")
+async def get_calibration() -> JSONResponse:
+    """
+    GET /agora/calibration
+    Latest ConvictionCalibrator output: per-pillar Sharpe, regime analysis,
+    conviction quintiles, and proposed weight changes. Runs weekly.
+    """
+    session = get_session()
+    if not session:
+        return JSONResponse({"error": "session not running"}, status_code=503)
+    try:
+        import json
+        from pathlib import Path
+        cal_path = session._settings.db_path.parent / "calibration_report.json"
+        if not cal_path.exists():
+            return JSONResponse({"status": "not_generated_yet",
+                                 "message": "Calibration runs weekly. No report yet."})
+        return JSONResponse(json.loads(cal_path.read_text()))
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@router.post("/calibration/run")
+async def run_calibration_now() -> JSONResponse:
+    """POST /agora/calibration/run — trigger an immediate calibration pass."""
+    session = get_session()
+    if not session:
+        return JSONResponse({"error": "session not running"}, status_code=503)
+    try:
+        from agora.ops.conviction_calibrator import calibrate
+        from pathlib import Path
+        cal_path = session._settings.db_path.parent / "calibration_report.json"
+        cal_path.parent.mkdir(parents=True, exist_ok=True)
+        result = calibrate(str(session._settings.db_path), str(cal_path))
+        return JSONResponse({"status": "ok", "total_closed_trades": result.get("total_closed_trades", 0)})
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 @router.websocket("/ws")
 async def websocket_feed(ws: WebSocket) -> None:
     """

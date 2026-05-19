@@ -56,6 +56,16 @@ ET = ZoneInfo("America/New_York")
 MATCH_WINDOW_HOURS = 24    # max hours before entry date to look for agent entry
 PATROL_INTERVAL_SEC = 3600 * 6   # run every 6 hours
 LESSON_TRIGGER_NEW_ATTRIBUTIONS = 10   # synthesize lessons after every N new attributions
+LESSON_TIME_INTERVAL_SEC = 3600 * 24 * 7   # also synthesize lessons weekly regardless of closes
+CALIBRATION_INTERVAL_SEC = 3600 * 24 * 7   # run ConvictionCalibrator weekly
+
+# Shadow mode promotion thresholds (must match spec §8)
+_PROMOTION_THRESHOLDS = {
+    "analyst":  {"metric": "direction_hit_rate", "min_rows": 40, "threshold": 0.55},
+    "exit":     {"metric": "quality_accuracy",   "min_rows": 20, "threshold": 0.60},
+    "advocate": {"metric": "precision",          "min_rows": 20, "threshold": 0.60},
+    "strategy": {"metric": "win_rate",           "min_rows": 20, "threshold": 0.55},
+}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -681,15 +691,31 @@ def get_promotion_readiness(db_path: str) -> dict[str, Any]:
 
 class ScheduledAttributor:
     """
-    Background task: attributes closed trades every 6 hours.
-    After LESSON_TRIGGER_NEW_ATTRIBUTIONS new analyst attributions, triggers
-    lesson synthesis (if lessons_generator is available).
+    Background task that owns three weekly/6-hourly jobs:
+
+    1. Attribution patrol (every 6h) — attributes closed trades to agent journals,
+       computes Brier score calibration.
+    2. Lesson synthesis — triggered by N new attributions OR weekly timer.
+    3. ConvictionCalibrator — runs weekly, writes calibration_report.json,
+       alerts via Discord webhook if configured.
+
+    Also checks shadow-mode promotion thresholds after each attribution pass
+    and sends Discord alerts when an agent is ready to promote.
     """
 
-    def __init__(self, db_path: str) -> None:
-        self._db_path  = db_path
-        self._running  = False
+    def __init__(self, db_path: str,
+                 calibration_output: str = ".agora/calibration_report.json",
+                 alert_webhook_url: str | None = None) -> None:
+        self._db_path    = db_path
+        self._cal_output = calibration_output
+        self._webhook    = alert_webhook_url
+        self._running    = False
         self._total_attributed_since_last_lesson = 0
+        self._last_lesson_time  = 0.0   # epoch seconds
+        self._last_calibration_time = 0.0
+
+    def set_webhook(self, url: str | None) -> None:
+        self._webhook = url
 
     async def start(self) -> None:
         self._running = True
@@ -701,11 +727,21 @@ class ScheduledAttributor:
                 new_analyst = result.get("attributed_by_agent", {}).get("analyst", 0)
                 if result.get("attributed", 0) > 0 or new_analyst > 0:
                     logger.info("Attribution patrol: %s", result)
-                # Trigger lesson synthesis when enough new attributions accumulate
+                # Trigger lessons when N new attributions OR weekly timer
                 self._total_attributed_since_last_lesson += new_analyst
-                if self._total_attributed_since_last_lesson >= LESSON_TRIGGER_NEW_ATTRIBUTIONS:
+                now = asyncio.get_event_loop().time()
+                time_triggered = (now - self._last_lesson_time) >= LESSON_TIME_INTERVAL_SEC
+                count_triggered = self._total_attributed_since_last_lesson >= LESSON_TRIGGER_NEW_ATTRIBUTIONS
+                if count_triggered or time_triggered:
                     await self._try_generate_lessons()
                     self._total_attributed_since_last_lesson = 0
+                    self._last_lesson_time = now
+                # Promotion threshold check
+                await self._check_promotion_alerts()
+                # Weekly conviction calibrator
+                if (now - self._last_calibration_time) >= CALIBRATION_INTERVAL_SEC:
+                    await self._run_calibrator()
+                    self._last_calibration_time = now
             except Exception as exc:
                 logger.error("ScheduledAttributor error: %s", exc)
             await asyncio.sleep(PATROL_INTERVAL_SEC)
@@ -713,11 +749,79 @@ class ScheduledAttributor:
     async def stop(self) -> None:
         self._running = False
 
+    # ── Lesson synthesis ──────────────────────────────────────────────────────
+
     async def _try_generate_lessons(self) -> None:
-        """Fire lesson synthesis — catches all errors so attribution loop never breaks."""
         try:
             from agora.agents.lessons_generator import LessonsGenerator
             gen = LessonsGenerator(db_path=self._db_path)
             await gen.generate_all()
         except Exception as exc:
             logger.warning("LessonsGenerator skipped: %s", exc)
+
+    # ── Promotion alerts ──────────────────────────────────────────────────────
+
+    async def _check_promotion_alerts(self) -> None:
+        """Check each shadow agent against its promotion threshold and alert via Discord."""
+        try:
+            readiness = get_promotion_readiness(self._db_path)
+        except Exception:
+            return
+
+        alerts: list[str] = []
+        for agent, spec in _PROMOTION_THRESHOLDS.items():
+            info = readiness.get(f"{agent}_intelligence", readiness.get(agent, {}))
+            status = info.get("status", "")
+            if status == "READY_TO_PROMOTE":
+                metric_val = info.get(spec["metric"], info.get("decision_accuracy"))
+                alerts.append(
+                    f"🎯 **{agent.upper()} agent ready to promote out of shadow mode!**\n"
+                    f"  {spec['metric']}={metric_val:.0%} ≥ {spec['threshold']:.0%} "
+                    f"over {info.get('row_count', info.get('attributed_count', '?'))} samples.\n"
+                    f"  Set `{agent}_shadow_mode=false` in .env to go live."
+                )
+
+        if alerts:
+            msg = "\n\n".join(alerts)
+            logger.info("Promotion alerts: %d agent(s) ready", len(alerts))
+            await self._send_webhook(msg)
+
+    # ── ConvictionCalibrator ──────────────────────────────────────────────────
+
+    async def _run_calibrator(self) -> None:
+        try:
+            import json
+            from pathlib import Path
+            from agora.ops.conviction_calibrator import calibrate
+            Path(self._cal_output).parent.mkdir(parents=True, exist_ok=True)
+            result = calibrate(self._db_path, self._cal_output)
+            n = result.get("total_closed_trades", 0)
+            notes = result.get("proposal_notes", [])
+            summary = (
+                f"📊 **Weekly Calibration Report**\n"
+                f"  {n} trades analyzed ({result.get('analysis_period_days',90)}d)\n"
+            )
+            for note in notes[:3]:
+                summary += f"  • {note[:160]}\n"
+            if n < result.get("min_trades_for_proposal", 50):
+                summary += "  ⚠️ Insufficient data for weight proposals — collecting more trades.\n"
+            summary += f"  Full report: `.agora/calibration_report.json`"
+            logger.info("ConvictionCalibrator complete: %d trades", n)
+            await self._send_webhook(summary)
+        except Exception as exc:
+            logger.warning("ConvictionCalibrator error: %s", exc)
+
+    # ── Discord webhook ───────────────────────────────────────────────────────
+
+    async def _send_webhook(self, msg: str) -> None:
+        if not self._webhook:
+            logger.info("Attribution alert (no webhook):\n%s", msg)
+            return
+        try:
+            import httpx
+            chunks = [msg[i:i+1900] for i in range(0, len(msg), 1900)]
+            async with httpx.AsyncClient(timeout=10) as client:
+                for chunk in chunks:
+                    await client.post(self._webhook, json={"content": chunk})
+        except Exception as exc:
+            logger.warning("Attribution webhook failed: %s", exc)

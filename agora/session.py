@@ -64,6 +64,7 @@ from agora.ops.decision_chains import (
 from agora.ops.strategy_health import StrategyHealthAgent
 from agora.ops.devils_advocate import run as _devils_advocate
 from agora.ops.outcome_attributor import ScheduledAttributor, attribute_closed_trades
+from agora.ops.discord_commander import DiscordCommander
 from agora.c_suite import CROAgent, CIOAgent, CTOAgent, COOAgent, CFOAgent, RNDAgent
 from agora.c_suite.ctech import CTechAgent
 from agora.core.events import AgentEventBus
@@ -256,7 +257,23 @@ class AgoraSession:
         )
 
         # OutcomeAttributor — links closed positions → analyst_journal (feedback loop)
-        self._outcome_attributor = ScheduledAttributor(str(self._settings.db_path))
+        self._outcome_attributor = ScheduledAttributor(
+            str(self._settings.db_path),
+            calibration_output=str(self._settings.db_path.parent / "calibration_report.json"),
+            alert_webhook_url=self._settings.alert_webhook_url,
+        )
+
+        # Discord bidirectional commander (optional — requires bot token + user id)
+        self._discord_commander: DiscordCommander | None = None
+        if self._settings.discord_bot_token and self._settings.discord_approval_user_id:
+            self._discord_commander = DiscordCommander(
+                token=self._settings.discord_bot_token,
+                user_id=self._settings.discord_approval_user_id,
+                db_path=str(self._settings.db_path),
+                calibration_path=str(self._settings.db_path.parent / "calibration_report.json"),
+            )
+            self._discord_commander.set_session(self)
+            logger.info("DiscordCommander configured")
 
         # ── C-suite executives ──────────────────────────────────────
         self._cro = CROAgent(
@@ -624,6 +641,7 @@ class AgoraSession:
             self._ibkr_agent.start(),          # IBKR expert — scans every 30 min
             self._strategy_health.start(),     # Sharpe monitor — auto-pauses failing pillar/regime cells
             self._outcome_attributor.start(),  # Analyst feedback loop — attributes closed trades
+            *(([self._discord_commander.start()]) if self._discord_commander else []),
             # C-suite executives (including new CTechAgent)
             self._cro.start(),
             self._cio.start(),
@@ -662,6 +680,7 @@ class AgoraSession:
             self._ibkr_agent.stop(),
             self._strategy_health.stop(),
             self._outcome_attributor.stop(),
+            *(([self._discord_commander.stop()]) if self._discord_commander else []),
             # C-suite executives (including CTechAgent)
             self._cro.stop(),
             self._cio.stop(),
@@ -1031,6 +1050,19 @@ class AgoraSession:
         try:
             order = await close_trade(pos, self._settings, reason=f"exit_agent: {reason[:100]}")
             logger.info("ExitAgent close order: %s | status=%s", pos.ticker, order.get("status"))
+            # Broadcast CLOSE_NOW to dashboard WebSocket clients
+            try:
+                from agora.api.routes import _broadcast
+                pe = self._position_mgr.get_profit_engine_state(position_id)
+                await _broadcast({
+                    "type":       "profit_engine_alert",
+                    "ticker":     pos.ticker,
+                    "reason":     reason,
+                    "profit_pct": pe.get("profit_pct") if pe else None,
+                    "ts":         datetime.now(tz=timezone.utc).isoformat(),
+                })
+            except Exception:
+                pass
         except Exception as exc:
             logger.error("ExitAgent close_trade failed for %s: %s", pos.ticker, exc)
 
