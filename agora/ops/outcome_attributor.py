@@ -121,7 +121,7 @@ def _ensure_exit_journal_quality_cols(conn: sqlite3.Connection) -> None:
 
 def _attribute_analyst(conn: sqlite3.Connection, trades: list[tuple]) -> int:
     attributed = 0
-    for trade_id, ticker, entry_date_str, realized_pnl, max_loss in trades:
+    for trade_id, ticker, entry_date_str, realized_pnl, max_loss, _max_gain in trades:
         window_start = (
             datetime.fromisoformat(entry_date_str) - timedelta(hours=MATCH_WINDOW_HOURS)
         ).isoformat()
@@ -166,7 +166,7 @@ def _attribute_analyst(conn: sqlite3.Connection, trades: list[tuple]) -> int:
 def _attribute_strategy(conn: sqlite3.Connection, trades: list[tuple]) -> int:
     """Mark structure_used=1 and realized_pnl on strategy_journal rows."""
     attributed = 0
-    for trade_id, ticker, entry_date_str, realized_pnl, _max_loss in trades:
+    for trade_id, ticker, entry_date_str, realized_pnl, _max_loss, _max_gain in trades:
         window_start = (
             datetime.fromisoformat(entry_date_str) - timedelta(hours=MATCH_WINDOW_HOURS)
         ).isoformat()
@@ -208,7 +208,7 @@ def _attribute_advocate(conn: sqlite3.Connection, trades: list[tuple]) -> int:
     still executed); leave advocate_was_right NULL for those — they need manual review.
     """
     attributed = 0
-    for trade_id, ticker, entry_date_str, realized_pnl, _max_loss in trades:
+    for trade_id, ticker, entry_date_str, realized_pnl, _max_loss, _max_gain in trades:
         window_start = (
             datetime.fromisoformat(entry_date_str) - timedelta(hours=MATCH_WINDOW_HOURS)
         ).isoformat()
