@@ -30,6 +30,7 @@ from zoneinfo import ZoneInfo
 import anthropic
 
 from ..core.config import AgoraSettings, get_settings
+from ..ops.llm_cost_log import log_call as _log_llm
 
 logger = logging.getLogger(__name__)
 
@@ -517,6 +518,9 @@ class EarningsCalendarAgent:
                     ),
                 }],
             )
+            if hasattr(resp, "usage"):
+                _log_llm(str(self._settings.db_path), "EarningsCalendar", self._settings.claude_fast_model,
+                         resp.usage.input_tokens, resp.usage.output_tokens, purpose="peer_readthrough")
             return resp.content[0].text.strip()
         except Exception as exc:
             logger.debug("Peer context summarization failed: %s", exc)
@@ -570,6 +574,9 @@ Output JSON: {{"direction": "bullish|bearish|neutral", "confidence": 0.0-1.0, "r
                 thinking={"type": "adaptive"},
                 messages=[{"role": "user", "content": prompt}],
             )
+            if hasattr(resp, "usage"):
+                _log_llm(str(self._settings.db_path), "EarningsCalendar", self._settings.claude_model,
+                         resp.usage.input_tokens, resp.usage.output_tokens, purpose="earnings_direction")
 
             import json as _json
             raw = resp.content[-1].text.strip() if resp.content else ""

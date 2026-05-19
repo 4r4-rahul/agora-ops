@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo
 import anthropic
 
 from ..core.config import AgoraSettings, get_settings
+from ..ops.llm_cost_log import log_call as _log_llm
 
 logger = logging.getLogger(__name__)
 
@@ -257,6 +258,9 @@ class PreMarketSetupAgent:
                     ),
                 }],
             )
+            if hasattr(resp, "usage"):
+                _log_llm(str(self._settings.db_path), "PremarketSetup", self._settings.claude_fast_model,
+                         resp.usage.input_tokens, resp.usage.output_tokens, purpose="premarket_review")
             return resp.content[0].text.strip()
         except Exception:
             critical = [a for a in alerts if a.severity == "critical"]

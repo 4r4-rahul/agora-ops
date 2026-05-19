@@ -28,6 +28,7 @@ from typing import Any
 import anthropic
 
 from ..core.config import AgoraSettings, get_settings
+from ..ops.llm_cost_log import log_call as _log_llm
 
 logger = logging.getLogger(__name__)
 
@@ -210,6 +211,9 @@ Output JSON:
                 thinking={"type": "adaptive"},
                 messages=[{"role": "user", "content": prompt}],
             )
+            if hasattr(resp, "usage"):
+                _log_llm(str(self._settings.db_path), "PriceTarget", self._settings.claude_model,
+                         resp.usage.input_tokens, resp.usage.output_tokens, purpose="price_target")
 
             import json as _json
             # Get last text block

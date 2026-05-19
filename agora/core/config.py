@@ -92,7 +92,8 @@ class AgoraSettings(BaseSettings):
     target_dte_entry_min: int = Field(default=30, description="Minimum acceptable DTE at entry")
     target_dte_close: int = Field(default=21, description="Close position at this DTE")
     earnings_blackout_days: int = Field(default=3, description="Block new vol-premium entries within N days of earnings")
-    profit_target_pct: float = Field(default=0.50, description="Close at 50% of max profit")
+    profit_target_pct: float = Field(default=0.50, description="Close at 50% of max profit for 45-DTE vol-premium trades (tastytrade-validated for 30-60 DTE)")
+    profit_target_pct_short_dte: float = Field(default=0.75, description="Close at 75% of max profit for short-DTE trades (sector_momentum, event plays ≤14 DTE) — backtested: 75% saves $1,230 vs 50% over 2.4yr")
     short_delta_target: float = Field(default=0.20, description="20-delta short strike for credit spreads")
     long_delta_target: float = Field(default=0.35, description="35-delta long strike for debit spreads")
 
@@ -115,6 +116,8 @@ class AgoraSettings(BaseSettings):
     )
     min_conviction_score: float = Field(default=60.0, description="Minimum score to enter any trade")
     vol_premium_conviction_floor: float = Field(default=50.0, description="Lower conviction floor for non-directional vol-premium plays (IVR bypass path)")
+    high_ivr_threshold: float = Field(default=90.0, description="IVR at or above this is 'extreme' — IV compression risk is highest, requires full conviction floor")
+    high_ivr_conviction_floor: float = Field(default=60.0, description="Conviction floor when IVR >= high_ivr_threshold; overrides the lower vol_premium_conviction_floor")
     high_conviction_score: float = Field(default=80.0, description="Score for 1.5x size multiplier")
 
     # ── Universe ───────────────────────────────────────────────────
@@ -195,6 +198,78 @@ class AgoraSettings(BaseSettings):
     stop_loss_multiplier: float = Field(
         default=2.0,
         description="Exit when position P&L = -stop_loss_multiplier × initial credit/debit",
+    )
+
+    # ── Stock Analyst (Phase 3 intelligence layer) ────────────────────────────
+    stock_analyst_enabled: bool = Field(
+        default=False,
+        description="Enable StockAnalystAgent thesis layer. Start with shadow mode; "
+                    "flip to live after ≥40 closed positions show direction hit ≥55%.",
+    )
+    stock_analyst_shadow_mode: bool = Field(
+        default=True,
+        description="When True the analyst logs but never blocks trade execution.",
+    )
+    stock_analyst_min_conviction: float = Field(
+        default=60.0,
+        description="Minimum conviction score to invoke the analyst (skip cheap tickers).",
+        ge=0.0, le=100.0,
+    )
+
+    # ── StrategySelectorAgent (Phase 6 intelligence layer) ────────────────────
+    strategy_selector_enabled: bool = Field(
+        default=False,
+        description="Enable StrategySelectorAgent. Start in shadow mode until ≥40 closed "
+                    "positions show selector-chosen structures outperform rules engine.",
+    )
+    strategy_selector_shadow_mode: bool = Field(
+        default=True,
+        description="When True: selector journals but rules engine drives live trades.",
+    )
+
+    # ── AdvocateAgent (Phase 5 LLM adversarial review) ────────────────────────
+    advocate_enabled: bool = Field(
+        default=False,
+        description="Enable LLM AdvocateAgent. Fires after all deterministic gates, "
+                    "before IBKR. Start in shadow mode; promote after precision ≥60% / recall ≥50%.",
+    )
+    advocate_shadow_mode: bool = Field(
+        default=True,
+        description="When True: advocate journals but BLOCK verdicts never stop execution.",
+    )
+
+    # ── ExitIntelligenceAgent (Phase 6 position monitoring) ───────────────────
+    exit_intelligence_enabled: bool = Field(
+        default=False,
+        description="Enable ExitIntelligenceAgent hourly thesis validity checks. "
+                    "Shadow mode recommended until exit alpha > 5% per position.",
+    )
+    exit_intelligence_shadow_mode: bool = Field(
+        default=True,
+        description="When True: recommendations are journaled; CLOSE_NOW is never executed.",
+    )
+    exit_intelligence_interval_hours: float = Field(
+        default=1.0,
+        description="Minimum hours between evaluations of the same position.",
+        ge=0.25, le=24.0,
+    )
+
+    # ── Scan engine ───────────────────────────────────────────────────────────
+    use_async_scan_engine: bool = Field(
+        default=False,
+        description="Enable async priority-queue scan engine (Phase 1). "
+                    "Start with shadow_scan_engine=True for 5 trading days before going live.",
+    )
+    shadow_scan_engine: bool = Field(
+        default=True,
+        description="When use_async_scan_engine=True and this is True, the engine records "
+                    "metrics but does NOT call _evaluate_ticker. Set False after shadow review.",
+    )
+    n_scan_workers: int = Field(
+        default=4,
+        description="Number of concurrent ticker-evaluation workers. "
+                    "4 is conservative for IBKR pacing; increase to 6-8 once stable.",
+        ge=1, le=16,
     )
 
     # ── Alerts ─────────────────────────────────────────────────────

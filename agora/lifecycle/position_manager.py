@@ -33,6 +33,8 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from ..core.config import AgoraSettings, get_settings
+from ..ops.llm_cost_log import ensure_table as _ensure_llm_cost_table
+from ..ops.decision_chains import update_close as _decision_chain_close
 from ..core.models import (
     OpenPosition,
     PositionStatus,
@@ -41,6 +43,7 @@ from ..core.models import (
     StrategyType,
     TradeRecord,
 )
+from .profit_engine import IntelligentProfitEngine
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +70,21 @@ class PositionManager:
         self._on_roll = on_roll_order
         self._db = self._init_db()
         self._running = False
+        self._profit_engine = IntelligentProfitEngine()
+
+    def set_macro_context(self, ctx: Any) -> None:
+        """Called by session after every macro synthesis — keeps engine regime-aware."""
+        self._profit_engine.set_macro_context(ctx)
+
+    def set_price_target_for_position(
+        self, position_id: str, aligned_return_pct: float, entry_spot: float
+    ) -> None:
+        """Delegate to profit engine — called once per fill when PriceTargetAgent cache hit."""
+        self._profit_engine.set_price_target(position_id, aligned_return_pct, entry_spot)
+
+    def set_fill_quality_for_position(self, position_id: str, fill_bonus_pct: float) -> None:
+        """Delegate to profit engine — called once per confirmed IBKR fill."""
+        self._profit_engine.set_fill_quality(position_id, fill_bonus_pct)
 
     def _init_db(self) -> sqlite3.Connection:
         db_path = self._settings.db_path
@@ -160,12 +178,40 @@ class PositionManager:
                 FOREIGN KEY (position_id) REFERENCES positions(position_id)
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS decision_chains (
+                chain_id       TEXT PRIMARY KEY,
+                ticker         TEXT NOT NULL,
+                triggered_by   TEXT NOT NULL DEFAULT 'universe_scan',
+                started_at     TEXT NOT NULL,
+                outcome        TEXT NOT NULL DEFAULT 'pending',
+                position_id    TEXT,
+                realized_pnl   REAL,
+                session_id     TEXT NOT NULL DEFAULT '',
+                conviction     REAL NOT NULL DEFAULT 0,
+                strategy       TEXT NOT NULL DEFAULT '',
+                gates_passed   TEXT NOT NULL DEFAULT '[]'
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_dc_ticker ON decision_chains(ticker)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_dc_session ON decision_chains(session_id)")
         conn.commit()
+        _ensure_llm_cost_table(str(db_path))
         return conn
 
     async def start(self) -> None:
         self._running = True
-        logger.info("PositionManager started")
+        # Register existing positions with the profit engine on startup.
+        # Entry-time Greeks will be approximated from current leg state
+        # (greeks will have drifted, but DTE-curve and ratchet logic still apply).
+        existing = self.get_open_positions()
+        if existing:
+            for pos in existing:
+                self._profit_engine.register_position(pos, is_existing=True)
+            logger.info(
+                "ProfitEngine: registered %d existing position(s) on startup: %s",
+                len(existing), [p.ticker for p in existing],
+            )
         while self._running:
             try:
                 await self._lifecycle_cycle()
@@ -346,24 +392,41 @@ class PositionManager:
             await self._close_position(position, f"21-DTE reached (dte={dte})")
             return
 
-        # 50% profit target
-        profit_target = position.max_gain_dollars * self._settings.profit_target_pct
-        if position.unrealized_pnl >= profit_target:
-            await self._close_position(
-                position,
-                f"50% profit target hit (unrealized=${position.unrealized_pnl:.0f})",
+        # ── Intelligent profit engine ────────────────────────────────
+        decision = self._profit_engine.evaluate(
+            position=position,
+            realized_pnl_today=self.get_realized_pnl_today(),
+            short_dte_flat_target=self._settings.profit_target_pct_short_dte,
+            credit_spread_flat_target=self._settings.profit_target_pct,
+            portfolio_daily_loss_limit=-self._settings.daily_loss_limit_dollars,
+        )
+        if decision.profit_pct != 0:
+            logger.debug(
+                "PROFIT ENGINE | %s | rule=%-14s pct=%+.0f%%  hwm=%.0f%%  "
+                "target=%.0f%%  ratchet=%+.0f%%  vel=%+.2f%%/h  θ-excess=%.1fx  close=%s",
+                position.ticker, decision.rule,
+                decision.profit_pct * 100, decision.hwm_pct * 100,
+                decision.effective_target * 100, decision.ratchet_stop_pct * 100,
+                decision.velocity_1h, decision.theta_excess, decision.should_close,
             )
+        if decision.should_close:
+            self._profit_engine.clear_position(position.position_id)
+            await self._close_position(position, decision.reason)
             return
 
-        # Stop-loss: 2× initial debit/credit
-        stop_threshold = -abs(position.entry_price * 100 * position.contracts * self._settings.stop_loss_multiplier)
-        if position.unrealized_pnl <= stop_threshold:
-            # Check if rolling is viable before stopping out
+        # ── Stop-loss ────────────────────────────────────────────────
+        # Hard floor: 2× entry credit (absolute backstop, never negotiable).
+        # Ratchet stop is already handled inside the engine above — if ratchet fired
+        # we returned above. This block only fires when ratchet hasn't activated yet
+        # and loss breaches the hard floor.
+        hard_stop = -abs(position.entry_price * 100 * position.contracts * self._settings.stop_loss_multiplier)
+        if position.unrealized_pnl <= hard_stop:
             rolled = await self._attempt_roll(position)
             if not rolled:
+                self._profit_engine.clear_position(position.position_id)
                 await self._close_position(
                     position,
-                    f"Stop-loss hit (unrealized=${position.unrealized_pnl:.0f})",
+                    f"Hard stop: 2× entry hit (unrealized=${position.unrealized_pnl:.0f} ≤ ${hard_stop:.0f})",
                 )
             return
 
@@ -451,6 +514,13 @@ class PositionManager:
         logger.info("CLOSED: %s | reason: %s | PnL: $%.0f",
                     position.ticker, reason, position.unrealized_pnl)
 
+        # Link realized P&L back to the decision chain that opened this position
+        _decision_chain_close(
+            str(self._settings.db_path),
+            position.position_id,
+            round(position.unrealized_pnl, 2),
+        )
+
         # Write to trade_records for attribution
         self._write_trade_record(position, reason)
 
@@ -509,7 +579,8 @@ class PositionManager:
         earnings_date = getattr(position, "earnings_date", None)
         self._db.execute("""
             INSERT OR REPLACE INTO positions VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?
             )
         """, (
             position.position_id,
@@ -537,8 +608,12 @@ class PositionManager:
             getattr(position, "regime_at_entry", ""),
             earnings_date.isoformat() if earnings_date else None,
             1 if getattr(position, "is_pre_earnings", False) else 0,
+            # close columns — NULL on open
+            None, None, "",
         ))
         self._db.commit()
+        # Register with profit engine so entry-time Greeks are captured
+        self._profit_engine.register_position(position)
 
     def add_journal_entry(
         self,
@@ -677,7 +752,37 @@ class PositionManager:
                 "POSITION CLOSED (external): id=%s pnl=$%.2f source=%s",
                 position_id[:12], realized_pnl, source,
             )
+            self._write_trade_record_from_id(position_id, realized_pnl, close_price, source)
         return updated
+
+    def _write_trade_record_from_id(
+        self, position_id: str, realized_pnl: float, close_price: float, notes: str
+    ) -> None:
+        """Write to trade_records using the already-closed positions row. INSERT OR IGNORE is safe."""
+        try:
+            row = self._db.execute(
+                """SELECT ticker, strategy, pillar, entry_date, expiry_date,
+                          entry_price, contracts, regime_at_entry, conviction_at_entry
+                   FROM positions WHERE position_id = ?""",
+                (position_id,),
+            ).fetchone()
+            if not row:
+                return
+            ticker, strategy, pillar, entry_date, expiry_date, entry_price, contracts, regime, conviction = row
+            self._db.execute(
+                "INSERT OR IGNORE INTO trade_records VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    position_id, ticker, strategy, pillar,
+                    entry_date, date.today().isoformat(), expiry_date,
+                    entry_price, round(close_price, 4), contracts,
+                    round(realized_pnl, 2),
+                    0.0, 0.0,  # commission / slippage
+                    regime, conviction, "", notes,
+                ),
+            )
+            self._db.commit()
+        except Exception as exc:
+            logger.debug("trade_record write error (mark_closed path): %s", exc)
 
     def get_open_position_by_ticker(self, ticker: str) -> "OpenPosition | None":
         """Return the first active position for a ticker, or None."""

@@ -32,6 +32,7 @@ from zoneinfo import ZoneInfo
 import anthropic
 
 from ..core.config import AgoraSettings, get_settings
+from ..ops.llm_cost_log import log_call as _log_llm
 
 logger = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
@@ -593,6 +594,9 @@ class IBKRKnowledgeAgent:
                 system=_CACHED_KNOWLEDGE_PROMPT,
                 messages=[{"role": "user", "content": prompt}],
             )
+            if hasattr(resp, "usage"):
+                _log_llm(str(self._settings.db_path), "IBKRKnowledge", self._settings.claude_model,
+                         resp.usage.input_tokens, resp.usage.output_tokens, purpose="ibkr_diagnosis")
             for block in reversed(resp.content):
                 if hasattr(block, "text"):
                     result = block.text.strip()
@@ -627,6 +631,20 @@ class IBKRKnowledgeAgent:
             "last_scan":           self._last_scan,
             "last_diagnosis":      self._last_diagnosis[:300] if self._last_diagnosis else "",
         }
+
+    def get_cached_portfolio(self) -> tuple[list[dict], float | None]:
+        """
+        Return (ibkr_portfolio_items, age_seconds) from the most recent background scan.
+        Portfolio items carry IBKR's own unrealized_pnl, market_price, market_value.
+        Returns ([], None) when no scan has run yet.
+        """
+        if not self._last_scan or "ibkr_portfolio_items" not in self._last_scan:
+            return [], None
+        items = self._last_scan["ibkr_portfolio_items"]
+        age: float | None = None
+        if self._last_scan_time:
+            age = (datetime.now(tz=ET) - self._last_scan_time).total_seconds()
+        return items, age
 
     # ── Background scan ──────────────────────────────────────────────
 
@@ -811,6 +829,36 @@ class IBKRKnowledgeAgent:
                 }
                 for p in positions[:30]
             ]
+
+            # Portfolio items — IBKR's own unrealized P&L, market price, and market value
+            # per position. reqAccountUpdatesAsync triggers a one-shot account push so
+            # ib.portfolio() is populated before we read it.
+            accounts = result.get("managed_accounts") or ib.managedAccounts()
+            if accounts:
+                try:
+                    await ib.reqAccountUpdatesAsync(subscribe=True, account=accounts[0])
+                    await asyncio.sleep(0.5)
+                    portfolio_items = ib.portfolio()
+                    result["ibkr_portfolio_items"] = [
+                        {
+                            "symbol":         item.contract.symbol,
+                            "secType":        item.contract.secType,
+                            "strike":         getattr(item.contract, "strike", None),
+                            "right":          getattr(item.contract, "right", None),
+                            "expiry":         getattr(item.contract, "lastTradeDateOrContractMonth", None),
+                            "position":       item.position,
+                            "market_price":   round(float(item.marketPrice or 0), 4),
+                            "market_value":   round(float(item.marketValue or 0), 2),
+                            "avg_cost":       round(float(item.averageCost or 0), 4),
+                            "unrealized_pnl": round(float(item.unrealizedPNL or 0), 2),
+                            "realized_pnl":   round(float(item.realizedPNL or 0), 2),
+                            "account":        item.account,
+                        }
+                        for item in portfolio_items[:50]
+                    ]
+                except Exception as exc:
+                    result["ibkr_portfolio_items"] = []
+                    result["ibkr_portfolio_error"] = str(exc)
 
             # Today's executions (fills) from TWS — reqExecutionsAsync fetches all fills
             # for the current session day, regardless of which clientId placed the order.

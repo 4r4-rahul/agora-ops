@@ -95,6 +95,15 @@ class StrategyRulesEngine:
                         rr_ratio, conviction.ticker, max_gain, max_loss, width)
             return None
 
+        # Minimum absolute credit floor — thin credits (<$0.50/sh) cause IBKR leg rejections
+        # and are not worth the execution risk vs. the reward
+        if debit_credit < 0:  # credit spread
+            credit_per_share = abs(debit_credit) / 100
+            if credit_per_share < 0.50:
+                logger.info("MIN CREDIT gate: %s credit=%.2f/sh < $0.50 floor — skip",
+                            conviction.ticker, credit_per_share)
+                return None
+
         # Cost-to-width gate: debit spreads where the premium exceeds the max allowed
         # fraction of the spread width are rejected (too expensive relative to potential gain).
         # Credit spreads are checked inversely — premium too small means we collect too little.
@@ -283,7 +292,9 @@ class StrategyRulesEngine:
         """Sell OTM put (20-delta), buy further OTM put for defined risk."""
         # Only consider OTM puts (strike < spot) — ITM puts cause IBKR GTL rejection
         otm_puts = puts[puts["strike"] < spot * 0.995] if spot > 0 else puts
-        short_strike = self._nearest_delta_strike(otm_puts, self._settings.short_delta_target, "put", spot, expiry)
+        short_strike = self._best_credit_per_delta_short(
+            otm_puts, self._settings.short_delta_target, "put", wing_direction=-1, spot=spot, expiry=expiry
+        )
         long_strike  = self._spread_width_strike(otm_puts, short_strike, "put", -1)
         if not short_strike or not long_strike or short_strike <= long_strike:
             return []
@@ -296,7 +307,9 @@ class StrategyRulesEngine:
         """Sell OTM call (20-delta), buy further OTM call."""
         # Only consider OTM calls (strike > spot) — ITM calls cause IBKR GTL rejection
         otm_calls = calls[calls["strike"] > spot * 1.005] if spot > 0 else calls
-        short_strike = self._nearest_delta_strike(otm_calls, self._settings.short_delta_target, "call", spot, expiry)
+        short_strike = self._best_credit_per_delta_short(
+            otm_calls, self._settings.short_delta_target, "call", wing_direction=+1, spot=spot, expiry=expiry
+        )
         long_strike  = self._spread_width_strike(otm_calls, short_strike, "call", +1)
         if not short_strike or not long_strike or short_strike >= long_strike:
             return []
@@ -306,11 +319,15 @@ class StrategyRulesEngine:
         ]
 
     def _iron_condor(self, calls: Any, puts: Any, spot: float, expiry: date) -> list[SpreadLeg]:
-        """Sell 20-delta strangle, buy wings."""
+        """Sell 20-delta strangle, buy wings. Each wing optimized for credit-per-delta."""
         otm_puts  = puts[puts["strike"]   < spot * 0.995] if spot > 0 else puts
         otm_calls = calls[calls["strike"] > spot * 1.005] if spot > 0 else calls
-        short_put  = self._nearest_delta_strike(otm_puts,  self._settings.short_delta_target, "put",  spot, expiry)
-        short_call = self._nearest_delta_strike(otm_calls, self._settings.short_delta_target, "call", spot, expiry)
+        short_put = self._best_credit_per_delta_short(
+            otm_puts, self._settings.short_delta_target, "put", wing_direction=-1, spot=spot, expiry=expiry
+        )
+        short_call = self._best_credit_per_delta_short(
+            otm_calls, self._settings.short_delta_target, "call", wing_direction=+1, spot=spot, expiry=expiry
+        )
         if not short_put or not short_call:
             return []
         long_put  = self._spread_width_strike(puts,  short_put,  "put",  -1)
@@ -382,6 +399,101 @@ class StrategyRulesEngine:
             return float(df.loc[idx, "strike"])
         except Exception:
             return None
+
+    def _best_credit_per_delta_short(
+        self,
+        chain: Any,
+        target_delta: float,
+        opt_type: str,
+        wing_direction: int,     # +1 = long wing is higher strike, -1 = lower strike
+        spot: float = 0.0,
+        expiry: "date | None" = None,
+        delta_band: float = 0.05,
+    ) -> float | None:
+        """
+        Choose the short strike that maximises (net_credit / |delta_short|).
+
+        Scans every strike whose delta falls within [target_delta ± delta_band].
+        For each candidate: pairs it with its fixed-width long wing, computes the
+        net spread credit, then returns the strike with the highest credit-per-delta.
+
+        Falls back to _nearest_delta_strike when fewer than 2 candidates exist
+        or when bid/ask data is unavailable.
+        """
+        try:
+            if chain is None or (hasattr(chain, "empty") and chain.empty):
+                return self._nearest_delta_strike(chain, target_delta, opt_type, spot, expiry)
+
+            df = chain.copy()
+
+            # Build per-row delta estimates (prefer chain column, fall back to BS)
+            from datetime import date as _date
+            dte = (expiry - _date.today()).days if expiry else 30
+
+            def _row_delta(row: Any) -> float:
+                d = float(row.get("delta", 0) or 0)
+                if d != 0:
+                    return abs(d)
+                iv = float(row.get("impliedVolatility", 0) or 0)
+                if iv <= 0:
+                    return 0.0
+                return abs(self._approx_delta(spot, float(row["strike"]), iv, dte, opt_type))
+
+            df["_delta_abs"] = df.apply(_row_delta, axis=1)
+
+            lo, hi = target_delta - delta_band, target_delta + delta_band
+            candidates = df[(df["_delta_abs"] >= lo) & (df["_delta_abs"] <= hi)].copy()
+
+            # Fewer than 2 candidates → fall back to nearest-delta
+            if len(candidates) < 2:
+                return self._nearest_delta_strike(chain, target_delta, opt_type, spot, expiry)
+
+            def _mid(row: Any) -> float:
+                bid = float(row.get("bid", 0) or 0)
+                ask = float(row.get("ask", 0) or 0)
+                return (bid + ask) / 2 if (bid > 0 or ask > 0) else 0.0
+
+            best_strike: float | None = None
+            best_score: float = -1.0
+            strikes = sorted(chain["strike"].unique().tolist())
+
+            for _, row in candidates.iterrows():
+                short_strike = float(row["strike"])
+                delta_abs    = float(row["_delta_abs"])
+                short_mid    = _mid(row)
+                if short_mid <= 0 or delta_abs <= 0:
+                    continue
+
+                # Find paired long strike (2 strikes in wing_direction from short)
+                try:
+                    idx = min(range(len(strikes)), key=lambda i: abs(strikes[i] - short_strike))
+                    long_idx = idx + wing_direction * 2
+                    if not (0 <= long_idx < len(strikes)):
+                        continue
+                    long_strike = strikes[long_idx]
+                except Exception:
+                    continue
+
+                long_rows = chain[chain["strike"] == long_strike]
+                if long_rows.empty:
+                    continue
+                long_mid = _mid(long_rows.iloc[0])
+
+                net_credit = short_mid - long_mid
+                if net_credit <= 0:
+                    continue
+
+                score = net_credit / delta_abs
+                if score > best_score:
+                    best_score  = score
+                    best_strike = short_strike
+
+            return best_strike if best_strike is not None else (
+                self._nearest_delta_strike(chain, target_delta, opt_type, spot, expiry)
+            )
+
+        except Exception:
+            return self._nearest_delta_strike(chain, target_delta, opt_type, spot, expiry)
 
     def _spread_width_strike(
         self,

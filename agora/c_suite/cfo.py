@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 
 from .base import ExecutiveAgent
 from ..core.config import AgoraSettings
+from ..ops.llm_cost_log import daily_cost_summary as _llm_daily_cost, DAILY_CAP_USD as _LLM_DAILY_CAP
 
 logger = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
@@ -388,6 +389,28 @@ class CFOAgent(ExecutiveAgent):
                     ))
 
             conn.close()
+        except Exception:
+            pass
+
+        # ── LLM cost vs daily cap ──
+        try:
+            cost = _llm_daily_cost(str(self._settings.db_path))
+            total = cost.get("total_usd", 0.0)
+            if total > _LLM_DAILY_CAP:
+                findings.append((
+                    "llm_cost_over_cap",
+                    "critical",
+                    f"LLM cost today ${total:.2f} exceeds ${_LLM_DAILY_CAP:.0f} daily cap "
+                    f"({cost.get('pct_cap', 0):.0f}% of cap). Top agent: "
+                    + (cost["by_agent"][0]["agent"] if cost.get("by_agent") else "unknown"),
+                ))
+            elif total > _LLM_DAILY_CAP * 0.75:
+                findings.append((
+                    "llm_cost_near_cap",
+                    "warning",
+                    f"LLM cost today ${total:.2f} = {cost.get('pct_cap', 0):.0f}% of "
+                    f"${_LLM_DAILY_CAP:.0f} cap. Approaching limit.",
+                ))
         except Exception:
             pass
 

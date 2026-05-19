@@ -728,6 +728,44 @@ tr.pos-detail-row td { padding: 0; background: var(--bg1); }
       </div>
     </div>
 
+    <!-- ── Swing Trading row ── -->
+    <div id="row-swing" style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px">
+      <div class="panel">
+        <div class="panel-header">🎯 Swing Open Positions
+          <span class="count" id="swing-open-count">0</span>
+          <button onclick="fetchSwing()"
+            style="margin-left:auto;padding:1px 7px;font-size:10px;font-family:var(--font);
+                   background:rgba(88,166,255,.12);border:1px solid rgba(88,166,255,.3);
+                   color:var(--blue);border-radius:4px;cursor:pointer">↻</button>
+        </div>
+        <div class="tbl-wrap" style="max-height:160px">
+          <table>
+            <thead><tr>
+              <th>Ticker</th><th>Type</th><th>Strike</th><th>DTE</th><th>Fill$</th><th>Target</th><th>Stop</th>
+            </tr></thead>
+            <tbody id="swing-open-tbody">
+              <tr><td colspan="7" style="color:var(--text2);text-align:center;padding:8px;font-size:10px">No open swing positions</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-header">📓 Swing Journal (Recent Passes)
+          <span id="swing-perf-badge" style="margin-left:8px;font-size:10px;color:var(--text2)"></span>
+        </div>
+        <div class="tbl-wrap" style="max-height:160px">
+          <table>
+            <thead><tr>
+              <th>Ticker</th><th>Score</th><th>Dir</th><th>Conf</th><th>Go?</th><th>Thesis</th>
+            </tr></thead>
+            <tbody id="swing-journal-tbody">
+              <tr><td colspan="6" style="color:var(--text2);text-align:center;padding:8px;font-size:10px">No swing decisions yet</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
   </div><!-- /main -->
 
   <!-- ── Right panel ── -->
@@ -735,6 +773,9 @@ tr.pos-detail-row td { padding: 0; background: var(--bg1); }
     <div id="right-tabs">
       <div class="rtab active" data-tab="tab-signals" onclick="switchTab(this)">Signals</div>
       <div class="rtab" data-tab="tab-journal" onclick="switchTab(this);fetchJournal()">Journal</div>
+      <div class="rtab" data-tab="tab-strat-health" onclick="switchTab(this);fetchStratHealth()">Strat Health</div>
+      <div class="rtab" data-tab="tab-intel" onclick="switchTab(this);fetchIntel()">Intel</div>
+      <div class="rtab" data-tab="tab-lessons" onclick="switchTab(this);fetchLessons()">Lessons</div>
       <div class="rtab" data-tab="tab-ibkr" onclick="switchTab(this);fetchIbkrStatus()">IBKR</div>
       <div class="rtab" data-tab="tab-info" onclick="switchTab(this)">Info</div>
     </div>
@@ -770,6 +811,32 @@ tr.pos-detail-row td { padding: 0; background: var(--bg1); }
       <div id="regime-info" style="font-size:11px;color:var(--text2);line-height:1.8"></div>
     </div>
 
+    <div id="tab-strat-health" class="rtab-content">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <span style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px">Strategy Health — Rolling 30d Sharpe</span>
+        <button onclick="fetchStratHealth()" style="background:none;border:1px solid var(--border);border-radius:3px;color:var(--text2);font-size:10px;padding:2px 6px;cursor:pointer">↻</button>
+      </div>
+      <div id="strat-paused-banner" style="display:none;background:#3d1a1a;border:1px solid #8b2020;border-radius:5px;padding:8px 10px;font-size:11px;color:#ff7b7b;margin-bottom:10px"></div>
+      <div style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px">Paused Cells</div>
+      <div id="strat-paused-list" style="font-size:11px;color:var(--text2);margin-bottom:12px">None</div>
+      <div style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px">Sharpe Grid (≥5 trades)</div>
+      <table style="width:100%;border-collapse:collapse;font-size:10px">
+        <thead>
+          <tr style="color:var(--text2);border-bottom:1px solid var(--border)">
+            <th style="text-align:left;padding:3px 4px">Pillar</th>
+            <th style="text-align:left;padding:3px 4px">Regime</th>
+            <th style="text-align:right;padding:3px 4px">N</th>
+            <th style="text-align:right;padding:3px 4px">Sharpe</th>
+            <th style="text-align:right;padding:3px 4px">Avg P&L</th>
+          </tr>
+        </thead>
+        <tbody id="strat-health-tbody">
+          <tr><td colspan="5" style="color:var(--text2);padding:6px 4px;font-size:10px">No closed trades yet</td></tr>
+        </tbody>
+      </table>
+      <div style="margin-top:8px;font-size:10px;color:var(--text2)">Pause threshold: Sharpe &lt; −0.5 over ≥20 trades. Unpauses at Sharpe ≥ 0.</div>
+    </div>
+
     <div id="tab-ibkr" class="rtab-content">
       <div style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">IBKR Live Status</div>
       <div id="ibkr-status-box" style="font-size:11px;line-height:1.7;margin-bottom:12px;border:1px solid var(--border);border-radius:6px;padding:10px;background:var(--panel)">
@@ -785,6 +852,36 @@ tr.pos-detail-row td { padding: 0; background: var(--bg1); }
     <div id="tab-journal" class="rtab-content">
       <div style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Trade Journal — WHY each trade was taken</div>
       <div id="journal-list" style="font-size:11px;line-height:1.7"></div>
+    </div>
+
+    <!-- ── Intelligence tab ── -->
+    <div id="tab-intel" class="rtab-content">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <span style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px">Shadow → Live Promotion Readiness</span>
+        <button onclick="fetchIntel()" style="background:none;border:1px solid var(--border);border-radius:3px;color:var(--text2);font-size:10px;padding:2px 6px;cursor:pointer">↻</button>
+      </div>
+      <div id="intel-promo" style="margin-bottom:14px"></div>
+
+      <div style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Agent Sub-journal</div>
+      <div style="display:flex;gap:6px;margin-bottom:8px">
+        <button onclick="fetchAgentJournal('analyst')" style="font-size:10px;padding:3px 8px;background:none;border:1px solid var(--border);border-radius:4px;color:var(--text2);cursor:pointer">Analyst</button>
+        <button onclick="fetchAgentJournal('strategy')" style="font-size:10px;padding:3px 8px;background:none;border:1px solid var(--border);border-radius:4px;color:var(--text2);cursor:pointer">Strategy</button>
+        <button onclick="fetchAgentJournal('advocate')" style="font-size:10px;padding:3px 8px;background:none;border:1px solid var(--border);border-radius:4px;color:var(--text2);cursor:pointer">Advocate</button>
+        <button onclick="fetchAgentJournal('exit')" style="font-size:10px;padding:3px 8px;background:none;border:1px solid var(--border);border-radius:4px;color:var(--text2);cursor:pointer">Exit</button>
+      </div>
+      <div id="agent-journal-box" style="font-size:11px;color:var(--text2)">Select an agent above to view recent decisions.</div>
+    </div>
+
+    <!-- ── Lessons tab ── -->
+    <div id="tab-lessons" class="rtab-content">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <span style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px">Pending Lessons — CEO Approval Required</span>
+        <button onclick="fetchLessons()" style="background:none;border:1px solid var(--border);border-radius:3px;color:var(--text2);font-size:10px;padding:2px 6px;cursor:pointer">↻</button>
+      </div>
+      <div style="font-size:10px;color:var(--text2);margin-bottom:10px;line-height:1.6">
+        Lessons synthesized by LLM from attributed outcomes. None are applied to agent behavior until you approve them here. §17 Sacred Rule.
+      </div>
+      <div id="lessons-list" style="font-size:11px"></div>
     </div>
 
     <div id="tab-info" class="rtab-content">
@@ -1177,6 +1274,12 @@ async function fetchPositions() {
       const pnl    = pos.unrealized_pnl;
       const pnlStr = pnl != null ? fmt$(pnl) : '—';
       const pnlCls = pnl == null ? '' : pnl >= 0 ? 'pnl-pos' : 'pnl-neg';
+      // P&L source badge — green "IBKR" when live, yellow "YF" when using yfinance
+      const src    = pos.pnl_source || 'yfinance';
+      const ageMin = pos.ibkr_pnl_age_seconds != null ? Math.round(pos.ibkr_pnl_age_seconds / 60) : null;
+      const srcBadge = src === 'ibkr'
+        ? `<span title="Unrealized P&L from IBKR portfolio data (${ageMin}m ago)" style="font-size:9px;font-weight:700;color:var(--green);margin-left:3px;opacity:.8">IBKR</span>`
+        : `<span title="Unrealized P&L estimated from yfinance mid-price — may differ from IBKR" style="font-size:9px;font-weight:700;color:var(--yellow);margin-left:3px;opacity:.8">YF</span>`;
       const dteCol = dte <= 7 ? 'var(--red)' : dte <= 14 ? 'var(--yellow)' : 'var(--text2)';
       const pCol   = PILLAR_COLORS[pos.pillar] || 'var(--text2)';
       const pid    = pos.position_id || pos.ticker;
@@ -1248,6 +1351,9 @@ async function fetchPositions() {
             <div class="detail-kv"><span class="dk">R/R Ratio</span><span class="dv">${rr}</span></div>
             <div class="detail-kv"><span class="dk">Breakeven</span><span class="dv">${breakeven}</span></div>
             <div class="detail-kv"><span class="dk">Pillar</span><span class="dv" style="color:${pCol};font-size:10px">${(pos.pillar||'').replace(/_/g,' ')}</span></div>
+            <div class="detail-kv"><span class="dk">Unrealized P&L</span><span class="dv ${pnlCls}">${pnlStr} ${srcBadge}</span></div>
+            ${pos.pnl_source === 'ibkr' && pos.yfinance_pnl != null ? `<div class="detail-kv"><span class="dk" style="opacity:.6">YF estimate</span><span class="dv" style="opacity:.6;font-size:10px">${fmt$(pos.yfinance_pnl)}</span></div>` : ''}
+            ${pos.ibkr_market_value != null ? `<div class="detail-kv"><span class="dk">Market Value</span><span class="dv">${fmt$(pos.ibkr_market_value)}</span></div>` : ''}
           </div>
           <div class="detail-section">
             <h4>Timeline</h4>
@@ -1285,7 +1391,7 @@ async function fetchPositions() {
         <td style="color:${dirCol};font-weight:700">${dirIcon} ${dir}</td>
         <td>${pos.contracts || 1}</td>
         <td>${entryLabel}</td>
-        <td class="${pnlCls}">${pnlStr}</td>
+        <td class="${pnlCls}">${pnlStr}${srcBadge}</td>
         <td style="color:${dteCol}">${dte}d</td>
       </tr>
       <tr class="pos-detail-row" id="detail-${pid}">
@@ -1891,6 +1997,318 @@ async function fetchJournal() {
   }
 }
 
+// ── Intelligence tab — Promotion Readiness + Agent Journals ──────────────────
+async function fetchIntel() {
+  const promoEl = document.getElementById('intel-promo');
+  promoEl.innerHTML = '<div style="color:var(--text2)">Loading...</div>';
+  try {
+    const d = await fetch('/agora/health/promotion-readiness').then(r => r.json());
+    if (d.error) { promoEl.innerHTML = `<div style="color:var(--red)">${d.error}</div>`; return; }
+
+    const agents = [
+      { key: 'analyst',            label: 'Stock Analyst' },
+      { key: 'strategy_selector',  label: 'Strategy Selector' },
+      { key: 'advocate',           label: 'Advocate' },
+      { key: 'exit_intelligence',  label: 'Exit Intel' },
+    ];
+    const statusColor = { READY: 'var(--green)', NOT_READY: 'var(--yellow)', INSUFFICIENT_DATA: 'var(--text2)' };
+    const shadowModes = d.current_shadow_modes || {};
+
+    promoEl.innerHTML = agents.map(({ key, label }) => {
+      const a = d[key];
+      if (!a) return '';
+      const sc = statusColor[a.status] || 'var(--text2)';
+      const shadow = shadowModes[key];
+      const shadowBadge = shadow === true
+        ? '<span style="font-size:9px;background:rgba(88,166,255,.12);color:var(--blue);border:1px solid rgba(88,166,255,.25);border-radius:3px;padding:0 4px;margin-left:4px">SHADOW</span>'
+        : shadow === false
+        ? '<span style="font-size:9px;background:rgba(63,185,80,.12);color:var(--green);border:1px solid rgba(63,185,80,.25);border-radius:3px;padding:0 4px;margin-left:4px">LIVE</span>'
+        : '<span style="font-size:9px;background:rgba(139,148,158,.1);color:var(--text2);border:1px solid var(--border);border-radius:3px;padding:0 4px;margin-left:4px">OFF</span>';
+
+      // build key metric line
+      let metric = '';
+      if (key === 'analyst')            metric = `${a.attributed_count} attributed · hit ${a.direction_hit_rate != null ? (a.direction_hit_rate * 100).toFixed(0) + '%' : '—'} (need ≥40, ≥55%)`;
+      else if (key === 'strategy_selector') metric = `${a.attributed_count} attributed · win ${a.win_rate != null ? (a.win_rate * 100).toFixed(0) + '%' : '—'} (need ≥40, ≥55%)`;
+      else if (key === 'advocate')       metric = `${a.attributed_count} attributed · prec ${a.precision != null ? (a.precision * 100).toFixed(0) + '%' : '—'} · rec ${a.recall != null ? (a.recall * 100).toFixed(0) + '%' : '—'} (need ≥60%/50%)`;
+      else if (key === 'exit_intelligence') metric = `${a.attributed_count} attributed · alpha ${a.avg_exit_alpha_pct != null ? (a.avg_exit_alpha_pct * 100).toFixed(1) + '%' : 'pending'} (need >5%)`;
+
+      return `<div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:6px;background:var(--bg3)">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+    <span style="font-weight:600;font-size:11px">${label}${shadowBadge}</span>
+    <span style="font-size:10px;font-weight:700;color:${sc}">${a.status.replace('_', ' ')}</span>
+  </div>
+  <div style="font-size:10px;color:var(--text2);line-height:1.6">${metric}</div>
+  ${a.note ? `<div style="font-size:9px;color:var(--text2);margin-top:3px;opacity:.7">${a.note}</div>` : ''}
+</div>`;
+    }).join('');
+
+    // Calibration summary
+    if (d.calibration && d.calibration.length) {
+      promoEl.innerHTML += `<div style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin:10px 0 6px">Latest Brier Scores</div>`;
+      promoEl.innerHTML += d.calibration.map(c => {
+        const driftStyle = c.drift_alert ? 'color:var(--red)' : 'color:var(--text2)';
+        return `<div style="display:flex;justify-content:space-between;font-size:10px;padding:2px 0;border-bottom:1px solid var(--border)">
+  <span style="color:var(--text)">${c.agent}</span>
+  <span style="${driftStyle}">Brier ${c.brier_score != null ? c.brier_score.toFixed(4) : '—'} · N=${c.sample_size}${c.drift_alert ? ' ⚠ drift' : ''}</span>
+</div>`;
+      }).join('');
+    }
+  } catch(ex) {
+    promoEl.innerHTML = `<div style="color:var(--red)">Error: ${ex.message}</div>`;
+  }
+}
+
+async function fetchAgentJournal(agent) {
+  const box = document.getElementById('agent-journal-box');
+  box.innerHTML = '<div style="color:var(--text2)">Loading...</div>';
+  const urlMap = {
+    analyst:  '/agora/health/analyst',
+    strategy: '/agora/journal/strategy?limit=20',
+    advocate: '/agora/journal/advocate?limit=20',
+    exit:     '/agora/journal/exit?limit=20',
+  };
+  try {
+    const d = await fetch(urlMap[agent]).then(r => r.json());
+
+    if (agent === 'analyst') {
+      // Uses existing health/analyst endpoint format
+      const rows = d.recent || [];
+      if (!rows.length) { box.innerHTML = '<div style="color:var(--text2)">No analyst entries yet.</div>'; return; }
+      box.innerHTML = `<div style="margin-bottom:6px;font-size:10px;color:var(--text2)">
+  Direction hit: <b style="color:var(--text)">${d.direction_hit_rate != null ? (d.direction_hit_rate * 100).toFixed(0) + '%' : '—'}</b> ·
+  Attributed: <b style="color:var(--text)">${d.attributed_count}</b> ·
+  Calibration: <b style="color:var(--text)">${d.calibration_rate != null ? (d.calibration_rate * 100).toFixed(0) + '%' : '—'}</b>
+</div>` + rows.map(r => {
+        const c = r.played_out === 1 ? 'var(--green)' : r.played_out === 0 ? 'var(--red)' : 'var(--text2)';
+        return `<div style="border-bottom:1px solid var(--border);padding:5px 0;font-size:10px">
+  <span style="color:var(--text);font-weight:600">${r.ticker}</span>
+  <span style="color:var(--text2);margin-left:6px">${(r.decided_at || '').slice(0, 10)}</span>
+  <span style="float:right;color:${c}">${r.played_out === 1 ? '✓ WIN' : r.played_out === 0 ? '✗ LOSS' : 'pending'}</span>
+  <div style="color:var(--text2)">${r.direction || '—'} · ${r.strategy_family || '—'} · conf ${r.confidence_pct || '—'}%${r.shadow ? ' [shadow]' : ''}</div>
+</div>`;
+      }).join('');
+
+    } else if (agent === 'strategy') {
+      const rows = d.rows || [];
+      if (!rows.length) { box.innerHTML = '<div style="color:var(--text2)">No strategy selector entries yet.</div>'; return; }
+      box.innerHTML = rows.map(r => `<div style="border-bottom:1px solid var(--border);padding:5px 0;font-size:10px">
+  <span style="color:var(--text);font-weight:600">${r.ticker}</span>
+  <span style="color:var(--text2);margin-left:6px">${(r.decided_at_utc || '').slice(0, 10)}</span>
+  <span style="float:right;color:${r.decision === 'no_structure' ? 'var(--red)' : 'var(--green)'}">${r.decision}</span>
+  <div style="color:var(--text2)">${r.strategy_type || '—'}${r.shadow_mode ? ' [shadow]' : ''}${r.realized_pnl != null ? ' · P&L $' + r.realized_pnl.toFixed(0) : ''}</div>
+</div>`).join('');
+
+    } else if (agent === 'advocate') {
+      const rows = d.rows || [];
+      if (!rows.length) { box.innerHTML = '<div style="color:var(--text2)">No advocate entries yet.</div>'; return; }
+      box.innerHTML = rows.map(r => {
+        const vc = r.verdict === 'PASS' ? 'var(--green)' : r.verdict === 'CAUTION' ? 'var(--yellow)' : 'var(--red)';
+        return `<div style="border-bottom:1px solid var(--border);padding:5px 0;font-size:10px">
+  <span style="color:var(--text);font-weight:600">${r.ticker}</span>
+  <span style="color:var(--text2);margin-left:6px">${(r.decided_at_utc || '').slice(0, 10)}</span>
+  <span style="float:right;color:${vc}">${r.verdict}</span>
+  <div style="color:var(--text2)">conf ${r.verdict_confidence || '—'}%${r.shadow_mode ? ' [shadow]' : ''}${r.realized_pnl != null ? ' · P&L $' + r.realized_pnl.toFixed(0) : ''}</div>
+  ${r.failure_modes && r.failure_modes[0] ? `<div style="color:var(--text2);opacity:.8;font-size:9px">Top risk: ${r.failure_modes[0].mode_name || ''}</div>` : ''}
+</div>`;
+      }).join('');
+
+    } else if (agent === 'exit') {
+      const rows = d.rows || [];
+      if (!rows.length) { box.innerHTML = '<div style="color:var(--text2)">No exit intelligence entries yet.</div>'; return; }
+      box.innerHTML = rows.map(r => {
+        const rc = r.recommendation === 'CLOSE_NOW' ? 'var(--red)' : r.recommendation === 'HOLD' ? 'var(--green)' : 'var(--yellow)';
+        const vc = r.thesis_validity === 'VALID' ? 'var(--green)' : r.thesis_validity === 'WEAKENING' ? 'var(--yellow)' : 'var(--red)';
+        return `<div style="border-bottom:1px solid var(--border);padding:5px 0;font-size:10px">
+  <span style="color:var(--text);font-weight:600">${r.ticker}</span>
+  <span style="color:var(--text2);margin-left:6px">${(r.decided_at_utc || '').slice(0, 10)}</span>
+  <span style="float:right;color:${rc}">${r.recommendation}</span>
+  <div style="color:${vc};font-size:9px">${r.thesis_validity}${r.shadow_mode ? ' [shadow]' : ''}</div>
+  ${r.kill_condition_status !== 'NONE_TRIGGERED' ? `<div style="color:var(--red);font-size:9px">⚠ ${r.kill_condition_status}</div>` : ''}
+</div>`;
+      }).join('');
+    }
+  } catch(ex) {
+    box.innerHTML = `<div style="color:var(--red)">Error: ${ex.message}</div>`;
+  }
+}
+
+// ── Lessons tab ───────────────────────────────────────────────────────────────
+async function fetchLessons() {
+  const el = document.getElementById('lessons-list');
+  el.innerHTML = '<div style="color:var(--text2)">Loading...</div>';
+  try {
+    const d = await fetch('/agora/lessons/pending').then(r => r.json());
+    if (d.error) { el.innerHTML = `<div style="color:var(--red)">${d.error}</div>`; return; }
+    const lessons = d.lessons || [];
+    if (!lessons.length) {
+      el.innerHTML = '<div style="color:var(--text2);font-size:11px;padding:20px 0;text-align:center">No pending lessons. System will generate lessons after 10 attributed trade outcomes.</div>';
+      return;
+    }
+    el.innerHTML = `<div style="font-size:10px;color:var(--text2);margin-bottom:10px">${lessons.length} lesson${lessons.length !== 1 ? 's' : ''} awaiting your approval</div>` +
+    lessons.map(l => `<div style="border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:10px;background:var(--bg3)" id="lesson-card-${l.lesson_id}">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px">
+    <span style="font-size:10px;font-weight:700;color:var(--purple);text-transform:uppercase">${l.agent_name}</span>
+    <span style="font-size:9px;color:var(--text2)">${(l.created_at_utc || '').slice(0, 10)} · N=${l.sample_size} · conf ${Math.round((l.confidence_in_lesson || 0) * 100)}%</span>
+  </div>
+  <div style="font-size:11px;line-height:1.7;margin-bottom:10px;color:var(--text)">${l.lesson_text}</div>
+  <div style="display:flex;gap:8px">
+    <button onclick="approveLesson(${l.lesson_id})" style="flex:1;padding:5px 0;background:rgba(63,185,80,.12);border:1px solid rgba(63,185,80,.3);border-radius:4px;color:var(--green);font-size:11px;cursor:pointer;font-family:var(--font)">✓ Approve</button>
+    <button onclick="rejectLesson(${l.lesson_id})" style="flex:1;padding:5px 0;background:rgba(248,81,73,.08);border:1px solid rgba(248,81,73,.25);border-radius:4px;color:var(--red);font-size:11px;cursor:pointer;font-family:var(--font)">✗ Reject</button>
+  </div>
+</div>`).join('');
+  } catch(ex) {
+    el.innerHTML = `<div style="color:var(--red)">Error: ${ex.message}</div>`;
+  }
+}
+
+async function approveLesson(id) {
+  const card = document.getElementById('lesson-card-' + id);
+  try {
+    const d = await fetch(`/agora/lessons/${id}/approve`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({approved_by: 'CEO'}),
+    }).then(r => r.json());
+    if (d.approved) {
+      if (card) card.style.opacity = '0.3';
+      if (card) card.innerHTML += '<div style="text-align:center;color:var(--green);font-size:11px;margin-top:6px">✓ Approved — agent will use this lesson</div>';
+    }
+  } catch(ex) { alert('Error: ' + ex.message); }
+}
+
+async function rejectLesson(id) {
+  const reason = prompt('Reason for rejection (optional):') || '';
+  const card = document.getElementById('lesson-card-' + id);
+  try {
+    const d = await fetch(`/agora/lessons/${id}/reject`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({reason}),
+    }).then(r => r.json());
+    if (d.rejected) {
+      if (card) card.style.opacity = '0.3';
+      if (card) card.innerHTML += '<div style="text-align:center;color:var(--red);font-size:11px;margin-top:6px">✗ Rejected — lesson will not be used</div>';
+    }
+  } catch(ex) { alert('Error: ' + ex.message); }
+}
+
+// ── Strategy Health ───────────────────────────────────────────────────────────
+async function fetchStratHealth() {
+  const tbody   = document.getElementById('strat-health-tbody');
+  const paused  = document.getElementById('strat-paused-list');
+  const banner  = document.getElementById('strat-paused-banner');
+  try {
+    const r = await fetch('/agora/health/strategy');
+    if (!r.ok) { tbody.innerHTML = '<tr><td colspan="5" style="color:var(--text2);padding:6px 4px">Session not running</td></tr>'; return; }
+    const d = await r.json();
+
+    // Paused cells
+    const cells = d.paused_cells || [];
+    if (cells.length > 0) {
+      banner.style.display = 'block';
+      banner.innerHTML = `⛔ ${cells.length} pillar/regime cell(s) AUTO-PAUSED — new entries blocked`;
+      paused.innerHTML = cells.map(c =>
+        `<div style="margin-bottom:4px;padding:4px 6px;background:#2a1a1a;border-radius:3px">
+          <span style="color:#ff7b7b;font-weight:600">${c.pillar}/${c.regime}</span>
+          <span style="color:var(--text2);margin-left:6px">Sharpe=${c.sharpe_at_pause ?? '?'}</span>
+          <span style="color:var(--text2);margin-left:6px">n=${c.trade_count}</span>
+          <div style="color:var(--text2);font-size:10px;margin-top:2px">${c.reason}</div>
+        </div>`
+      ).join('');
+    } else {
+      banner.style.display = 'none';
+      paused.innerHTML = '<span style="color:var(--green)">None — all pillars healthy</span>';
+    }
+
+    // Sharpe grid (show cells with ≥5 trades)
+    const grid = (d.health || []).filter(h => h.count >= 5).sort((a, b) => (a.sharpe ?? 99) - (b.sharpe ?? 99));
+    if (grid.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="5" style="color:var(--text2);padding:6px 4px;font-size:10px">No closed trades yet (need ≥5 per cell)</td></tr>';
+    } else {
+      tbody.innerHTML = grid.map(h => {
+        const sharpe = h.sharpe ?? null;
+        const col = sharpe === null ? 'var(--text2)' : sharpe >= 0.5 ? 'var(--green)' : sharpe >= 0 ? 'var(--yellow)' : sharpe >= -0.5 ? 'var(--orange)' : '#ff4444';
+        const pausedCell = cells.some(c => c.pillar === h.pillar && c.regime === h.regime);
+        return `<tr style="${pausedCell ? 'opacity:0.5' : ''}">
+          <td style="padding:3px 4px">${h.pillar}${pausedCell ? ' ⛔' : ''}</td>
+          <td style="padding:3px 4px;color:var(--text2)">${h.regime}</td>
+          <td style="padding:3px 4px;text-align:right;color:var(--text2)">${h.count}</td>
+          <td style="padding:3px 4px;text-align:right;color:${col};font-weight:600">${sharpe !== null ? sharpe.toFixed(3) : '—'}</td>
+          <td style="padding:3px 4px;text-align:right;color:${(h.mean_pnl ?? 0) >= 0 ? 'var(--green)' : '#ff4444'}">${h.mean_pnl !== null ? '$' + h.mean_pnl.toFixed(0) : '—'}</td>
+        </tr>`;
+      }).join('');
+    }
+  } catch (ex) {
+    tbody.innerHTML = `<tr><td colspan="5" style="color:var(--text2);padding:6px 4px">Error: ${ex.message}</td></tr>`;
+  }
+}
+
+// ── Swing Setups ──────────────────────────────────────────────────────────────
+async function fetchSwing() {
+  const openTbody    = document.getElementById('swing-open-tbody');
+  const journalTbody = document.getElementById('swing-journal-tbody');
+  const countEl      = document.getElementById('swing-open-count');
+  const perfBadge    = document.getElementById('swing-perf-badge');
+  try {
+    const r = await fetch('/agora/swing/decisions');
+    if (!r.ok) {
+      openTbody.innerHTML = '<tr><td colspan="7" style="color:var(--text2);text-align:center;padding:8px;font-size:10px">Session not running</td></tr>';
+      return;
+    }
+    const d = await r.json();
+
+    // Performance badge
+    const p = d.performance || {};
+    if (p.wins !== undefined) {
+      const wr = p.win_rate_pct != null ? `${p.win_rate_pct}% WR` : '—';
+      const pnl = p.total_pnl_dollars != null ? ` | $${p.total_pnl_dollars >= 0 ? '+' : ''}${p.total_pnl_dollars.toFixed(0)} P&L` : '';
+      perfBadge.textContent = `${wr}${pnl} (${p.wins}W/${p.losses}L)`;
+      perfBadge.style.color = (p.total_pnl_dollars || 0) >= 0 ? 'var(--green)' : 'var(--red)';
+    }
+
+    // Open positions
+    const open = d.open_positions || [];
+    countEl.textContent = open.length;
+    if (open.length === 0) {
+      openTbody.innerHTML = '<tr><td colspan="7" style="color:var(--text2);text-align:center;padding:8px;font-size:10px">No open swing positions</td></tr>';
+    } else {
+      openTbody.innerHTML = open.map(pos => {
+        const typeColor = pos.option_type === 'call' ? 'var(--green)' : 'var(--red)';
+        const dte = pos.target_expiry_dte != null ? `${pos.target_expiry_dte}d` : '—';
+        return `<tr>
+          <td style="font-weight:600">${pos.ticker}</td>
+          <td style="color:${typeColor}">${(pos.option_type || '').toUpperCase()}</td>
+          <td>${pos.strike != null ? pos.strike.toFixed(0) : '—'}</td>
+          <td>${dte}</td>
+          <td>${pos.fill_price != null ? '$' + pos.fill_price.toFixed(2) : '—'}</td>
+          <td style="color:var(--green)">${pos.price_target != null ? '$' + pos.price_target.toFixed(2) : '—'}</td>
+          <td style="color:var(--red)">${pos.stop_price != null ? '$' + pos.stop_price.toFixed(2) : '—'}</td>
+        </tr>`;
+      }).join('');
+    }
+
+    // Recent journal passes (no-go + go decisions)
+    const recent = d.recent_no_go || [];
+    if (recent.length === 0) {
+      journalTbody.innerHTML = '<tr><td colspan="6" style="color:var(--text2);text-align:center;padding:8px;font-size:10px">No swing decisions yet this session</td></tr>';
+    } else {
+      journalTbody.innerHTML = recent.map(e => {
+        const dirColor = e.direction === 'bullish' ? 'var(--green)' : e.direction === 'bearish' ? 'var(--red)' : 'var(--text2)';
+        const conf = e.confidence != null ? `${(e.confidence * 100).toFixed(0)}%` : '—';
+        const thesis = (e.key_thesis || '').slice(0, 50) + (e.key_thesis && e.key_thesis.length > 50 ? '…' : '');
+        return `<tr>
+          <td style="font-weight:600">${e.ticker}</td>
+          <td>${e.raw_score != null ? e.raw_score.toFixed(0) : '—'}</td>
+          <td style="color:${dirColor}">${e.direction || '—'}</td>
+          <td>${conf}</td>
+          <td style="color:var(--text2)">No</td>
+          <td style="font-size:10px;color:var(--text2)" title="${e.key_thesis || ''}">${thesis}</td>
+        </tr>`;
+      }).join('');
+    }
+  } catch(ex) {
+    openTbody.innerHTML = `<tr><td colspan="7" style="color:var(--red);padding:8px;font-size:10px">Error: ${ex.message}</td></tr>`;
+  }
+}
+
 // ── Today at a Glance ─────────────────────────────────────────────────────────
 async function fetchToday() {
   try {
@@ -1908,8 +2326,12 @@ async function fetchToday() {
     }
     const unrealEl = document.getElementById('tb-unrealized');
     if (unrealEl) {
-      unrealEl.textContent = fmt$(d.unrealized_pnl_today);
+      const srcLabel = d.unrealized_pnl_source === 'ibkr' ? ' ·IBKR' : ' ·YF';
+      unrealEl.textContent = fmt$(d.unrealized_pnl_today) + srcLabel;
       unrealEl.className = 'tc-val ' + pnlCls(d.unrealized_pnl_today);
+      unrealEl.title = d.unrealized_pnl_source === 'ibkr'
+        ? 'Unrealized P&L from IBKR portfolio data'
+        : 'Unrealized P&L estimated from yfinance — may differ from IBKR';
     }
     _setText('tb-closed', d.closed_count ?? '0');
     _setText('tb-open',   d.open_count   ?? '0');
@@ -1998,7 +2420,7 @@ async function fetchToday() {
 
   await Promise.all([
     fetchHealth(), fetchOrders(), fetchPositions(), fetchAttribution(), fetchSignals(),
-    fetchMarket(), fetchReadiness(), fetchCsuite(), fetchToday(),
+    fetchMarket(), fetchReadiness(), fetchCsuite(), fetchToday(), fetchSwing(),
   ]);
 
   // TWS live data — fetch once on load then every 30s (makes a real IBKR connection)
@@ -2014,6 +2436,8 @@ async function fetchToday() {
   setInterval(fetchCsuite,      60_000);
   setInterval(fetchTwsLive,     30_000); // TWS live: 30s — real connection, not cached
   setInterval(fetchToday,       30_000); // today summary: realized P&L + closed positions
+  setInterval(fetchSwing,       60_000); // swing decisions: refresh every 60s
+  setInterval(fetchStratHealth, 300_000); // strategy health: refresh every 5 min (matches patrol)
 })();
 
 // ── Live Readiness Meter ───────────────────────────────────────────

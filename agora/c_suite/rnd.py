@@ -262,14 +262,16 @@ class RNDAgent(ExecutiveAgent):
         event_engine: Any = None,
         universe_disc: Any = None,
         analyst_rev: Any = None,
+        strategy_health: Any = None,
     ) -> None:
         super().__init__(settings, ceo_agent)
-        self._pillar_health = pillar_health
-        self._earnings_cal  = earnings_calendar
-        self._transcript    = earnings_transcript
-        self._event_engine  = event_engine
-        self._universe      = universe_disc
-        self._analyst_rev   = analyst_rev
+        self._pillar_health   = pillar_health
+        self._earnings_cal    = earnings_calendar
+        self._transcript      = earnings_transcript
+        self._event_engine    = event_engine
+        self._universe        = universe_disc
+        self._analyst_rev     = analyst_rev
+        self._strategy_health = strategy_health
 
     @property
     def _system_prompt(self) -> str:
@@ -411,6 +413,44 @@ class RNDAgent(ExecutiveAgent):
             except Exception:
                 pass
 
+        # ── StrategyHealth: auto-paused pillar/regime cells ──
+        if self._strategy_health:
+            try:
+                status = self._strategy_health.get_status()
+                paused = status.get("paused_count", 0)
+                cells  = status.get("paused_cells", [])
+                if paused > 0:
+                    cell_summary = ", ".join(
+                        f"{c['pillar']}/{c['regime']} (Sharpe={c.get('sharpe_at_pause', '?')})"
+                        for c in cells
+                    )
+                    findings.append((
+                        "strategy_health_paused_cells",
+                        "critical" if paused >= 3 else "warning",
+                        f"StrategyHealth has auto-paused {paused} pillar/regime cell(s): {cell_summary}. "
+                        "These cells have rolling 30-day Sharpe below -0.5 over ≥20 trades. "
+                        "New entries are blocked until Sharpe recovers above 0.0.",
+                    ))
+
+                # Warn if any cell is approaching the pause threshold
+                health_grid = status.get("health", [])
+                borderline = [
+                    h for h in health_grid
+                    if h.get("sharpe") is not None
+                    and -0.5 <= h["sharpe"] < -0.2
+                    and h.get("count", 0) >= 10
+                ]
+                if borderline:
+                    labels = [f"{h['pillar']}/{h['regime']} ({h['sharpe']:.2f})" for h in borderline]
+                    findings.append((
+                        "strategy_health_borderline",
+                        "info",
+                        f"Cells approaching pause threshold (Sharpe -0.5): {', '.join(labels)}. "
+                        "Monitor — may pause on next patrol if performance continues.",
+                    ))
+            except Exception:
+                pass
+
         return findings
 
     async def self_heal(self, findings: list[tuple[str, str, str]]) -> None:
@@ -479,6 +519,8 @@ class RNDAgent(ExecutiveAgent):
             tasks.append("Wire EventPatternEngine to R&D — event signal research disabled")
         if not self._transcript:
             tasks.append("Wire EarningsTranscriptAgent to R&D — NLP signal validation offline")
+        if not self._strategy_health:
+            tasks.append("Wire StrategyHealthAgent to R&D — pillar/regime Sharpe monitoring invisible")
         return tasks
 
     def collect_intelligence(self) -> dict[str, Any]:
@@ -539,6 +581,13 @@ class RNDAgent(ExecutiveAgent):
                     if signals:
                         active.append({"ticker": ticker, "signals": signals[:2]})
                 intel["event_engine_active"] = active
+            except Exception:
+                pass
+
+        # Strategy health — rolling Sharpe grid and paused cells
+        if self._strategy_health:
+            try:
+                intel["strategy_health"] = self._strategy_health.get_status()
             except Exception:
                 pass
 

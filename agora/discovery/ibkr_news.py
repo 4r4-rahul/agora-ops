@@ -27,6 +27,7 @@ import anthropic
 from ib_insync import IB, Stock
 
 from ..core.models import Catalyst, CatalystType
+from ..ops.llm_cost_log import log_call as _log_llm
 
 logger = logging.getLogger(__name__)
 
@@ -161,20 +162,26 @@ class IBKRNewsAgent:
     async def _ib_session(self) -> None:
         ib = IB()
         connected = False
-        try:
-            await ib.connectAsync(
-                self._settings.ibkr_host,
-                self._settings.ibkr_port,
-                clientId=self._settings.ibkr_news_client_id,
-                timeout=10,
-            )
-            connected = True
-        except Exception as exc:
-            logger.warning(
-                "IBKRNewsAgent could not connect to IBKR — "
-                "news feed disabled (session continues without it): %s", exc
-            )
-            return
+        for attempt in range(1, 4):
+            try:
+                await ib.connectAsync(
+                    self._settings.ibkr_host,
+                    self._settings.ibkr_port,
+                    clientId=self._settings.ibkr_news_client_id,
+                    timeout=10,
+                )
+                connected = True
+                break
+            except Exception as exc:
+                if attempt < 3:
+                    logger.info("IBKRNewsAgent connect attempt %d/3 failed — retrying in 10s: %s", attempt, exc)
+                    await asyncio.sleep(10)
+                else:
+                    logger.warning(
+                        "IBKRNewsAgent could not connect to IBKR after 3 attempts — "
+                        "news feed disabled (session continues without it): %s", exc
+                    )
+                    return
 
         # Get subscribed providers
         try:
@@ -190,7 +197,7 @@ class IBKRNewsAgent:
         # 10090: "Part of requested market data is not subscribed" — same class.
         # 10089: "Requires additional subscription" — paper account limitation,
         #        not actionable. News still flows for subscribed tickers.
-        _SUPPRESS_CODES = {10197, 10090, 10089, 2104, 2106, 2158}
+        _SUPPRESS_CODES = {10197, 10090, 10089, 2104, 2106, 2158, 10168}
 
         def _on_ib_error(req_id, error_code, error_str, contract):
             if error_code in _SUPPRESS_CODES:
@@ -314,6 +321,9 @@ class IBKRNewsAgent:
                 }],
                 messages=[{"role": "user", "content": body}],
             )
+            if hasattr(response, "usage") and hasattr(self._settings, "db_path"):
+                _log_llm(str(self._settings.db_path), "IBKRNews", "claude-haiku-4-5-20251001",
+                         response.usage.input_tokens, response.usage.output_tokens, purpose="news_classify")
             raw = response.content[0].text.strip()
             if raw.startswith("```"):
                 raw = raw.split("```")[1]

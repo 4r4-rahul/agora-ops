@@ -31,6 +31,7 @@ from typing import Any
 import anthropic
 
 from ..core.config import AgoraSettings, get_settings
+from ..ops.llm_cost_log import log_call as _log_llm
 
 logger = logging.getLogger(__name__)
 
@@ -315,6 +316,9 @@ class SectorIntelligenceAgent:
                     ),
                 }],
             )
+            if hasattr(resp, "usage"):
+                _log_llm(str(self._settings.db_path), "SectorIntelligence", self._settings.claude_fast_model,
+                         resp.usage.input_tokens, resp.usage.output_tokens, purpose="sector_readthrough")
             return resp.content[0].text.strip()
         except Exception:
             return f"avg beat {(avg_beat or 0)*100:+.1f}% | avg move {(avg_move or 0)*100:+.1f}%"

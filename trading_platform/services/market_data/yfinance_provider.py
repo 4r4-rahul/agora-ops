@@ -233,8 +233,8 @@ class YFinanceProvider:
                 return {"rank": None, "percentile": None, "atm_iv": None}
 
             ivs = cache["atm_ivs"]
-            if len(ivs) < 5:
-                # Need at least 5 data points for a meaningful min/max range
+            if len(ivs) < 3:
+                # Need at least 3 data points for a min/max range (rank improves past 20 days)
                 logger.debug("IV cache for %s has only %d days — rank unavailable", ticker, len(ivs))
                 return {"rank": None, "percentile": None, "atm_iv": round(atm_iv * 100, 1)}
 

@@ -32,6 +32,7 @@ import anthropic
 import httpx
 
 from ..core.config import AgoraSettings, get_settings
+from ..ops.llm_cost_log import log_call as _log_llm
 from ..core.models import Catalyst, CatalystType
 
 logger = logging.getLogger(__name__)
@@ -297,6 +298,9 @@ class CatalystDiscoveryAgent:
                 ],
                 messages=[{"role": "user", "content": user_msg}],
             )
+            if hasattr(response, "usage"):
+                _log_llm(str(self._settings.db_path), "CatalystAgent", "claude-haiku-4-5-20251001",
+                         response.usage.input_tokens, response.usage.output_tokens, purpose="filing_classify")
 
             import json as _json
             raw = response.content[0].text.strip()

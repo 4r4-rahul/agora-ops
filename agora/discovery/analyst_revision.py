@@ -63,6 +63,7 @@ class AnalystRevisionTracker:
         self._settings    = settings or get_settings()
         self._on_catalyst = on_catalyst
         self._running     = False
+        self._available   = True   # set False by startup self-test if yfinance endpoint fails
         # Track which tickers we've already analyzed (avoid re-processing)
         self._analyzed: dict[str, date] = {}   # ticker → date analyzed
         self._csuite_manager: Any = None   # RNDAgent — set via register_csuite_manager()
@@ -82,8 +83,22 @@ class AnalystRevisionTracker:
 
     async def start(self) -> None:
         self._running = True
+        # Self-test on startup — verify yfinance upgrades_downgrades endpoint is live
+        try:
+            import yfinance as yf
+            tk = yf.Ticker("AAPL")
+            ud = tk.upgrades_downgrades
+            if ud is not None and not ud.empty:
+                logger.info("AnalystRevisionTracker: yfinance endpoint OK (%d rows for AAPL)", len(ud))
+                self._available = True
+            else:
+                logger.warning("AnalystRevisionTracker: yfinance returned empty — tracker disabled")
+                self._available = False
+        except Exception as exc:
+            logger.warning("AnalystRevisionTracker: startup self-test failed (%s) — tracker disabled", exc)
+            self._available = False
         while self._running:
-            await asyncio.sleep(3600)   # Passive — called externally; just keep alive
+            await asyncio.sleep(3600)   # Passive — called externally by session after earnings
 
     async def stop(self) -> None:
         self._running = False
@@ -93,6 +108,8 @@ class AnalystRevisionTracker:
         Called by session._on_earnings() for a ticker that just reported.
         Fetches analyst revisions in the past 5 days and fires catalyst if strong.
         """
+        if not getattr(self, "_available", True):
+            return None
         # Avoid re-analyzing same ticker twice in one day
         today = date.today()
         if self._analyzed.get(ticker) == today:
@@ -142,27 +159,29 @@ class AnalystRevisionTracker:
             if recent.empty:
                 return None
 
-            # Count upgrades vs downgrades
-            grade_col = None
-            for col in ["Action", "GradeFrom", "ToGrade", "action", "grade"]:
-                if col in recent.columns:
-                    grade_col = col
-                    break
+            # Actual yfinance schema: Action = "up"|"down"|"main"|"init",
+            # ToGrade / FromGrade = full rating strings,
+            # priceTargetAction = "Raises"|"Lowers"|"Maintains"
+            n_upgrades = n_downgrades = 0
+            if "Action" in recent.columns:
+                action = recent["Action"].str.lower()
+                n_upgrades   = int((action == "up").sum()) + int((action == "init").sum())
+                n_downgrades = int((action == "down").sum())
+            elif "ToGrade" in recent.columns:
+                grades = recent["ToGrade"].str.lower()
+                n_upgrades   = int(grades.str.contains("outperform|buy|overweight|strong buy|positive", na=False).sum())
+                n_downgrades = int(grades.str.contains("underperform|sell|underweight|negative|reduce", na=False).sum())
 
-            if grade_col is None:
-                return None
-
-            grades = recent[grade_col].str.lower()
-            n_upgrades   = int(grades.str.contains("upgrade|raised|initiated|outperform|buy|overweight", na=False).sum())
-            n_downgrades = int(grades.str.contains("downgrade|lowered|underperform|sell|underweight|neutral", na=False).sum())
-
-            # Price target analysis
-            pt_col = next((c for c in ["PriceTarget", "NewTarget", "TargetTo"] if c in recent.columns), None)
+            # Price target analysis — yfinance schema: currentPriceTarget / priorPriceTarget
             avg_new_pt = None
             pt_raises  = 0
             pt_cuts    = 0
-            if pt_col and "PriceTarget" in recent.columns:
-                pts = recent["PriceTarget"].dropna()
+            if "priceTargetAction" in recent.columns:
+                pta = recent["priceTargetAction"].str.lower()
+                pt_raises = int(pta.str.contains("raise", na=False).sum())
+                pt_cuts   = int(pta.str.contains("lower", na=False).sum())
+            if "currentPriceTarget" in recent.columns:
+                pts = recent["currentPriceTarget"].dropna()
                 if not pts.empty:
                     avg_new_pt = float(pts.mean())
 

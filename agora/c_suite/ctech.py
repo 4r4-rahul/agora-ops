@@ -182,17 +182,19 @@ class CTechAgent(ExecutiveAgent):
         macro_synthesizer: Any = None,
         sector_intel: Any = None,
         universe_disc: Any = None,
+        strategy_health: Any = None,
     ) -> None:
         super().__init__(settings, ceo_agent)
-        self._scorer      = conviction_scorer
-        self._resolver    = disagreement_resolver
-        self._event       = event_engine
-        self._iv          = iv_screen
-        self._vol         = vol_regime
-        self._macro       = macro_synthesizer
-        self._sector      = sector_intel
-        self._universe    = universe_disc
-        self._started_at  = datetime.now(tz=timezone.utc)
+        self._scorer          = conviction_scorer
+        self._resolver        = disagreement_resolver
+        self._event           = event_engine
+        self._iv              = iv_screen
+        self._vol             = vol_regime
+        self._macro           = macro_synthesizer
+        self._sector          = sector_intel
+        self._universe        = universe_disc
+        self._strategy_health = strategy_health
+        self._started_at      = datetime.now(tz=timezone.utc)
 
     @property
     def _system_prompt(self) -> str:
@@ -348,6 +350,39 @@ class CTechAgent(ExecutiveAgent):
                     "Event-driven signals (FOMC, earnings) are not being generated.",
                 ))
 
+        # ── StrategyHealthAgent: ops status ──
+        if not self._strategy_health:
+            findings.append((
+                "strategy_health_not_wired",
+                "warning",
+                "StrategyHealthAgent is not wired to CTech. "
+                "Pillar/regime auto-pause status is not visible in the ops brief.",
+            ))
+        else:
+            try:
+                status = self._strategy_health.get_status()
+                paused = status.get("paused_count", 0)
+                if paused > 0:
+                    cells = status.get("paused_cells", [])
+                    cell_summary = ", ".join(
+                        f"{c['pillar']}/{c['regime']}"
+                        for c in cells
+                    )
+                    findings.append((
+                        "strategy_health_cells_paused",
+                        "critical" if paused >= 3 else "warning",
+                        f"StrategyHealth: {paused} pillar/regime cell(s) auto-paused: {cell_summary}. "
+                        "New entries in these cells are blocked at RiskCouncil gate #0. "
+                        "Sharpe must recover above 0.0 over ≥20 trades to auto-unpause.",
+                    ))
+            except Exception as exc:
+                findings.append((
+                    "strategy_health_unresponsive",
+                    "warning",
+                    f"StrategyHealthAgent.get_status() raised: {exc}. "
+                    "Patrol may have crashed — pillar pause state unknown.",
+                ))
+
         return findings
 
     async def self_heal(self, findings: list[tuple[str, str, str]]) -> None:
@@ -421,6 +456,7 @@ class CTechAgent(ExecutiveAgent):
             ("macro_synthesizer", self._macro), ("event_engine", self._event),
             ("sector_intel", self._sector), ("universe_disc", self._universe),
             ("conviction_scorer", self._scorer), ("disagreement_resolver", self._resolver),
+            ("strategy_health", self._strategy_health),
         ] if a is None]
         for m in missing:
             tasks.append(f"Wire {m} to CTech — signal health monitoring blind spot")
@@ -482,6 +518,24 @@ class CTechAgent(ExecutiveAgent):
                 }
             except Exception:
                 pass
+
+        # Ops agents status
+        ops: dict[str, Any] = {}
+        if self._strategy_health:
+            try:
+                sh = self._strategy_health.get_status()
+                ops["strategy_health"] = {
+                    "paused_count":    sh.get("paused_count", 0),
+                    "paused_cells":    [
+                        f"{c['pillar']}/{c['regime']}" for c in sh.get("paused_cells", [])
+                    ],
+                    "cells_monitored": len(sh.get("health", [])),
+                }
+            except Exception:
+                ops["strategy_health"] = "error"
+        else:
+            ops["strategy_health"] = "not_wired"
+        intel["ops_agents"] = ops
 
         # Config snapshot
         intel["model_config"] = {

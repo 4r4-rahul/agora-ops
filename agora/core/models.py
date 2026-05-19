@@ -27,14 +27,15 @@ class StrategyType(StrEnum):
 
 
 class StrategyPillar(StrEnum):
-    VOL_PREMIUM     = "vol_premium"      # IV > realized → sell credit spreads
-    DIRECTIONAL     = "directional"      # GEX negative + momentum → debit spreads
-    EVENT_FOMC      = "event_fomc"       # FOMC T-5 drift play
-    EVENT_CPI       = "event_cpi"        # CPI T-1 IV premium condor
-    POST_EARNINGS   = "post_earnings"    # Skew reversion T+1 to T+3
-    CATALYST        = "catalyst"         # EDGAR 8-K discovery
-    CONGRESSIONAL   = "congressional"    # Congressional trade signal
-    SMART_MONEY     = "smart_money"      # 13D/13G/Form4 cluster
+    VOL_PREMIUM       = "vol_premium"       # IV > realized → sell credit spreads
+    DIRECTIONAL       = "directional"       # GEX negative + momentum → debit spreads
+    EVENT_FOMC        = "event_fomc"        # FOMC T-5 drift play
+    EVENT_CPI         = "event_cpi"         # CPI T-1 IV premium condor
+    POST_EARNINGS     = "post_earnings"     # Skew reversion T+1 to T+3
+    CATALYST          = "catalyst"          # EDGAR 8-K discovery
+    CONGRESSIONAL     = "congressional"     # Congressional trade signal
+    SMART_MONEY       = "smart_money"       # 13D/13G/Form4 cluster
+    SECTOR_MOMENTUM   = "sector_momentum"   # 3+ peers moving >3% same direction intraday
 
 
 class CatalystType(StrEnum):

@@ -280,14 +280,16 @@ class CIOAgent(ExecutiveAgent):
         catalyst_agent: Any = None,
         smart_money: Any = None,
         ibkr_news: Any = None,
+        pillar_health: Any = None,
     ) -> None:
         super().__init__(settings, ceo_agent)
-        self._macro      = macro_synthesizer
-        self._sector     = sector_intel
-        self._mi         = market_interest
-        self._catalyst   = catalyst_agent
-        self._sm         = smart_money
-        self._news       = ibkr_news
+        self._macro          = macro_synthesizer
+        self._sector         = sector_intel
+        self._mi             = market_interest
+        self._catalyst       = catalyst_agent
+        self._sm             = smart_money
+        self._news           = ibkr_news
+        self._pillar_health  = pillar_health
 
     @property
     def _system_prompt(self) -> str:

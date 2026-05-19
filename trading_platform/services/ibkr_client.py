@@ -121,88 +121,6 @@ def _next_expiry(dte: int) -> str:
     return expiry.strftime("%Y%m%d")
 
 
-async def _place_individual_legs(
-    *,
-    ib: Any,
-    qualified_legs: list[tuple[dict, Any]],
-    contracts: int,
-    session_id: str,
-    entry_price: float,
-    profit_target: float,
-    stop_loss: float,
-    timeout: float,
-) -> dict[str, Any]:
-    """
-    Fallback for Error 201 (Precautionary Settings blocks BAG combo orders).
-
-    Submits each spread leg as a separate vanilla option order. Individual legs
-    are not classified as 'riskless combination orders' and bypass the TWS limit.
-    Legging risk is acceptable for paper trading; for live trading, fix the
-    TWS Precautionary Settings instead.
-    """
-    order_ids = []
-    trades = []
-
-    # Spread net price → split proportionally across legs by setting each
-    # leg at its standalone mid. For paper we just use the spread price as
-    # a proxy limit on the first (short) leg and market on the long leg.
-    short_legs = [(ls, c) for ls, c in qualified_legs if ls["action"].upper() == "SELL"]
-    long_legs  = [(ls, c) for ls, c in qualified_legs if ls["action"].upper() == "BUY"]
-
-    for leg_spec, contract in short_legs:
-        sell_order = LimitOrder(
-            action="SELL",
-            totalQuantity=contracts * leg_spec["quantity"],
-            lmtPrice=abs(round(entry_price, 2)),
-        )
-        sell_order.orderRef = f"{session_id[:30]}_S"
-        sell_order.tif = "DAY"
-        sell_order.transmit = True
-        t = ib.placeOrder(contract, sell_order)
-        trades.append(t)
-        order_ids.append(t.order.orderId)
-        logger.info("[%s] Leg order SELL %s strike=%.1f orderId=%d",
-                    session_id, contract.localSymbol, leg_spec["strike"], t.order.orderId)
-
-    for leg_spec, contract in long_legs:
-        buy_order = LimitOrder(
-            action="BUY",
-            totalQuantity=contracts * leg_spec["quantity"],
-            lmtPrice=max(0.01, abs(round(entry_price * 0.3, 2))),  # long leg costs ~30% of credit
-        )
-        buy_order.orderRef = f"{session_id[:30]}_L"
-        buy_order.tif = "DAY"
-        buy_order.transmit = True
-        t = ib.placeOrder(contract, buy_order)
-        trades.append(t)
-        order_ids.append(t.order.orderId)
-        logger.info("[%s] Leg order BUY  %s strike=%.1f orderId=%d",
-                    session_id, contract.localSymbol, leg_spec["strike"], t.order.orderId)
-
-    # Wait for at least the short leg to be accepted
-    loop = asyncio.get_event_loop()
-    deadline = loop.time() + timeout
-    while loop.time() < deadline:
-        await asyncio.sleep(1)
-        statuses = [t.orderStatus.status for t in trades]
-        if all(s in ("Submitted", "PreSubmitted", "Filled") for s in statuses):
-            break
-        if any(s in ("Cancelled", "ApiCancelled", "Inactive") for s in statuses):
-            msgs = [m.message for t in trades for m in t.log if m.message]
-            raise RuntimeError(f"Individual leg rejected — {msgs[-2:] if msgs else 'no detail'}")
-
-    logger.info("[%s] Individual legs accepted — orderIds=%s", session_id, order_ids)
-    return {
-        "order_id": order_ids[0] if order_ids else -1,
-        "order_ids": order_ids,
-        "status": trades[0].orderStatus.status if trades else "Unknown",
-        "fills": [],
-        "entry_price": entry_price,
-        "profit_target": profit_target,
-        "stop_loss": stop_loss,
-        "mode": "individual_legs",
-    }
-
 
 async def place_bracket_order(
     *,
@@ -277,7 +195,10 @@ async def place_bracket_order(
             for leg_spec, contract in qualified_legs
         ]
 
-        # ── Entry order (transmit=False — send with profit-target child) ──
+        # ── Entry order (standalone DAY limit — no GTC profit-target child) ──
+        # GTC child orders accumulate across sessions and trigger IBKR Error 201
+        # ("riskless combination limit"). PositionManager owns all exits (50%
+        # profit, 2× stop, DTE close) — no need for a TWS-side target order.
         order_action = "BUY" if entry_price > 0 else "SELL"
         entry_order = LimitOrder(
             action=order_action,
@@ -286,28 +207,15 @@ async def place_bracket_order(
         )
         entry_order.orderRef = session_id[:40]
         entry_order.tif = "DAY"
-        entry_order.transmit = False
+        entry_order.transmit = True
         entry_order.nonGuaranteedFill = True  # required for combo orders on paper accounts
 
         entry_trade = ib.placeOrder(bag, entry_order)
         parent_id = entry_trade.order.orderId
 
-        # ── Profit target (GTC limit, opposite side of entry) ─────────────
-        exit_action = "SELL" if order_action == "BUY" else "BUY"
-        pt_order = LimitOrder(
-            action=exit_action,
-            totalQuantity=contracts,
-            lmtPrice=abs(round(profit_target, 2)),
-        )
-        pt_order.parentId = parent_id
-        pt_order.tif = "GTC"
-        pt_order.transmit = True  # transmits both parent + child atomically
-        pt_order.nonGuaranteedFill = True
-
-        ib.placeOrder(bag, pt_order)
-
         _PRICE_STEP_SEC  = 30    # seconds between price adjustments
         _MAX_PRICE_STEPS = 6     # 6 steps × 30s = 3 minutes total
+        _TICK            = 0.01  # minimum options tick size
         # Credit spreads (SELL): accept less credit each step → step price down
         # Debit spreads  (BUY):  pay more each step            → step price up
         # Use price_step_size not the $0.01 minimum tick — combo bid-ask is $0.15–$0.50 wide;
@@ -315,9 +223,9 @@ async def place_bracket_order(
         price_step = -price_step_size if order_action == "SELL" else +price_step_size
 
         logger.info(
-            "[%s] Bracket submitted — parentId=%d entry=%.2f target=%.2f "
-            "(stop=%.2f managed by MonitorAgent)",
-            session_id, parent_id, entry_price, profit_target, stop_loss,
+            "[%s] Entry submitted — orderId=%d entry=%.2f "
+            "(stop=%.2f target=%.2f managed by PositionManager)",
+            session_id, parent_id, entry_price, stop_loss, profit_target,
         )
 
         # ── Phase 1: wait for TWS acknowledgement (up to `timeout` seconds) ─
@@ -342,17 +250,25 @@ async def place_bracket_order(
                     or any("201" in m or "Riskless" in m or "riskless" in m for m in tws_msgs)
                 )
                 if is_201:
-                    logger.info("[%s] Error 201 detected — falling back to individual leg orders", session_id)
-                    return await _place_individual_legs(
-                        ib=ib,
-                        qualified_legs=qualified_legs,
-                        contracts=contracts,
-                        session_id=session_id,
-                        entry_price=entry_price,
-                        profit_target=profit_target,
-                        stop_loss=stop_loss,
-                        timeout=timeout,
+                    # Error 201: riskless combo limit — do NOT fall back to individual
+                    # legs. Legging in fills the short but leaves the long unhedged,
+                    # creating a naked short put that bypasses all risk controls.
+                    # Return a structured rejection; the session skips the trade.
+                    logger.warning(
+                        "[%s] Error 201: riskless combo disabled on this account — "
+                        "trade skipped (no leg fallback to prevent naked shorts)",
+                        session_id,
                     )
+                    return {
+                        "order_id": parent_id,
+                        "status": "Cancelled",
+                        "error_code": "201",
+                        "fills": [],
+                        "entry_price": entry_price,
+                        "profit_target": profit_target,
+                        "stop_loss": stop_loss,
+                        "reason": "Error 201 — riskless combination orders disabled on this account",
+                    }
                 raise RuntimeError(f"Bracket entry {parent_id} rejected: {status} — {reason}")
 
         # ── Phase 2: adaptive pricing — step toward market every 30s ─────────

@@ -38,6 +38,7 @@ from pydantic import BaseModel, ValidationError
 
 from ..core.config import AgoraSettings, get_settings
 from ..core.session_plan import SessionPlan
+from ..ops.llm_cost_log import log_call as _log_llm
 
 
 class _SessionPlanSchema(BaseModel):
@@ -993,6 +994,13 @@ Be direct. Flag anything that needs Rahul's attention with 🚨.
                 **({"extra_headers": extra_hdrs} if extra_hdrs else {}),
             ) as stream:
                 msg = await stream.get_final_message()
+            if hasattr(msg, "usage"):
+                _log_llm(
+                    str(self._settings.db_path), "CEO",
+                    self._settings.claude_model,
+                    msg.usage.input_tokens, msg.usage.output_tokens,
+                    purpose=report_type,
+                )
             for block in reversed(msg.content):
                 if hasattr(block, "text"):
                     return block.text.strip()

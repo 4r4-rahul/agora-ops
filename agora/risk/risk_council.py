@@ -31,6 +31,7 @@ from typing import Any
 
 from ..core.config import AgoraSettings, get_settings
 from ..core.models import StrategyType, TradeRecommendation
+from ..ops.strategy_health import is_pillar_paused
 
 _CREDIT_STRATEGIES = frozenset({
     StrategyType.BULL_PUT_SPREAD,
@@ -104,12 +105,24 @@ class RiskCouncil:
         portfolio_greeks: dict[str, float],
         open_positions: list[Any],
         spot: float = 0.0,
+        regime: str = "neutral",
     ) -> dict[str, Any]:
         """
         Full pre-trade risk check.
         Returns: {approved: bool, reason: str, checks: dict}
         """
         checks: dict[str, Any] = {}
+
+        # 0. StrategyHealth pause gate — blocks pillar/regime cells with bad rolling Sharpe
+        pillar_str = str(recommendation.pillar.value) if hasattr(recommendation.pillar, "value") else str(recommendation.pillar)
+        _paused, _pause_reason = is_pillar_paused(str(self._settings.db_path), pillar_str, regime)
+        checks["strategy_health"] = not _paused
+        if _paused:
+            return {
+                "approved": False,
+                "reason": f"StrategyHealth PAUSED [{pillar_str}/{regime}]: {_pause_reason}",
+                "checks": checks,
+            }
 
         # 1. Kill switch
         if self.is_kill_switch_active():

@@ -33,6 +33,7 @@ from typing import Any
 import anthropic
 
 from ..core.config import AgoraSettings, get_settings
+from ..ops.llm_cost_log import log_call as _log_llm
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +129,13 @@ class MacroSynthesizer:
                 timeout=anthropic.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0),
             )
             logger.info("MacroSynthesizer Claude call OK in %.1fs", _time.monotonic() - _t0)
+            if hasattr(response, "usage"):
+                _log_llm(
+                    str(self._settings.db_path), "MacroSynthesizer",
+                    self._settings.claude_brief_model,
+                    response.usage.input_tokens, response.usage.output_tokens,
+                    purpose="macro_synthesis",
+                )
 
             text_blocks = [b for b in response.content if b.type == "text"]
             if not text_blocks:
