@@ -224,6 +224,63 @@ tr.pos-detail-row td { padding: 0; background: var(--bg1); }
   color: var(--text2); font-size: 10px; text-align: center; padding: 18px 0;
 }
 
+/* ── Profit engine widget ── */
+.pe-section {
+  grid-column: 1 / -1;
+  border-top: 1px solid var(--border); padding-top: 10px; margin-top: 2px;
+}
+.pe-section h4 {
+  font-size: 9px; text-transform: uppercase; letter-spacing: .8px;
+  color: var(--text2); margin: 0 0 8px; font-weight: 700;
+  display: flex; align-items: center; gap: 8px;
+}
+.pe-type-badge {
+  font-size: 8px; font-weight: 700; letter-spacing: .5px; border-radius: 3px;
+  padding: 1px 5px; text-transform: uppercase;
+}
+.pe-credit { background: rgba(63,185,80,.15); color: var(--green); border: 1px solid rgba(63,185,80,.3); }
+.pe-debit  { background: rgba(88,166,255,.15); color: var(--blue);  border: 1px solid rgba(88,166,255,.3); }
+.pe-bar-wrap {
+  position: relative; height: 14px; background: var(--bg3);
+  border-radius: 4px; overflow: visible; margin-bottom: 18px;
+  border: 1px solid var(--border);
+}
+.pe-bar-fill {
+  position: absolute; left: 0; top: 0; height: 100%;
+  border-radius: 4px; transition: width .4s ease;
+}
+.pe-bar-fill-pos { background: linear-gradient(90deg, rgba(63,185,80,.4), rgba(63,185,80,.8)); }
+.pe-bar-fill-neg { background: linear-gradient(90deg, rgba(248,81,73,.8), rgba(248,81,73,.3)); }
+.pe-marker {
+  position: absolute; top: -3px; bottom: -3px; width: 2px; border-radius: 1px;
+  transform: translateX(-50%);
+}
+.pe-marker-floor  { background: var(--yellow); }
+.pe-marker-target { background: var(--blue); opacity: .8; }
+.pe-marker-now    { background: var(--green); width: 2px; }
+.pe-marker-now-neg{ background: var(--red);   width: 2px; }
+.pe-label {
+  position: absolute; top: 17px; transform: translateX(-50%);
+  font-size: 8px; color: var(--text2); white-space: nowrap; letter-spacing: .3px;
+}
+.pe-label-floor  { color: var(--yellow); }
+.pe-label-target { color: var(--blue); }
+.pe-label-now    { color: var(--green); }
+.pe-label-now-neg{ color: var(--red); }
+.pe-kpis {
+  display: flex; gap: 16px; flex-wrap: wrap; margin-top: 4px;
+}
+.pe-kpi { display: flex; flex-direction: column; gap: 2px; min-width: 60px; }
+.pe-kpi-label { font-size: 8px; text-transform: uppercase; letter-spacing: .6px; color: var(--text2); }
+.pe-kpi-value { font-size: 12px; font-weight: 700; color: var(--text); }
+.pe-rule-badge {
+  font-size: 9px; padding: 2px 7px; border-radius: 3px;
+  background: var(--bg3); border: 1px solid var(--border);
+  color: var(--text2); font-weight: 700; letter-spacing: .4px;
+  align-self: flex-end; margin-left: auto;
+}
+.pe-rule-close { color: var(--red); border-color: rgba(248,81,73,.4); background: rgba(248,81,73,.1); }
+
 /* ── WS feed ── */
 #feed-list {
   height: 100%; overflow-y: auto;
@@ -1338,6 +1395,84 @@ async function fetchPositions() {
         }
       }
 
+      // ── Profit engine widget ──
+      const pe = pos.profit_engine || null;
+      const peHtml = (() => {
+        if (!pe) return '';
+        const nowPct    = pe.profit_pct    || 0;  // % of max_gain (can be negative)
+        const hwmPct    = pe.hwm_pct       || 0;
+        const floorPct  = pe.ratchet_floor_pct || 0;
+        const targetPct = pe.effective_target_pct || 50;
+        const rule      = pe.last_rule || 'PENDING';
+        const isCredit  = pe.is_credit_spread;
+        const ptRet     = pe.aligned_pt_return || 0;
+        const fillBonus = pe.fill_bonus_pct   || 0;
+
+        // Bar: scale 0–100 represents 0%–100% of max_gain
+        // Fill: clamp to [0,100]; for negatives show empty bar + red "now" marker at 0
+        const fillW = Math.max(0, Math.min(100, nowPct));
+        const fillCls = nowPct >= 0 ? 'pe-bar-fill-pos' : 'pe-bar-fill-neg';
+        const floorLeft  = Math.max(0, Math.min(99, floorPct));   // floor marker pos
+        const targetLeft = Math.max(1, Math.min(99, targetPct));  // target marker pos
+        const nowLeft    = Math.max(0, Math.min(99, nowPct));     // now marker pos
+        const nowCls     = nowPct >= 0 ? 'pe-marker-now' : 'pe-marker-now-neg';
+        const nowLblCls  = nowPct >= 0 ? 'pe-label-now'  : 'pe-label-now-neg';
+        const ruleCls    = pe.should_close ? 'pe-rule-close' : '';
+
+        const fmtPct = v => `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`;
+
+        const floorMarker  = floorPct > 0
+          ? `<div class="pe-marker pe-marker-floor" style="left:${floorLeft}%"></div>
+             <div class="pe-label pe-label-floor" style="left:${floorLeft}%">Floor ${fmtPct(floorPct)}</div>` : '';
+        const targetMarker = `<div class="pe-marker pe-marker-target" style="left:${targetLeft}%"></div>
+             <div class="pe-label pe-label-target" style="left:${targetLeft}%">Target ${fmtPct(targetPct)}</div>`;
+        const nowMarker    = `<div class="pe-marker ${nowCls}" style="left:${nowLeft}%"></div>
+             <div class="pe-label ${nowLblCls}" style="left:${nowLeft}%">Now ${fmtPct(nowPct)}</div>`;
+
+        const ptNote = ptRet > 0
+          ? `<span style="font-size:9px;color:var(--yellow);margin-left:4px">PT +${ptRet.toFixed(0)}%</span>` : '';
+        const fillNote = fillBonus > 0
+          ? `<span style="font-size:9px;color:var(--green);margin-left:4px">Fill +${fillBonus.toFixed(1)}%</span>` : '';
+
+        return `
+          <div class="pe-section">
+            <h4>
+              Profit Engine
+              <span class="pe-type-badge ${isCredit ? 'pe-credit' : 'pe-debit'}">${isCredit ? 'Credit' : 'Debit'}</span>
+              ${ptNote}${fillNote}
+            </h4>
+            <div class="pe-bar-wrap">
+              <div class="pe-bar-fill ${fillCls}" style="width:${fillW}%"></div>
+              ${floorMarker}
+              ${targetMarker}
+              ${nowMarker}
+            </div>
+            <div class="pe-kpis">
+              <div class="pe-kpi">
+                <span class="pe-kpi-label">Now</span>
+                <span class="pe-kpi-value ${nowPct >= 0 ? 'pnl-pos' : 'pnl-neg'}">${fmtPct(nowPct)}</span>
+              </div>
+              <div class="pe-kpi">
+                <span class="pe-kpi-label">HWM</span>
+                <span class="pe-kpi-value" style="color:var(--blue)">${fmtPct(hwmPct)}</span>
+              </div>
+              <div class="pe-kpi">
+                <span class="pe-kpi-label">Floor</span>
+                <span class="pe-kpi-value" style="color:${floorPct > 0 ? 'var(--yellow)' : 'var(--text2)'}">${fmtPct(floorPct)}</span>
+              </div>
+              <div class="pe-kpi">
+                <span class="pe-kpi-label">Target</span>
+                <span class="pe-kpi-value" style="color:var(--blue)">${fmtPct(targetPct)}</span>
+              </div>
+              <div class="pe-kpi">
+                <span class="pe-kpi-label">Velocity</span>
+                <span class="pe-kpi-value" style="color:var(--text2);font-size:10px">${((pe.velocity_1h||0)*100).toFixed(2)}%/hr</span>
+              </div>
+              <div class="pe-rule-badge ${ruleCls}">${rule.replace(/_/g,' ')}</div>
+            </div>
+          </div>`;
+      })();
+
       const detailHtml = `
         <div class="pos-detail">
           <div class="detail-section">
@@ -1363,6 +1498,7 @@ async function fetchPositions() {
             <div class="detail-kv"><span class="dk">DTE</span><span class="dv" style="color:${dteCol}">${dte}d</span></div>
             <div class="detail-kv"><span class="dk">Status</span><span class="dv">${pos.status || 'open'}</span></div>
           </div>
+          ${peHtml}
           <div class="pos-charts-row">
             <div class="chart-mini">
               <div class="chart-mini-label">5-Day Price</div>

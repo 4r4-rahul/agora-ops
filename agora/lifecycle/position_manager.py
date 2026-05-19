@@ -86,6 +86,10 @@ class PositionManager:
         """Delegate to profit engine — called once per confirmed IBKR fill."""
         self._profit_engine.set_fill_quality(position_id, fill_bonus_pct)
 
+    def get_profit_engine_state(self, position_id: str) -> dict | None:
+        """Return serialisable profit engine snapshot for the dashboard."""
+        return self._profit_engine.get_state_snapshot(position_id)
+
     def _init_db(self) -> sqlite3.Connection:
         db_path = self._settings.db_path
         db_path.parent.mkdir(parents=True, exist_ok=True)

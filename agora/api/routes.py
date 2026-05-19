@@ -206,6 +206,9 @@ async def get_positions() -> JSONResponse:
         }
         if ibkr_entry:
             row["ibkr_market_value"] = round(ibkr_entry["market_value"], 2)
+        pe = session._position_mgr.get_profit_engine_state(pos.position_id)
+        if pe is not None:
+            row["profit_engine"] = pe
         data.append(row)
 
     return JSONResponse({

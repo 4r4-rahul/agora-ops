@@ -133,6 +133,8 @@ class PositionState:
     # Positive = we got a better-than-mid price (more credit / less debit).
     # Caller is responsible for sign: credit_spread → (fill-mid)/mid; debit → (mid-fill)/mid.
     fill_bonus_pct: float = 0.0
+    # Cached last evaluate() result — used by dashboard to expose engine state
+    last_decision: "ProfitDecision | None" = field(default=None, repr=False)
 
 
 # ── Decision output ─────────────────────────────────────────────────────────────
@@ -286,6 +288,51 @@ class IntelligentProfitEngine:
             )
 
     def evaluate(
+        self,
+        position: "OpenPosition",
+        realized_pnl_today: float,
+        short_dte_flat_target: float = 0.75,
+        credit_spread_flat_target: float = 0.50,
+        portfolio_daily_loss_limit: float = -999_999.0,
+    ) -> ProfitDecision:
+        """Public wrapper: calls _evaluate_inner() and caches the result for dashboard reads."""
+        decision = self._evaluate_inner(
+            position, realized_pnl_today,
+            short_dte_flat_target, credit_spread_flat_target,
+            portfolio_daily_loss_limit,
+        )
+        state = self._states.get(position.position_id)
+        if state is not None:
+            state.last_decision = decision
+        return decision
+
+    def get_last_decision(self, position_id: str) -> "ProfitDecision | None":
+        """Return the cached result of the last evaluate() call for a position."""
+        state = self._states.get(position_id)
+        return state.last_decision if state is not None else None
+
+    def get_state_snapshot(self, position_id: str) -> dict | None:
+        """Serialisable snapshot of engine state for API/dashboard consumption."""
+        state = self._states.get(position_id)
+        if state is None:
+            return None
+        d = state.last_decision
+        return {
+            "is_credit_spread":    state.is_credit_spread,
+            "dte_at_entry":        state.dte_at_entry,
+            "aligned_pt_return":   round(state.aligned_pt_return * 100, 1),
+            "fill_bonus_pct":      round(state.fill_bonus_pct * 100, 1),
+            "hwm_pct":             round((d.hwm_pct if d else state.hwm) * 100, 1),
+            "ratchet_floor_pct":   round((d.ratchet_stop_pct if d else state.ratchet_stop) * 100, 1),
+            "effective_target_pct": round((d.effective_target if d else 0.50) * 100, 1),
+            "profit_pct":          round((d.profit_pct if d else 0.0) * 100, 1),
+            "velocity_1h":         round(d.velocity_1h if d else 0.0, 4),
+            "last_rule":           d.rule if d else "PENDING",
+            "should_close":        d.should_close if d else False,
+            "close_reason":        d.reason if (d and d.should_close) else None,
+        }
+
+    def _evaluate_inner(
         self,
         position: "OpenPosition",
         realized_pnl_today: float,
