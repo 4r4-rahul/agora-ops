@@ -456,7 +456,8 @@ class NakedOptionsAgent:
 
     # ── Journal ───────────────────────────────────────────────────────────────
 
-    def journal(self, decision: NakedDecision, db_path: str, position_id: str = "") -> None:
+    def journal(self, decision: NakedDecision, db_path: str, position_id: str = "",
+                spot: float = 0.0) -> None:
         try:
             with sqlite3.connect(db_path, timeout=10) as conn:
                 conn.execute("PRAGMA journal_mode=WAL")
@@ -474,7 +475,7 @@ class NakedOptionsAgent:
                     decision.strategy,
                     rec.direction if rec else "",
                     datetime.now(timezone.utc).isoformat(),
-                    rec.legs[0].mid_price * 100 if rec else 0,   # spot not stored directly
+                    round(spot, 4),   # underlying spot at decision time (0.0 if unknown)
                     decision.strike,
                     str(rec.legs[0].expiration) if rec else "",
                     decision.dte,

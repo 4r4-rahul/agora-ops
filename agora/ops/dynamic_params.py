@@ -164,7 +164,11 @@ def compute_dynamic_params(
     # Peak earnings: weeks 3-6 of each quarter
     from datetime import date
     today = date.today()
-    week_of_quarter = (today.month % 3) * 4 + today.day // 7
+    # Month-within-quarter: Jan/Apr/Jul/Oct=0, Feb/May/Aug/Nov=1, Mar/Jun/Sep/Dec=2.
+    # (month % 3) is wrong — it collapses the 3rd month of each quarter to 0, flagging
+    # March and missing February (peak earnings). Use (month - 1) % 3.
+    month_in_quarter = (today.month - 1) % 3
+    week_of_quarter = month_in_quarter * 4 + today.day // 7
     in_earnings_season = 2 <= week_of_quarter <= 6
     if in_earnings_season:
         p.min_conviction_score = 55.0   # more catalysts available — lower bar

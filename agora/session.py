@@ -1502,7 +1502,7 @@ class AgoraSession:
                 )
 
                 # Journal every decision (filled or skipped)
-                agent.journal(decision, str(self._settings.db_path))
+                agent.journal(decision, str(self._settings.db_path), spot=spot)
 
                 if decision.recommendation is None:
                     if decision.outcome != "skipped" or decision.block_reason:
@@ -1537,7 +1537,7 @@ class AgoraSession:
                             spot=spot,
                             fill_price=fill_price,
                         )
-                        agent.journal(decision, str(self._settings.db_path), position_id or "")
+                        agent.journal(decision, str(self._settings.db_path), position_id or "", spot=spot)
                         self._exec_quality.record_fill(ticker, fill_price, decision.premium, decision.strategy)
                     elif order_status in ("Cancelled", "ApiCancelled", "Inactive"):
                         self._exec_quality.record_reject(
