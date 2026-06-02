@@ -512,6 +512,38 @@ async def reset_kill() -> JSONResponse:
     return JSONResponse({"status": "reset"})
 
 
+@router.get("/reconcile")
+async def reconcile_positions() -> JSONResponse:
+    """Leg-level reconciliation of the DB shadow book against the live IBKR account.
+
+    Read-only. Surfaces orphan legs (at IBKR, untracked in the DB), ghost legs (in the
+    DB but absent at IBKR — e.g. a spread's protective long leg that never filled, leaving
+    a naked short), and quantity mismatches. The old DB-vs-DB health check could not see
+    any of these.
+    """
+    session = get_session()
+    s = session._settings
+    db_path = str(s.db_path)
+    host = getattr(s, "ibkr_host", "127.0.0.1")
+    port = int(getattr(s, "ibkr_port", 7497))
+
+    def _run() -> dict:
+        import asyncio as _a
+        from agora.ops.position_reconciler import reconcile
+        _a.set_event_loop(_a.new_event_loop())  # ib_insync needs a loop in this worker thread
+        # Dedicated clientId so we never collide with the trading session's connections.
+        return reconcile(db_path, host, port, client_id=71).to_dict()
+
+    try:
+        report = await asyncio.to_thread(_run)
+    except Exception as exc:
+        logger.warning("Reconcile failed: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=503)
+    if not report.get("clean"):
+        logger.warning("Position reconciliation DIVERGENCE: %s", report.get("counts"))
+    return JSONResponse(report)
+
+
 @router.get("/market")
 async def get_market() -> JSONResponse:
     """
