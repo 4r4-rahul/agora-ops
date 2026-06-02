@@ -63,11 +63,18 @@ class RiskCouncil:
     def __init__(self, settings: AgoraSettings | None = None) -> None:
         self._settings = settings or get_settings()
         self._csuite_manager: Any = None   # CROAgent — set via register_csuite_manager()
+        self._circuit_breaker: Any = None  # set via register_circuit_breaker()
         self._db = self._init_db()
 
     def register_csuite_manager(self, manager: Any) -> None:
         """Wire the CROAgent as supervising executive."""
         self._csuite_manager = manager
+
+    def register_circuit_breaker(self, breaker: Any) -> None:
+        """Wire the circuit breaker so reset_kill_switch can re-anchor its daily-loss
+        baseline. Without this, a reset clears the flag but the breaker re-trips on the
+        same drawdown within one check cycle (~60s)."""
+        self._circuit_breaker = breaker
 
     def _init_db(self) -> sqlite3.Connection:
         db_path = self._settings.db_path
@@ -249,6 +256,13 @@ class RiskCouncil:
         """, (reset_by,))
         self._db.commit()
         logger.info("Kill switch RESET by %s", reset_by)
+        # Re-anchor the circuit breaker's daily-loss baseline so the same drawdown
+        # doesn't re-trip the switch on the next check cycle.
+        if self._circuit_breaker is not None:
+            try:
+                self._circuit_breaker.rebaseline_daily_loss(reason=f"kill-switch reset by {reset_by}")
+            except Exception as exc:
+                logger.warning("Circuit-breaker re-baseline on reset failed: %s", exc)
 
     def get_kill_switch_state(self) -> dict[str, Any]:
         row = self._db.execute("SELECT * FROM kill_switch WHERE id=1").fetchone()

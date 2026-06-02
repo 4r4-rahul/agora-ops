@@ -128,6 +128,28 @@ class CircuitBreakerAgent:
         """Wire the CROAgent as the supervising executive for alert escalation."""
         self._csuite_manager = manager
 
+    def rebaseline_daily_loss(self, reason: str = "") -> None:
+        """Re-anchor the daily-loss baseline to current unrealized P&L.
+
+        Called when an operator resets the kill switch: it acknowledges the loss so far
+        and zeroes the daily counter from now, so the breaker does not immediately
+        re-trip on the same drawdown. Without this, reset_kill_switch() clears the flag
+        but the next check cycle re-trips within ~60s.
+        """
+        from datetime import date
+        positions = self._position_mgr.get_open_positions() if self._position_mgr else []
+        total_unrealized = sum(p.unrealized_pnl for p in positions)
+        today_str = date.today().isoformat()
+        self._daily_unrealized_baseline = total_unrealized
+        self._baseline_date             = today_str
+        self._last_unrealized           = total_unrealized
+        self._last_unrealized_date      = today_str
+        self._save_baseline()
+        logger.info(
+            "CircuitBreaker: daily-loss baseline RE-ANCHORED to $%.0f%s",
+            total_unrealized, f" ({reason})" if reason else "",
+        )
+
     @property
     def vix_stress_mode(self) -> bool:
         return self._vix_stress_mode

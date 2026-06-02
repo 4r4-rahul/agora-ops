@@ -426,6 +426,8 @@ class AgoraSession:
         self._risk.register_csuite_manager(self._cro)
         self._compliance.register_csuite_manager(self._cro)
         self._circuit_breaker.register_csuite_manager(self._cro)
+        # Let kill-switch resets re-anchor the breaker's daily-loss baseline.
+        self._risk.register_circuit_breaker(self._circuit_breaker)
 
         # Intelligence / discovery sub-agents → CIO
         self._catalyst_agent.register_csuite_manager(self._cio)
