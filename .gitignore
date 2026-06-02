@@ -31,6 +31,21 @@ env/
 .env
 !.env.example
 
+# ── Databases & local runtime state (never commit) ──────────
+*.db
+*.db-journal
+*.db-wal
+*.sqlite
+*.sqlite3
+.agora/
+trade_journal.db
+performance_feedback.json
+backtest_results/
+
+# ── Local agent / tooling state ──────────────────────────────
+.claude/
+.agent_work/
+
 # ── Data (large, regenerable) ────────────────────────────────
 data/backtest_results.json
 data/snapshots.json
