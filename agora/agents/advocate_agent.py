@@ -398,28 +398,37 @@ class AdvocateAgent:
 # ── Pure helpers ──────────────────────────────────────────────────────────────
 
 def _parse_json_robust(text: str) -> dict:
-    """Parse JSON with recovery for truncated/malformed output.
+    """Parse a valid advocate verdict object, recovering from truncated/malformed output.
 
     Claude sometimes embeds tool-result text (news snippets, filing excerpts) into
     string fields without escaping newlines or quotes, producing unterminated strings.
-    Recovery strategy: find the last position where a valid JSON object ends and
-    truncate there, then return a PASS-defaulted shell so the trade is not silently killed.
+    Recovery strategy: find the longest prefix ending in '}' that parses into a dict
+    containing 'failure_modes' (the field the deterministic verdict is computed from).
+
+    Raises ValueError if no such object can be recovered. This is deliberate: a parse
+    failure must NOT fabricate a PASS — review() catches the raise, returns None, and the
+    session-level fail-closed gate blocks the un-reviewed trade. Returning a synthetic PASS
+    here would silently bypass the adversarial gate.
     """
+    def _valid(obj: object) -> bool:
+        return isinstance(obj, dict) and "failure_modes" in obj
+
     try:
-        return json.loads(text)
+        obj = json.loads(text)
+        if _valid(obj):
+            return obj
     except json.JSONDecodeError:
         pass
-    # Try progressively shorter suffixes until we find a valid close
+    # Truncation recovery: longest prefix ending in '}' that is a valid verdict object.
     for end in range(len(text), 0, -1):
         if text[end - 1] == '}':
             try:
-                return json.loads(text[:end])
+                obj = json.loads(text[:end])
             except json.JSONDecodeError:
                 continue
-    # Nothing parseable — return minimal shell so _compute_verdict can decide
-    return {"verdict": "PASS", "verdict_confidence": 50, "failure_modes": [],
-            "most_likely_scenario": "JSON parse failed — defaulting to PASS",
-            "parse_error": True}
+            if _valid(obj):
+                return obj
+    raise ValueError("advocate output not parseable into a verdict object with failure_modes")
 
 
 def _compute_verdict(failure_modes: list[dict], kill_conditions: list[str]) -> str:

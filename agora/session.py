@@ -1485,7 +1485,7 @@ class AgoraSession:
                 # Flow signals (optional, best-effort)
                 try:
                     flow_signals = await asyncio.wait_for(
-                        asyncio.to_thread(get_flow_signals, ticker), timeout=5.0
+                        get_flow_signals(ticker), timeout=5.0
                     )
                 except Exception:
                     flow_signals = None
@@ -1931,7 +1931,7 @@ class AgoraSession:
                 flow_signals = None
                 try:
                     flow_signals = await asyncio.wait_for(
-                        asyncio.to_thread(get_flow_signals, ticker), timeout=5.0
+                        get_flow_signals(ticker), timeout=5.0
                     )
                 except Exception:
                     pass

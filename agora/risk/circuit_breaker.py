@@ -72,6 +72,11 @@ class CircuitBreakerAgent:
         # Persisted to disk so mid-day restarts don't forgive morning losses.
         self._daily_unrealized_baseline: float | None = None
         self._baseline_date: str = ""
+        # Most recent unrealized mark, persisted every cycle. On a new day it becomes
+        # the baseline (a proxy for the prior session's close) so overnight gaps on
+        # held positions count toward today's loss instead of being forgiven.
+        self._last_unrealized: float | None = None
+        self._last_unrealized_date: str = ""
         self._baseline_path = (
             self._settings.db_path.parent / "cb_baseline.json"
         )
@@ -80,28 +85,41 @@ class CircuitBreakerAgent:
     # ── Baseline persistence ───────────────────────────────────────
 
     def _load_baseline(self) -> None:
-        """Load persisted baseline from prior session if date matches today."""
+        """Load persisted state. The intraday baseline is reused only within the same
+        calendar day (so a mid-day restart honours morning losses); the last mark is
+        always loaded so a fresh start on a new day can baseline against the prior
+        session's close — capturing overnight gaps rather than forgiving them."""
         try:
             import json
             from datetime import date
-            if self._baseline_path.exists():
-                data = json.loads(self._baseline_path.read_text())
-                if data.get("date") == date.today().isoformat():
-                    self._daily_unrealized_baseline = float(data["baseline"])
-                    self._baseline_date = data["date"]
-                    logger.info(
-                        "CircuitBreaker: loaded persisted baseline $%.0f for %s",
-                        self._daily_unrealized_baseline, self._baseline_date,
-                    )
+            if not self._baseline_path.exists():
+                return
+            data = json.loads(self._baseline_path.read_text())
+            if data.get("last_unrealized") is not None:
+                self._last_unrealized = float(data["last_unrealized"])
+                self._last_unrealized_date = data.get("last_date", "")
+            if data.get("date") == date.today().isoformat() and data.get("baseline") is not None:
+                self._daily_unrealized_baseline = float(data["baseline"])
+                self._baseline_date = data["date"]
+                logger.info(
+                    "CircuitBreaker: loaded persisted baseline $%.0f for %s",
+                    self._daily_unrealized_baseline, self._baseline_date,
+                )
         except Exception as exc:
             logger.debug("CircuitBreaker: could not load baseline: %s", exc)
 
     def _save_baseline(self) -> None:
-        """Persist current baseline so mid-day restarts honour morning losses."""
+        """Persist baseline + most-recent mark so restarts honour today's losses and
+        the next session can baseline against this session's close."""
         try:
             import json
             self._baseline_path.write_text(
-                json.dumps({"date": self._baseline_date, "baseline": self._daily_unrealized_baseline})
+                json.dumps({
+                    "date": self._baseline_date,
+                    "baseline": self._daily_unrealized_baseline,
+                    "last_unrealized": self._last_unrealized,
+                    "last_date": self._last_unrealized_date,
+                })
             )
         except Exception as exc:
             logger.debug("CircuitBreaker: could not save baseline: %s", exc)
@@ -182,13 +200,23 @@ class CircuitBreakerAgent:
 
         # Reset baseline each new calendar day, or on first check ever.
         if self._baseline_date != today_str or self._daily_unrealized_baseline is None:
-            self._daily_unrealized_baseline = total_unrealized
-            self._baseline_date             = today_str
-            self._save_baseline()
+            # Baseline against the PRIOR session's last mark (its close) when available,
+            # so an overnight gap on held positions counts toward today's loss. Only fall
+            # back to the current mark on the very first run with no prior history.
+            if self._last_unrealized is not None and self._last_unrealized_date != today_str:
+                self._daily_unrealized_baseline = self._last_unrealized
+            else:
+                self._daily_unrealized_baseline = total_unrealized
+            self._baseline_date = today_str
             logger.info(
                 "CircuitBreaker: daily unrealized baseline set to $%.0f for %s",
-                total_unrealized, today_str,
+                self._daily_unrealized_baseline, today_str,
             )
+
+        # Record this cycle's mark as the most recent (prior-close proxy for next day).
+        self._last_unrealized      = total_unrealized
+        self._last_unrealized_date = today_str
+        self._save_baseline()
 
         # Daily P&L = today's movement in unrealized + today's realized closes.
         daily_pnl = (total_unrealized - self._daily_unrealized_baseline) + realized_today

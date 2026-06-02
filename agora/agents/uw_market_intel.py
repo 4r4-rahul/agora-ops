@@ -278,13 +278,19 @@ class UWMarketIntelAgent:
                 "embeds":  json.loads(embeds_json or "[]"),
                 "author":  row["author"] or "",
             }
-            flagged, reason = _flag(msg, topic or "announcement")
-            self._update_flag(msg_id, flagged, reason)
+            # Already-flagged rows are send-retries from a prior failed cycle — reuse the
+            # stored verdict instead of re-evaluating. Unevaluated rows get flagged now.
+            if row["flagged"] == 1:
+                flagged, reason = True, (row["flag_reason"] or "flagged")
+            else:
+                flagged, reason = _flag(msg, topic or "announcement")
+                self._update_flag(msg_id, flagged, reason)
 
             if flagged and self._webhook:
                 summary = await self._realtime_summary(msg, topic or "announcement", reason)
-                if summary:
-                    await self._send(summary)
+                # Only mark sent on a confirmed successful post; otherwise leave
+                # realtime_sent=0 so the next cycle retries this flagged alert.
+                if summary and await self._send(summary):
                     self._mark_realtime_sent(msg_id)
 
     async def _realtime_summary(self, msg: dict, topic: str, reason: str) -> str | None:
@@ -366,28 +372,38 @@ class UWMarketIntelAgent:
 
     # ── Delivery ─────────────────────────────────────────────────────
 
-    async def _send(self, text: str) -> None:
+    async def _send(self, text: str) -> bool:
+        """Post to the Discord webhook. Returns True on success, False on failure so
+        callers can leave the alert un-marked and retry it on the next cycle."""
         if not self._webhook:
-            return
+            return False
         # Split at 1900 chars if needed
         chunks = [text[i:i + 1900] for i in range(0, len(text), 1900)]
         try:
             async with httpx.AsyncClient(timeout=10.0) as c:
                 for chunk in chunks:
-                    await c.post(self._webhook, json={"content": chunk})
+                    resp = await c.post(self._webhook, json={"content": chunk})
+                    resp.raise_for_status()
                     if len(chunks) > 1:
                         await asyncio.sleep(0.5)
+            return True
         except Exception as exc:
             logger.warning("UWMarketIntel Discord send error: %s", exc)
+            return False
 
     # ── DB helpers ───────────────────────────────────────────────────
 
     def _fetch_unflagged_pending(self) -> list[sqlite3.Row]:
+        # Pick up both unevaluated alerts (flagged=0) AND alerts already flagged but
+        # not yet successfully forwarded (flagged=1 AND realtime_sent=0) — the latter
+        # are retries for sends that failed on a prior cycle, so a flagged alert is
+        # never silently dropped on a transient LLM/webhook error.
         try:
             with sqlite3.connect(self._db, timeout=10) as conn:
                 conn.row_factory = sqlite3.Row
                 return conn.execute(
-                    "SELECT * FROM uw_alerts WHERE flagged=0 AND realtime_sent=0 "
+                    "SELECT * FROM uw_alerts "
+                    "WHERE (flagged=0 OR flagged=1) AND realtime_sent=0 "
                     "ORDER BY received_at_utc DESC LIMIT 50"
                 ).fetchall()
         except Exception:
