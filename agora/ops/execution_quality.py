@@ -51,10 +51,13 @@ class ExecutionQualityAgent:
         self._session_attempts = 0
         self._session_fills = 0
         self._session_rejects = 0
+        # Policy rejects (Error 201 — IBKR account restriction, not execution failure)
+        # Excluded from fill rate denominator so 201 storms don't trigger false alerts.
+        self._session_policy_rejects = 0
         self._session_reject_reasons: dict[str, int] = defaultdict(int)
         self._session_slippage: list[float] = []
 
-        # Alert threshold: if fill_rate drops below this, dispatch CEO alert
+        # Alert threshold: if effective_fill_rate drops below this, dispatch CEO alert
         self._fill_rate_alert_threshold = 0.30  # 30%
         self._alert_sent_this_session = False
 
@@ -125,6 +128,11 @@ class ExecutionQualityAgent:
         self._session_rejects += 1
         self._session_reject_reasons[error_code] += 1
 
+        # Error 201 = IBKR account policy (riskless combo limit) — not an execution failure.
+        # Tracked separately so fill rate denominator is not polluted by policy rejects.
+        if error_code == "201":
+            self._session_policy_rejects += 1
+
         # SQLite UPDATE doesn't support ORDER BY/LIMIT — use a subquery to target latest row
         self._db.execute(
             "UPDATE execution_quality SET outcome='reject', reject_code=?, reject_reason=? "
@@ -138,7 +146,7 @@ class ExecutionQualityAgent:
             ticker, error_code, reason[:120],
         )
 
-        # Check for Error 201 storm
+        # Check for Error 201 storm (5+ in session = systemic account config issue)
         if error_code == "201":
             self._session_reject_reasons["201_storm_count"] = (
                 self._session_reject_reasons.get("201_storm_count", 0) + 1
@@ -147,22 +155,32 @@ class ExecutionQualityAgent:
     # ── Stats ────────────────────────────────────────────────────────
 
     def get_session_stats(self) -> dict:
+        # effective_attempts excludes policy rejects (Error 201) — IBKR account restriction,
+        # not a reflection of execution quality.
+        effective_attempts = max(0, self._session_attempts - self._session_policy_rejects)
         fill_rate = (
             self._session_fills / self._session_attempts
             if self._session_attempts > 0 else 0.0
+        )
+        effective_fill_rate = (
+            self._session_fills / effective_attempts
+            if effective_attempts > 0 else 0.0
         )
         avg_slippage = (
             sum(self._session_slippage) / len(self._session_slippage)
             if self._session_slippage else 0.0
         )
         return {
-            "attempts":       self._session_attempts,
-            "fills":          self._session_fills,
-            "rejects":        self._session_rejects,
-            "fill_rate":      fill_rate,
-            "avg_slippage":   avg_slippage,
-            "reject_reasons": dict(self._session_reject_reasons),
-            "error_201_storm": self._session_reject_reasons.get("201", 0) >= 5,
+            "attempts":            self._session_attempts,
+            "fills":               self._session_fills,
+            "rejects":             self._session_rejects,
+            "policy_rejects":      self._session_policy_rejects,
+            "effective_attempts":  effective_attempts,
+            "fill_rate":           fill_rate,
+            "effective_fill_rate": effective_fill_rate,
+            "avg_slippage":        avg_slippage,
+            "reject_reasons":      dict(self._session_reject_reasons),
+            "error_201_storm":     self._session_reject_reasons.get("201", 0) >= 5,
         }
 
     def get_today_db_stats(self) -> dict:
@@ -181,13 +199,24 @@ class ExecutionQualityAgent:
         rejects  = m.get("reject", 0)
         timeouts = m.get("timeout", 0)
         total    = fills + rejects + timeouts
+
+        # Policy rejects (Error 201) count separately — not execution quality failures.
+        policy_rejects = self._db.execute(
+            "SELECT COUNT(*) FROM execution_quality WHERE attempt_date=? AND reject_code='201'",
+            (today,),
+        ).fetchone()[0]
+        effective_total = max(0, total - policy_rejects)
+
         return {
-            "fills":        fills,
-            "rejects":      rejects,
-            "timeouts":     timeouts,
-            "total":        total,
-            "fill_rate":    fills / total if total > 0 else None,
-            "timeout_rate": timeouts / total if total > 0 else None,
+            "fills":                fills,
+            "rejects":              rejects,
+            "policy_rejects":       policy_rejects,
+            "timeouts":             timeouts,
+            "total":                total,
+            "effective_total":      effective_total,
+            "fill_rate":            fills / total if total > 0 else None,
+            "effective_fill_rate":  fills / effective_total if effective_total > 0 else None,
+            "timeout_rate":         timeouts / total if total > 0 else None,
         }
 
     def count_ghost_fills_today(self, db_path: str) -> int:
@@ -261,15 +290,16 @@ class ExecutionQualityAgent:
         if stats["attempts"] == 0:
             return
 
-        fill_rate = stats["fill_rate"]
+        effective_fill_rate = stats["effective_fill_rate"]
+        policy_rejects = stats["policy_rejects"]
         summary = (
-            f"Execution Quality: {stats['fills']}/{stats['attempts']} fills "
-            f"({fill_rate:.0%}) | rejects={stats['rejects']} | "
-            f"slippage={stats['avg_slippage']:+.4f}/sh"
+            f"Execution Quality: {stats['fills']}/{stats['effective_attempts']} fills "
+            f"({effective_fill_rate:.0%} effective) | policy_rejects(201)={policy_rejects} "
+            f"| slippage={stats['avg_slippage']:+.4f}/sh"
         )
         logger.info(summary)
 
-        # Escalate Error 201 storm to CEO
+        # Escalate Error 201 storm to CEO (account config issue, not execution)
         if stats.get("error_201_storm") and not self._alert_sent_this_session:
             self._alert_sent_this_session = True
             reject_breakdown = ", ".join(
@@ -280,14 +310,16 @@ class ExecutionQualityAgent:
             await self._notify(
                 "critical",
                 f"🚨 IBKR Error 201 storm: {stats['reject_reasons'].get('201', 0)} "
-                f"consecutive rejections. Run OrphanOrderReconciler.\n"
+                f"policy rejections (riskless combo limit). Error 201s excluded from fill rate.\n"
                 f"Reject breakdown: {reject_breakdown}",
             )
 
-        elif fill_rate < self._fill_rate_alert_threshold and stats["attempts"] >= 5:
+        elif effective_fill_rate < self._fill_rate_alert_threshold and stats["effective_attempts"] >= 5:
             await self._notify(
                 "warning",
-                f"⚠️ Low fill rate: {fill_rate:.0%} ({stats['fills']}/{stats['attempts']}) | "
+                f"⚠️ Low fill rate: {effective_fill_rate:.0%} "
+                f"({stats['fills']}/{stats['effective_attempts']} effective attempts, "
+                f"{policy_rejects} policy rejects excluded) | "
                 f"Reject reasons: {stats['reject_reasons']}",
             )
 

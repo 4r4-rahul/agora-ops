@@ -13,7 +13,7 @@ Shadow mode (default):
 Live mode:
   BLOCK verdict stops submission. CAUTION is logged but execution continues.
 
-Model: claude-opus-4-7 with adaptive thinking (adversarial reasoning benefits from it)
+Model: claude-sonnet-4-6 (structured adversarial review — cost-efficient for high-frequency calls)
 Cost: ~$0.15/call × ≤5 trades/day ≈ $0.75/day (well under $5 budget)
 Schema: advocate_journal — managed by migrations/2026_05_phase2_journals.sql
 
@@ -32,14 +32,18 @@ from typing import Any
 
 import anthropic
 
-from agora.ops.llm_cost_log import log_call as _log_llm
+from agora.ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
 from agora.ops.payload_compressor import compress_payload as _compress
 from agora.ops.lessons_store import load_approved_lessons as _load_lessons
+from agora.mcp.sqlite_tools import SQLITE_TOOLS, sqlite_tool_handlers
+from agora.mcp.search_tools import SEARCH_TOOLS, search_tool_handlers
+from agora.mcp.flow_tools import FLOW_TOOLS, flow_tool_handlers
+from agora.mcp.tool_runner import run_with_tools
 
 logger = logging.getLogger(__name__)
 
 PROMPT_VERSION = "1.0.0"
-_MODEL = "claude-opus-4-7"
+_MODEL = "claude-sonnet-4-6"
 
 # ── System prompt (spec §13.2) ────────────────────────────────────────────────
 
@@ -100,25 +104,39 @@ C5. Your verdict_confidence is YOUR confidence that your failure mode analysis i
 
 OUTPUT — return exactly this JSON, no markdown, no prose:
 
+BREVITY — the verdict is computed deterministically from severity + probability_pct +
+already_addressed_by_kill_condition (C4), so the text fields are for the journal, not the
+decision. Be terse: every wasted word is wasted cost. Obey the per-field length caps below
+exactly. Specificity (numbers, strikes, dates) over adjectives — never pad to fill space.
+
 {
   "verdict": "PASS | CAUTION | BLOCK",
   "verdict_confidence_pct": <integer 40-90>,
-  "verdict_reasoning_one_line": "string",
+  "verdict_reasoning_one_line": "string, <= 20 words",
   "failure_modes": [
     {
-      "mode_name": "short descriptive name",
+      "mode_name": "short descriptive name, <= 6 words",
       "severity": "HIGH | MEDIUM | LOW",
       "probability_pct": <integer 5-95>,
-      "mechanism": "exactly how this causes a loss",
-      "trigger_conditions": ["specific observable triggers"],
+      "mechanism": "exactly how this causes a loss, <= 25 words",
+      "trigger_conditions": ["specific observable trigger, <= 10 words each — MAX 2 items"],
       "already_addressed_by_kill_condition": <boolean>
     },
     { "...mode 2..." },
     { "...mode 3..." }
   ],
-  "most_likely_loss_scenario": "narrative with specific price/time refs",
-  "recommendation_if_pass": "single suggested tweak or null"
+  "most_likely_loss_scenario": "narrative with specific price/time refs, <= 40 words",
+  "recommendation_if_pass": "single suggested tweak, <= 20 words, or null"
 }
+
+CREDIT SPREAD / PREMIUM SELLING — MANDATORY CALIBRATION:
+When strategy_type is BULL_PUT_SPREAD, BEAR_CALL_SPREAD, or IRON_CONDOR, the R/R ratio is INTENTIONALLY asymmetric (collecting $1 against $7-9 risk is NORMAL, not a failure). DO NOT flag "R/R asymmetry" or "high win rate required" as HIGH severity unless:
+  • Short-leg delta > 0.30 (probability of profit at expiry < 70%), OR
+  • Credit collected < 8% of spread width (degenerate structure, e.g. $0.40 on $10-wide spread)
+For these structures, evaluate the trade on probability-of-profit, expected value (credit × POP - max_loss × (1-POP)), and DTE-theta match, not on raw risk:reward ratio.
+
+DTE CALIBRATION — MANDATORY:
+The payload includes "today_date" and each leg includes "dte" (days to expiry, pre-computed). USE THESE FIELDS — do not compute DTE yourself. Common target DTE for credit spreads is 30-60 days.
 
 IMPORTANT: Do NOT let your role as adversary produce BLOCK verdicts that contradict C4 logic. If all three failure modes are MEDIUM, the verdict MUST be PASS even if you dislike the trade personally."""
 
@@ -193,26 +211,43 @@ class AdvocateAgent:
         verdict: AdvocateVerdict | None = None
         raw_output: dict = {}
 
+        # MCP tools: advocate can verify earnings dates, query its own history,
+        # check recent news — reduces hallucinated BLOCK verdicts
+        _db = str(self._settings.db_path)
+        _tavily_key = getattr(self._settings, "tavily_api_key", None)
+        _tools = SQLITE_TOOLS + SEARCH_TOOLS + FLOW_TOOLS
+        _handlers = {
+            **sqlite_tool_handlers(_db),
+            **search_tool_handlers(_tavily_key),
+            **flow_tool_handlers(),
+        }
+
+        _cached_system = [{"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}]
         try:
-            response = await self._client.messages.create(
+            response = await run_with_tools(
+                client=self._client,
                 model=_MODEL,
-                max_tokens=2048,
-                thinking={"type": "adaptive"},
-                system=_SYSTEM,
+                system=_cached_system,
                 messages=[{"role": "user", "content": _compress(payload)}],
-                timeout=anthropic.Timeout(connect=30.0, read=90.0, write=30.0, pool=30.0),
+                tools=_tools,
+                handlers=_handlers,
+                max_turns=3,
+                max_tokens=2000,
+                thinking={"type": "disabled"},
+                output_config={"effort": "medium"},
+                timeout=anthropic.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0),
             )
             latency_ms = int((time.monotonic() - t0) * 1000)
             in_tok  = response.usage.input_tokens  if response.usage else 0
             out_tok = response.usage.output_tokens if response.usage else 0
-            cost    = (in_tok * 5.0 + out_tok * 25.0) / 1_000_000
+            cost    = (in_tok * 3.0 + out_tok * 15.0) / 1_000_000  # Sonnet 4.6
 
             text_blocks = [b for b in response.content if b.type == "text"]
             raw_text = text_blocks[-1].text.strip() if text_blocks else "{}"
             if raw_text.startswith("```"):
                 raw_text = raw_text.split("```")[1].lstrip("json").strip()
 
-            raw_output = json.loads(raw_text)
+            raw_output = _parse_json_robust(raw_text)
             # Enforce deterministic verdict from failure mode analysis
             raw_output["verdict"] = _compute_verdict(
                 raw_output.get("failure_modes", []),
@@ -221,8 +256,9 @@ class AdvocateAgent:
             verdict = _parse_verdict(raw_output)
 
             try:
-                _log_llm(str(self._settings.db_path), "AdvocateAgent", _MODEL,
-                         in_tok, out_tok, purpose=f"advocate_{ticker}")
+                _log_msg(str(self._settings.db_path), "AdvocateAgent", _MODEL,
+                         response.usage, purpose=f"advocate_{ticker}",
+                         trace_id=decision_id)
             except Exception:
                 pass
 
@@ -267,21 +303,25 @@ class AdvocateAgent:
         ]
 
         # Summarize the recommendation
+        from datetime import date as _date
+        _today = _date.today()
         rec_summary = {}
         if recommendation:
             try:
                 rec_summary = {
-                    "strategy_type":     str(getattr(recommendation.strategy, "value",
-                                                      recommendation.strategy)),
-                    "direction":         recommendation.direction,
-                    "contracts":         recommendation.contracts,
+                    "strategy_type":      str(getattr(recommendation.strategy, "value",
+                                                       recommendation.strategy)),
+                    "direction":          recommendation.direction,
+                    "contracts":          recommendation.contracts,
                     "entry_debit_credit": recommendation.entry_debit_credit,
                     "max_profit":         recommendation.max_gain_dollars,
                     "max_loss":           recommendation.max_loss_dollars,
                     "rr_ratio":           recommendation.reward_risk_ratio,
+                    "today_date":         _today.isoformat(),
                     "legs": [
                         {"action": lg.action, "type": lg.option_type,
                          "strike": lg.strike, "expiry": str(lg.expiration),
+                         "dte": (lg.expiration - _today).days,
                          "mid": lg.mid_price, "delta": lg.delta}
                         for lg in recommendation.legs
                     ],
@@ -356,6 +396,31 @@ class AdvocateAgent:
 
 
 # ── Pure helpers ──────────────────────────────────────────────────────────────
+
+def _parse_json_robust(text: str) -> dict:
+    """Parse JSON with recovery for truncated/malformed output.
+
+    Claude sometimes embeds tool-result text (news snippets, filing excerpts) into
+    string fields without escaping newlines or quotes, producing unterminated strings.
+    Recovery strategy: find the last position where a valid JSON object ends and
+    truncate there, then return a PASS-defaulted shell so the trade is not silently killed.
+    """
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    # Try progressively shorter suffixes until we find a valid close
+    for end in range(len(text), 0, -1):
+        if text[end - 1] == '}':
+            try:
+                return json.loads(text[:end])
+            except json.JSONDecodeError:
+                continue
+    # Nothing parseable — return minimal shell so _compute_verdict can decide
+    return {"verdict": "PASS", "verdict_confidence": 50, "failure_modes": [],
+            "most_likely_scenario": "JSON parse failed — defaulting to PASS",
+            "parse_error": True}
+
 
 def _compute_verdict(failure_modes: list[dict], kill_conditions: list[str]) -> str:
     """Deterministic verdict per spec §13.2 C4 — not delegated to the LLM."""

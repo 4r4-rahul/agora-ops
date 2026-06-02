@@ -32,8 +32,10 @@ import anthropic
 import httpx
 
 from ..core.config import AgoraSettings, get_settings
-from ..ops.llm_cost_log import log_call as _log_llm
+from ..ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
 from ..core.models import Catalyst, CatalystType
+from ..mcp.edgar_tools import edgar_tool_handlers
+from ..mcp.search_tools import search_tool_handlers
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +96,12 @@ class CatalystDiscoveryAgent:
         self._recent_catalysts: list[dict] = []   # rolling buffer for CIO reporting
         # Persist seen hashes to SQLite so session restart doesn't re-process old 8-Ks
         self._db = self._init_seen_db()
+        # MCP enrichment tools — insider trades + news verification
+        _edgar_agent = getattr(settings or get_settings(), "edgar_user_agent",
+                               "AGORA Trading System rahulvari2021@gmail.com")
+        _tavily_key  = getattr(settings or get_settings(), "tavily_api_key", None)
+        self._edgar  = edgar_tool_handlers(_edgar_agent)
+        self._search = search_tool_handlers(_tavily_key)
 
     def register_csuite_manager(self, manager: Any) -> None:
         """Wire the CIOAgent as supervising executive."""
@@ -227,6 +235,21 @@ class CatalystDiscoveryAgent:
             return
 
         self._daily_new_tickers.add(catalyst.ticker)
+
+        # MCP enrichment: check insider trades and news for additional conviction
+        try:
+            insider_result = await self._edgar["get_insider_trades"](
+                ticker=catalyst.ticker, days=14
+            )
+            insider = insider_result[0] if insider_result else {}
+            if insider.get("signal") == "CLUSTER_BUY (3+ insiders)":
+                catalyst.direction = "bullish"
+                catalyst.strength  = "strong"
+                logger.info("Insider cluster buy detected for %s — upgrading to strong bullish",
+                            catalyst.ticker)
+        except Exception:
+            pass
+
         logger.info(
             "CATALYST: %s | %s | %s | %s",
             catalyst.ticker, catalyst.catalyst_type, catalyst.strength, catalyst.direction
@@ -299,8 +322,8 @@ class CatalystDiscoveryAgent:
                 messages=[{"role": "user", "content": user_msg}],
             )
             if hasattr(response, "usage"):
-                _log_llm(str(self._settings.db_path), "CatalystAgent", "claude-haiku-4-5-20251001",
-                         response.usage.input_tokens, response.usage.output_tokens, purpose="filing_classify")
+                _log_msg(str(self._settings.db_path), "CatalystAgent", "claude-haiku-4-5-20251001",
+                         response.usage, purpose="filing_classify")
 
             import json as _json
             raw = response.content[0].text.strip()

@@ -24,6 +24,8 @@ class StrategyType(StrEnum):
     LONG_CALL           = "long_call"
     LONG_PUT            = "long_put"
     CASH_SECURED_PUT    = "cash_secured_put"
+    NAKED_PUT           = "naked_put"           # sell uncovered put — theta + vol premium
+    NAKED_CALL          = "naked_call"          # sell uncovered call — directional/vol
 
 
 class StrategyPillar(StrEnum):

@@ -217,7 +217,7 @@ AGORA Trading Universe (what we actually scan):
 MacroSynthesizer — Output Schema (your primary upstream dependency):
   Runs once at 7:00 AM ET; refreshes intraday if SPY moves > 1% OR VIX moves > 2 pts.
   Cooldown: 120 minutes minimum between refreshes (_MACRO_REFRESH_COOLDOWN_MIN).
-  Model: claude-opus-4-7 with adaptive thinking + prompt caching on system prompt.
+  Model: claude-opus-4-8 with adaptive thinking + prompt caching on system prompt.
   Output (MacroContext dataclass):
     macro_stance:   "risk_on" | "risk_off" | "neutral"
     confidence:     0.0–1.0 (Claude's calibrated certainty in the stance)

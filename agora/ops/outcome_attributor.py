@@ -619,7 +619,7 @@ def get_promotion_readiness(db_path: str) -> dict[str, Any]:
                     "avg_pnl": s_avg_pnl,
                     "threshold_attributed": 40,
                     "threshold_win_rate": 0.55,
-                    "note": "vs_rules_engine_pnl counterfactual not yet computed",
+                    "note": "rules engine counterfactual computed after first 10 closed trades" if sn < 10 else None,
                     "ready": sn >= 40 and s_hit is not None and s_hit >= 0.55,
                     "status": (
                         "READY" if (sn >= 40 and s_hit and s_hit >= 0.55)
@@ -691,13 +691,15 @@ def get_promotion_readiness(db_path: str) -> dict[str, Any]:
 
 class ScheduledAttributor:
     """
-    Background task that owns three weekly/6-hourly jobs:
+    Background task that owns four weekly/6-hourly jobs:
 
     1. Attribution patrol (every 6h) — attributes closed trades to agent journals,
        computes Brier score calibration.
     2. Lesson synthesis — triggered by N new attributions OR weekly timer.
     3. ConvictionCalibrator — runs weekly, writes calibration_report.json,
        alerts via Discord webhook if configured.
+    4. PerformanceAnalystAgent — runs weekly, cross-agent meta-analysis,
+       proposes lessons invisible to per-agent synthesis, sends Discord DM digest.
 
     Also checks shadow-mode promotion thresholds after each attribution pass
     and sends Discord alerts when an agent is ready to promote.
@@ -711,8 +713,9 @@ class ScheduledAttributor:
         self._webhook    = alert_webhook_url
         self._running    = False
         self._total_attributed_since_last_lesson = 0
-        self._last_lesson_time  = 0.0   # epoch seconds
-        self._last_calibration_time = 0.0
+        self._last_lesson_time        = 0.0   # epoch seconds
+        self._last_calibration_time   = 0.0
+        self._last_perf_analysis_time = 0.0
 
     def set_webhook(self, url: str | None) -> None:
         self._webhook = url
@@ -742,6 +745,10 @@ class ScheduledAttributor:
                 if (now - self._last_calibration_time) >= CALIBRATION_INTERVAL_SEC:
                     await self._run_calibrator()
                     self._last_calibration_time = now
+                # Weekly cross-agent performance analysis
+                if (now - self._last_perf_analysis_time) >= CALIBRATION_INTERVAL_SEC:
+                    await self._run_performance_analysis()
+                    self._last_perf_analysis_time = now
             except Exception as exc:
                 logger.error("ScheduledAttributor error: %s", exc)
             await asyncio.sleep(PATROL_INTERVAL_SEC)
@@ -758,6 +765,30 @@ class ScheduledAttributor:
             await gen.generate_all()
         except Exception as exc:
             logger.warning("LessonsGenerator skipped: %s", exc)
+
+    async def _run_performance_analysis(self) -> None:
+        """Run PerformanceAnalystAgent weekly — cross-agent meta-analysis + Discord digest."""
+        try:
+            from agora.agents.performance_analyst import PerformanceAnalystAgent
+            agent  = PerformanceAnalystAgent(db_path=self._db_path)
+            result = await agent.analyze()
+            digest = result.get("digest", "")
+            n      = result.get("lessons_written", 0)
+            if digest:
+                await self._send_webhook(digest)
+            elif n > 0:
+                await self._send_webhook(
+                    f"📚 PerformanceAnalyst: {n} cross-agent lesson(s) pending review. "
+                    f"Reply `!lessons` to see them."
+                )
+            # Surface any calibration flags as additional alerts
+            for flag in result.get("calibration_flags", []):
+                if flag.get("severity") == "high":
+                    await self._send_webhook(
+                        f"⚠️ **Calibration flag [{flag.get('agent','?')}]:** {flag.get('issue','?')}"
+                    )
+        except Exception as exc:
+            logger.warning("PerformanceAnalystAgent skipped: %s", exc)
 
     # ── Promotion alerts ──────────────────────────────────────────────────────
 
@@ -824,4 +855,4 @@ class ScheduledAttributor:
                 for chunk in chunks:
                     await client.post(self._webhook, json={"content": chunk})
         except Exception as exc:
-            logger.warning("Attribution webhook failed: %s", exc)
+            logger.warning("Attribution webhook failed: %s", repr(exc))

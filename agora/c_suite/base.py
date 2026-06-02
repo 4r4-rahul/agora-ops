@@ -67,7 +67,7 @@ class ExecutiveAgent:
 
     TITLE: str = "Executive"
     BRIEF_CADENCE: int = 4          # hours between briefs
-    PATROL_INTERVAL_SEC: int = 1800  # 30 min patrol cadence
+    PATROL_INTERVAL_SEC: int = 3600  # 60 min patrol cadence
 
     def __init__(
         self,

@@ -114,7 +114,10 @@ async def submit_trade(rec: Any, settings: Any, session_id: str) -> dict:
     )
 
     try:
-        from trading_platform.services.ibkr_client import place_bracket_order
+        from trading_platform.services.ibkr_client import (
+            place_bracket_order,
+            place_legs_individually,
+        )
     except ImportError as exc:
         raise RuntimeError(
             "ib_insync is not installed or ibkr_client is unavailable"
@@ -133,10 +136,21 @@ async def submit_trade(rec: Any, settings: Any, session_id: str) -> dict:
         client_id=settings.ibkr_client_id,
         price_step_size=getattr(settings, "pricing_step_size", 0.05),
     )
+
+    # Paper mode: submit each leg individually to bypass the IBKR riskless-combination
+    # order limit (Error 201). Individual option orders are not classified as "riskless
+    # combination orders" and work for all tickers including single-name equities.
+    # Live mode: always use BAG combo (atomic fill guarantee, no leg gap risk).
+    if settings.trading_mode == "paper":
+        fn = place_legs_individually
+        logger.info("PAPER mode: using leg-by-leg submission for %s (avoids Error 201)", rec.ticker)
+    else:
+        fn = place_bracket_order
+
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(
         _IBKR_EXECUTOR,
-        lambda: _run_in_new_loop(place_bracket_order(**kwargs)),
+        lambda: _run_in_new_loop(fn(**kwargs)),
     )
 
 

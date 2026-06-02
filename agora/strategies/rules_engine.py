@@ -47,6 +47,18 @@ class StrategyRulesEngine:
     def __init__(self, settings: AgoraSettings | None = None) -> None:
         self._settings = settings or get_settings()
 
+    @staticmethod
+    def _dynamic_rr_floor(iv_rank: float | None, vix: float | None) -> float:
+        """Scale R/R floor with IV environment — low IV accepts leaner setups."""
+        ivr = iv_rank if iv_rank is not None else 50.0
+        if ivr >= 80:
+            return 0.15   # premium-rich: demand quality
+        if ivr >= 55:
+            return 0.12   # elevated: decent premium available
+        if ivr >= 30:
+            return 0.10   # normal: baseline
+        return 0.08        # thin credit: accept lean setups to stay active
+
     def build_recommendation(
         self,
         conviction: ConvictionScore,
@@ -54,6 +66,9 @@ class StrategyRulesEngine:
         options_chain: dict[str, Any],   # {expiry_str: {calls: df, puts: df}}
         gex: GexSignal | None = None,
         direction_override: str | None = None,  # "bullish" | "bearish" | None
+        iv_rank: float | None = None,
+        vix: float | None = None,
+        dynamic_params: Any | None = None,  # DynamicParams — overrides config defaults
     ) -> TradeRecommendation | None:
         """
         Select strategy and strikes based on conviction and market state.
@@ -64,8 +79,19 @@ class StrategyRulesEngine:
         if spot <= 0:
             return None
 
+        # Apply dynamic parameters when provided — override config defaults
+        if dynamic_params is not None:
+            eff_short_delta = dynamic_params.short_delta_target
+            eff_stop_loss   = dynamic_params.stop_loss_multiplier
+            eff_dte_adj     = dynamic_params.dte_adjustment
+        else:
+            eff_short_delta = self._settings.short_delta_target
+            eff_stop_loss   = self._settings.stop_loss_multiplier
+            eff_dte_adj     = 0
+
         direction = direction_override or self._infer_direction(conviction, gex)
-        strategy_type, target_dte = self._select_strategy(conviction, direction, gex)
+        strategy_type, base_dte = self._select_strategy(conviction, direction, gex)
+        target_dte = max(7, base_dte + eff_dte_adj)
 
         # Find the right expiry
         expiry, chain_slice = self._select_expiry(options_chain, target_dte)
@@ -73,8 +99,9 @@ class StrategyRulesEngine:
             logger.debug("No suitable expiry found for %s at %d DTE", conviction.ticker, target_dte)
             return None
 
-        # Build legs
-        legs = self._build_legs(strategy_type, direction, spot, chain_slice, expiry)
+        # Build legs — use dynamic delta if provided
+        legs = self._build_legs(strategy_type, direction, spot, chain_slice, expiry,
+                                short_delta=eff_short_delta)
         if not legs:
             logger.info("No legs built for %s | strategy=%s expiry=%s spot=%.2f",
                         conviction.ticker, strategy_type.value, expiry, spot)
@@ -90,18 +117,26 @@ class StrategyRulesEngine:
         max_gain   = self._max_gain(strategy_type, debit_credit, width)
         rr_ratio   = abs(max_gain / max_loss) if max_loss != 0 else 0.0
 
-        if rr_ratio < 0.10:   # floor: collect at least 10% of spread width as premium
-            logger.info("R/R ratio %.2f too low for %s (max_gain=%.0f max_loss=%.0f width=%.1f)",
-                        rr_ratio, conviction.ticker, max_gain, max_loss, width)
+        rr_floor = self._dynamic_rr_floor(iv_rank, vix)
+        if rr_ratio < rr_floor:
+            logger.info(
+                "R/R ratio %.2f too low for %s — below dynamic floor %.2f "
+                "(IVR=%s vix=%s max_gain=%.0f max_loss=%.0f width=%.1f)",
+                rr_ratio, conviction.ticker, rr_floor,
+                f"{iv_rank:.0f}" if iv_rank is not None else "n/a",
+                f"{vix:.1f}" if vix is not None else "n/a",
+                max_gain, max_loss, width,
+            )
             return None
 
-        # Minimum absolute credit floor — thin credits (<$0.50/sh) cause IBKR leg rejections
-        # and are not worth the execution risk vs. the reward
+        # Minimum absolute credit floor — thin credits cause IBKR leg rejections in live;
+        # configurable via min_credit_per_share (lower in paper mode for validation).
         if debit_credit < 0:  # credit spread
             credit_per_share = abs(debit_credit) / 100
-            if credit_per_share < 0.50:
-                logger.info("MIN CREDIT gate: %s credit=%.2f/sh < $0.50 floor — skip",
-                            conviction.ticker, credit_per_share)
+            credit_floor = self._settings.min_credit_per_share
+            if credit_per_share < credit_floor:
+                logger.info("MIN CREDIT gate: %s credit=%.2f/sh < $%.2f floor — skip",
+                            conviction.ticker, credit_per_share, credit_floor)
                 return None
 
         # Cost-to-width gate: debit spreads where the premium exceeds the max allowed
@@ -135,7 +170,7 @@ class StrategyRulesEngine:
             max_gain_dollars=round(max_gain * contracts, 2),
             reward_risk_ratio=round(rr_ratio, 3),
             breakeven_price=self._breakeven(strategy_type, legs),
-            stop_loss_pct=self._settings.stop_loss_multiplier,
+            stop_loss_pct=eff_stop_loss,
             target_dte_close=self._settings.target_dte_close,
             conviction_score=conviction.total_score,
             size_multiplier=conviction.size_multiplier,
@@ -192,11 +227,13 @@ class StrategyRulesEngine:
             else:
                 return StrategyType.BEAR_PUT_SPREAD, 30
 
-        # Default: VOL_PREMIUM — credit spread
+        # Default: VOL_PREMIUM — credit spread at 30 DTE (theta accelerates sharply
+        # after 30 DTE; using 45 DTE pushes to the 66-90 bracket which has insufficient
+        # credit/width ratio for positive EV at standard 20-delta short)
         if direction == "bullish" or direction == "neutral":
-            return StrategyType.BULL_PUT_SPREAD, self._settings.target_dte_entry
+            return StrategyType.BULL_PUT_SPREAD, 30
         else:
-            return StrategyType.BEAR_CALL_SPREAD, self._settings.target_dte_entry
+            return StrategyType.BEAR_CALL_SPREAD, 30
 
     # ── Expiry selection ───────────────────────────────────────────
 
@@ -245,9 +282,11 @@ class StrategyRulesEngine:
         spot: float,
         chain: dict,
         expiry: date,
+        short_delta: float | None = None,
     ) -> list[SpreadLeg]:
         calls = chain.get("calls")
         puts = chain.get("puts")
+        sd = short_delta if short_delta is not None else self._settings.short_delta_target
 
         try:
             if strategy == StrategyType.BULL_CALL_SPREAD:
@@ -255,11 +294,11 @@ class StrategyRulesEngine:
             elif strategy == StrategyType.BEAR_PUT_SPREAD:
                 return self._bear_put_spread(puts, spot, expiry)
             elif strategy == StrategyType.BULL_PUT_SPREAD:
-                return self._bull_put_spread(puts, spot, expiry)
+                return self._bull_put_spread(puts, spot, expiry, short_delta=sd)
             elif strategy == StrategyType.BEAR_CALL_SPREAD:
-                return self._bear_call_spread(calls, spot, expiry)
+                return self._bear_call_spread(calls, spot, expiry, short_delta=sd)
             elif strategy == StrategyType.IRON_CONDOR:
-                return self._iron_condor(calls, puts, spot, expiry)
+                return self._iron_condor(calls, puts, spot, expiry, short_delta=sd)
             else:
                 return []
         except Exception as exc:
@@ -288,12 +327,14 @@ class StrategyRulesEngine:
             self._make_leg(puts, short_strike, "put", "sell", expiry, spot),
         ]
 
-    def _bull_put_spread(self, puts: Any, spot: float, expiry: date) -> list[SpreadLeg]:
+    def _bull_put_spread(self, puts: Any, spot: float, expiry: date,
+                         short_delta: float | None = None) -> list[SpreadLeg]:
         """Sell OTM put (20-delta), buy further OTM put for defined risk."""
+        sd = short_delta if short_delta is not None else self._settings.short_delta_target
         # Only consider OTM puts (strike < spot) — ITM puts cause IBKR GTL rejection
         otm_puts = puts[puts["strike"] < spot * 0.995] if spot > 0 else puts
         short_strike = self._best_credit_per_delta_short(
-            otm_puts, self._settings.short_delta_target, "put", wing_direction=-1, spot=spot, expiry=expiry
+            otm_puts, sd, "put", wing_direction=-1, spot=spot, expiry=expiry
         )
         long_strike  = self._spread_width_strike(otm_puts, short_strike, "put", -1)
         if not short_strike or not long_strike or short_strike <= long_strike:
@@ -303,12 +344,14 @@ class StrategyRulesEngine:
             self._make_leg(puts, long_strike, "put", "buy", expiry, spot),
         ]
 
-    def _bear_call_spread(self, calls: Any, spot: float, expiry: date) -> list[SpreadLeg]:
+    def _bear_call_spread(self, calls: Any, spot: float, expiry: date,
+                          short_delta: float | None = None) -> list[SpreadLeg]:
         """Sell OTM call (20-delta), buy further OTM call."""
+        sd = short_delta if short_delta is not None else self._settings.short_delta_target
         # Only consider OTM calls (strike > spot) — ITM calls cause IBKR GTL rejection
         otm_calls = calls[calls["strike"] > spot * 1.005] if spot > 0 else calls
         short_strike = self._best_credit_per_delta_short(
-            otm_calls, self._settings.short_delta_target, "call", wing_direction=+1, spot=spot, expiry=expiry
+            otm_calls, sd, "call", wing_direction=+1, spot=spot, expiry=expiry
         )
         long_strike  = self._spread_width_strike(otm_calls, short_strike, "call", +1)
         if not short_strike or not long_strike or short_strike >= long_strike:
@@ -318,15 +361,17 @@ class StrategyRulesEngine:
             self._make_leg(calls, long_strike, "call", "buy", expiry, spot),
         ]
 
-    def _iron_condor(self, calls: Any, puts: Any, spot: float, expiry: date) -> list[SpreadLeg]:
+    def _iron_condor(self, calls: Any, puts: Any, spot: float, expiry: date,
+                     short_delta: float | None = None) -> list[SpreadLeg]:
         """Sell 20-delta strangle, buy wings. Each wing optimized for credit-per-delta."""
+        sd = short_delta if short_delta is not None else self._settings.short_delta_target
         otm_puts  = puts[puts["strike"]   < spot * 0.995] if spot > 0 else puts
         otm_calls = calls[calls["strike"] > spot * 1.005] if spot > 0 else calls
         short_put = self._best_credit_per_delta_short(
-            otm_puts, self._settings.short_delta_target, "put", wing_direction=-1, spot=spot, expiry=expiry
+            otm_puts, sd, "put", wing_direction=-1, spot=spot, expiry=expiry
         )
         short_call = self._best_credit_per_delta_short(
-            otm_calls, self._settings.short_delta_target, "call", wing_direction=+1, spot=spot, expiry=expiry
+            otm_calls, sd, "call", wing_direction=+1, spot=spot, expiry=expiry
         )
         if not short_put or not short_call:
             return []

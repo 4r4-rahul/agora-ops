@@ -51,6 +51,8 @@ class DisagreementResolver:
     """
 
     def __init__(self) -> None:
+        from agora.core.config import get_settings
+        self._settings = get_settings()
         self._session_calls: int = 0
         self._session_no_trades: int = 0
         self._session_gates: dict[str, int] = {}
@@ -103,6 +105,7 @@ class DisagreementResolver:
         catalyst: SignalInput | None,
         regime: str = "normal",
         total_conviction: float = 0.0,
+        supplementary: list[SignalInput] | None = None,
     ) -> dict[str, Any]:
         """
         Resolve three signals into a size multiplier and gate.
@@ -131,6 +134,8 @@ class DisagreementResolver:
         signals = [macro, microstructure]
         if catalyst and catalyst.active:
             signals.append(catalyst)
+        if supplementary:
+            signals.extend(s for s in supplementary if s.active)
 
         directions = [s.direction for s in signals if s.active]
         if not directions:
@@ -142,10 +147,10 @@ class DisagreementResolver:
         bearish_count = directions.count("bearish")
         n = len(directions)
 
-        # Determine consensus direction
-        if bullish_count > bearish_count and bullish_count >= n // 2 + 1:
+        # Determine consensus direction — simple majority (≥ 1 of 2 agreers required)
+        if bullish_count > bearish_count and bullish_count >= math.ceil(n / 2):
             consensus_dir = "bullish"
-        elif bearish_count > bullish_count and bearish_count >= n // 2 + 1:
+        elif bearish_count > bullish_count and bearish_count >= math.ceil(n / 2):
             consensus_dir = "bearish"
         else:
             consensus_dir = "neutral"
@@ -167,8 +172,8 @@ class DisagreementResolver:
             weight_sum    += w
         avg_conf = weighted_conf / weight_sum if weight_sum > 0 else 0.0
 
-        # Dynamic minimum agreers: 60% of active signals, rounded up
-        min_agreers = math.ceil(n * 0.6)
+        # Dynamic minimum agreers: simple majority (50%) — 1 of 2 is sufficient
+        min_agreers = max(1, math.ceil(n * 0.5))
 
         # Map agreement to multiplier using regime-conditional thresholds
         if consensus_dir == "neutral" or agreers < min_agreers:
@@ -198,10 +203,11 @@ class DisagreementResolver:
             reason = f"{agreers}/{n} agree {consensus_dir} — standard size"
 
         # Hard conviction floor
-        if multiplier > 0 and total_conviction < 40:
+        floor = self._settings.disagreement_resolver_floor
+        if multiplier > 0 and total_conviction < floor:
             multiplier = 0.0
             gate   = "no_trade"
-            reason = f"Conviction score {total_conviction:.0f} below minimum 40"
+            reason = f"Conviction score {total_conviction:.0f} below minimum {floor:.0f}"
 
         # Regime haircut (risk_off / high_volatility only)
         if multiplier > 0 and haircut < 1.0:

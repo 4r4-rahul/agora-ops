@@ -180,15 +180,18 @@ def _fmt_lessons(db_path: str) -> str:
     try:
         with sqlite3.connect(db_path) as conn:
             rows = conn.execute(
-                "SELECT id, agent_name, lesson_text, confidence FROM agent_lessons "
-                "WHERE approved IS NULL ORDER BY created_at DESC LIMIT 10"
+                """SELECT lesson_id, agent_name, lesson_text, confidence_in_lesson
+                   FROM agent_lessons
+                   WHERE human_approved IS NULL AND active = 1
+                   ORDER BY created_at_utc DESC LIMIT 10"""
             ).fetchall()
         if not rows:
-            return "📭 No pending lessons."
+            return "No pending lessons."
         lines = ["**Pending Lessons** (reply `!approve <id>` or `!reject <id>`)"]
         for lid, agent, text, conf in rows:
             short = text[:120] + "…" if len(text) > 120 else text
-            lines.append(f"`[{lid}]` **{agent}** (conf={conf:.0%})\n  {short}")
+            conf_str = f"{conf:.0%}" if conf is not None else "?"
+            lines.append(f"`[{lid}]` **{agent}** (conf={conf_str})\n  {short}")
         return "\n".join(lines)
     except Exception as exc:
         return f"⚠️ lessons error: {exc}"
@@ -198,10 +201,10 @@ def _approve_lesson(db_path: str, lesson_id: int) -> str:
     try:
         with sqlite3.connect(db_path) as conn:
             conn.execute(
-                "UPDATE agent_lessons SET approved=1, approved_at=? WHERE id=?",
+                "UPDATE agent_lessons SET human_approved=1, approved_at_utc=? WHERE lesson_id=?",
                 (datetime.now(tz=timezone.utc).isoformat(), lesson_id),
             )
-        return f"✅ Lesson `{lesson_id}` approved."
+        return f"✅ Lesson `{lesson_id}` approved — active next agent run."
     except Exception as exc:
         return f"⚠️ approve error: {exc}"
 
@@ -210,7 +213,7 @@ def _reject_lesson(db_path: str, lesson_id: int) -> str:
     try:
         with sqlite3.connect(db_path) as conn:
             conn.execute(
-                "UPDATE agent_lessons SET approved=0, approved_at=? WHERE id=?",
+                "UPDATE agent_lessons SET human_approved=0, rejected_at_utc=? WHERE lesson_id=?",
                 (datetime.now(tz=timezone.utc).isoformat(), lesson_id),
             )
         return f"❌ Lesson `{lesson_id}` rejected."

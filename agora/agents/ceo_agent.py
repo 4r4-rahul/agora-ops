@@ -144,6 +144,16 @@ class CEOAgent:
         # Total closed trades processed this session
         self._closed_trades_processed: int = 0
 
+        # ── Autonomous action callbacks (wired by session post-init) ──────────
+        # Callable[[ticker, reason], Awaitable[None]] — closes an open position
+        self._close_position_cb: Any = None
+        # Callable[[reason], Awaitable[None]] — triggers macro synthesis refresh
+        self._macro_refresh_cb: Any = None
+
+        # Alert dedup — suppress repeat dispatches of the same key within 10 min
+        self._alert_last_fired: dict[str, datetime] = {}
+        self._ALERT_COOLDOWN_SECS = 600
+
     def wire_exec_quality(self, eq: Any) -> None:
         self._exec_quality = eq
 
@@ -165,6 +175,116 @@ class CEOAgent:
     def wire_readiness(self, readiness: Any) -> None:
         """Wire the LiveReadinessMeter so CEO can approve go-live."""
         self._readiness = readiness
+
+    def wire_close_callback(self, fn: Any) -> None:
+        """Register session callback: async fn(ticker, reason) → closes an open position."""
+        self._close_position_cb = fn
+
+    def wire_macro_refresh_callback(self, fn: Any) -> None:
+        """Register session callback: async fn(reason) → triggers macro synthesis refresh."""
+        self._macro_refresh_cb = fn
+
+    # ── Autonomous alert handling ──────────────────────────────────────────────
+
+    async def _autonomous_response(self, level: str, message: str) -> str:
+        """
+        Classify an incoming C-suite alert and take corrective action without
+        waiting for human approval.
+
+        Returns a one-line description of the action taken (included in the
+        Discord notification so the owner can see what the CEO did).
+
+        Action map:
+          stop-loss proximity / at stop   → force-close the position NOW
+          macro context stale/missing     → trigger macro synthesis refresh
+          Greek limit breached            → acknowledged (CRO self_heal already
+                                            published size_bias_changed event)
+          kill switch / circuit breaker   → acknowledged (already enforced)
+          daily loss critical             → acknowledged (CRO reduced size to 50%)
+          IBKR disconnect                 → acknowledged (auto-reconnects)
+          execution / fill rate           → acknowledged (COO/CTO self_heal active)
+          everything else                 → logged, no additional action
+        """
+        msg_lower = message.lower()
+
+        # ── 1. Stop-loss proximity → close the position immediately ───────────
+        if any(k in msg_lower for k in ("stop_loss_proximity", "stop loss proximity",
+                                         "approaching stop", "near stop")):
+            # Extract ticker from message — pattern "[Chief Risk Officer (CRO)] … TICKER …"
+            ticker = self._extract_ticker_from_alert(message)
+            if ticker and self._close_position_cb:
+                try:
+                    await self._close_position_cb(ticker, "CEO autonomous: stop-loss proximity — forced close")
+                    return f"✅ Closed {ticker} position (stop-loss proximity — CEO forced exit)"
+                except Exception as exc:
+                    logger.error("CEO autonomous close failed for %s: %s", ticker, exc)
+                    return f"⚠️ Close attempt for {ticker} failed: {exc}"
+            return "⚠️ Stop-loss proximity detected but no close callback wired or ticker unresolvable"
+
+        # ── 2. Macro context stale / missing → refresh now ────────────────────
+        if any(k in msg_lower for k in ("macro_context_stale", "macro_context_missing",
+                                         "macro context stale", "macro context missing",
+                                         "macro context aging")):
+            if self._macro_refresh_cb:
+                try:
+                    asyncio.create_task(self._macro_refresh_cb("CEO autonomous: stale macro context"))
+                    return "✅ Triggered macro synthesis refresh (stale context)"
+                except Exception as exc:
+                    return f"⚠️ Macro refresh trigger failed: {exc}"
+            return "ℹ️ Macro context stale — no refresh callback wired"
+
+        # ── 3. Greek/delta/vega limit breach → CRO self_heal already acted ────
+        if any(k in msg_lower for k in ("delta_limit_breached", "vega_limit_breached",
+                                         "delta limit", "vega limit")):
+            return "ℹ️ Acknowledged — CRO published size_bias=none to block new directional entries"
+
+        # ── 4. Kill switch / circuit breaker → already enforced ───────────────
+        if any(k in msg_lower for k in ("kill_switch", "kill switch", "circuit_breaker",
+                                         "circuit breaker")):
+            return "ℹ️ Acknowledged — kill switch/circuit breaker already enforced by risk layer"
+
+        # ── 5. Daily loss → CRO already reduced sizing ────────────────────────
+        if any(k in msg_lower for k in ("daily_loss_critical", "daily loss critical")):
+            return "ℹ️ Acknowledged — CRO reduced position sizing to 50% automatically"
+
+        if any(k in msg_lower for k in ("daily_loss_high", "daily loss high")):
+            return "ℹ️ Acknowledged — monitoring daily loss trajectory"
+
+        # ── 6. Pillar paused / strategy health ────────────────────────────────
+        if any(k in msg_lower for k in ("pillar", "strategy_health", "strategy health",
+                                         "underperforming", "paused")):
+            return "ℹ️ Acknowledged — StrategyHealth agent managing pillar pause autonomously"
+
+        # ── 7. IBKR / COO ops issues → auto-reconnects ────────────────────────
+        if any(k in msg_lower for k in ("ibkr disconnect", "ibkr reconnect",
+                                         "api connection failed", "ctech: ibkr")):
+            return "ℹ️ Acknowledged — ib_insync auto-reconnect in progress"
+
+        # ── 8. Execution / fill rate → CTO/COO managing ───────────────────────
+        if any(k in msg_lower for k in ("fill rate", "execution quality", "orphan",
+                                         "untracked")):
+            return "ℹ️ Acknowledged — CTO/COO execution quality monitoring active"
+
+        # ── 9. Conviction gate inversion → R&D flagged ────────────────────────
+        if any(k in msg_lower for k in ("gate hierarchy", "conviction gate", "inverted")):
+            return "ℹ️ Acknowledged — R&D agent will review conviction calibration"
+
+        # ── Default: log and acknowledge ──────────────────────────────────────
+        return "ℹ️ Logged — no automated corrective action for this alert class"
+
+    def _extract_ticker_from_alert(self, message: str) -> str | None:
+        """
+        Heuristically extract a ticker symbol from a C-suite alert message.
+        Looks for uppercase 1–5 letter tokens that are known open positions.
+        """
+        if not self._position_mgr:
+            return None
+        open_tickers = {p.ticker for p in self._position_mgr.get_open_positions()}
+        import re
+        for token in re.findall(r'\b([A-Z]{1,5})\b', message):
+            if token in open_tickers:
+                return token
+        return None
 
     def get_session_plan(self) -> SessionPlan:
         """Return the current session plan (read by all C-suite via wire_session_plan)."""
@@ -613,17 +733,43 @@ class CEOAgent:
 
     async def dispatch_alert(self, level: str, message: str, context: dict | None = None) -> None:
         """
-        Send an urgent alert. level = "info" | "warning" | "critical"
-        Called by risk council (circuit breaker), position manager (stop-loss), etc.
+        Receive a C-suite alert, take autonomous corrective action, and post
+        a brief Discord notification describing what was done.
+
+        The owner (Rahul) is NOT asked for approval — CEO acts and reports.
+        Alert dedup: identical alert keys are suppressed for 10 minutes to
+        prevent notification spam from rapid-fire self_audit cycles.
         """
+        # ── Dedup: suppress repeat alerts within cooldown window ──────────────
+        _dedup_key = message[:120]
+        _now = datetime.now(tz=ET)
+        _last = self._alert_last_fired.get(_dedup_key)
+        if _last and (_now - _last).total_seconds() < self._ALERT_COOLDOWN_SECS:
+            logger.debug("CEO dispatch_alert: suppressed duplicate alert (cooldown) [%s]", level)
+            return
+        self._alert_last_fired[_dedup_key] = _now
+
+        # ── Take autonomous corrective action ─────────────────────────────────
+        try:
+            action_taken = await self._autonomous_response(level, message)
+        except Exception as exc:
+            action_taken = f"⚠️ Autonomous response error: {exc}"
+            logger.error("CEO autonomous response raised: %s", exc)
+
+        logger.warning("CEO [%s]: %s → %s", level, message[:120], action_taken)
+
+        # ── Send compact Discord notification (action taken, not a request) ───
         icon = {"info": "ℹ️", "warning": "⚠️", "critical": "🚨"}.get(level, "ℹ️")
-        now = datetime.now(tz=ET).strftime("%H:%M ET")
-        msg = f"{icon} **AGORA ALERT** [{now}]\n{message}"
+        now_str = _now.strftime("%H:%M ET")
+        lines = [
+            f"{icon} **CEO** [{now_str}]",
+            f"**Alert:** {message[:300]}",
+            f"**Action:** {action_taken}",
+        ]
         if context:
             ctx_str = "\n".join(f"  {k}: {v}" for k, v in context.items())
-            msg += f"\n```\n{ctx_str}\n```"
-        await self._send_to_discord(msg)
-        logger.warning("CEO ALERT [%s]: %s", level, message)
+            lines.append(f"```\n{ctx_str}\n```")
+        await self._send_to_discord("\n".join(lines))
 
     # ── Report generators ──────────────────────────────────────────
 
@@ -771,17 +917,24 @@ Be direct. Flag anything that needs Rahul's attention with 🚨.
                     "SELECT outcome, COUNT(*) FROM execution_quality "
                     "WHERE attempt_date=date('now') GROUP BY outcome"
                 ).fetchall()
+                policy_rejects_201 = conn.execute(
+                    "SELECT COUNT(*) FROM execution_quality "
+                    "WHERE attempt_date=date('now') AND reject_code='201'"
+                ).fetchone()[0]
                 conn.close()
                 m = {r[0]: r[1] for r in rows}
                 fills    = m.get("fill", 0)
                 timeouts = m.get("timeout", 0)
                 total    = fills + timeouts + m.get("reject", 0)
-                if total >= 5:
-                    fill_rate = fills / total
-                    timeout_rate = timeouts / total
+                # Exclude Error 201 policy rejects: IBKR account restriction, not exec failure.
+                effective_total = max(0, total - policy_rejects_201)
+                if effective_total >= 5:
+                    fill_rate = fills / effective_total
+                    timeout_rate = timeouts / effective_total
                     if fill_rate < 0.15:
                         issues.append(
-                            f"🚨 FILL RATE CRITICAL: {fill_rate:.1%} ({fills}/{total} orders filled). "
+                            f"🚨 FILL RATE CRITICAL: {fill_rate:.1%} ({fills}/{effective_total} "
+                            f"effective orders filled, {policy_rejects_201} policy-201 rejects excluded). "
                             f"Check IBKR connectivity and order timeout settings."
                         )
                     if timeout_rate > 0.85:

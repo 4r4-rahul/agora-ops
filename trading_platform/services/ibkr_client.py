@@ -356,6 +356,185 @@ async def place_bracket_order(
         logger.debug("[%s] IBKR bracket connection closed", session_id)
 
 
+async def place_legs_individually(
+    *,
+    ticker: str,
+    legs: list[dict[str, Any]],
+    contracts: int,
+    entry_price: float,
+    profit_target: float,
+    stop_loss: float,
+    session_id: str,
+    host: str = "127.0.0.1",
+    port: int = 7497,
+    client_id: int = 10,
+    price_step_size: float = 0.05,
+) -> dict[str, Any]:
+    """
+    Submit each leg of a spread as a standalone option order.
+
+    Used for paper trading to bypass IBKR Error 201 (riskless combination
+    order limit). Individual option orders are not classified as "riskless
+    combination orders" and don't count toward the TWS paper account limit.
+
+    Pricing: fetches current bid/ask snapshot for each leg; submits at mid.
+    Adaptive pricing steps each leg's limit toward market every 30s for up to
+    3 minutes. If any leg is still unfilled, all pending legs are cancelled.
+
+    Risk: brief leg gap between fills. Acceptable in paper mode since fills
+    are simulated and no real capital is at risk.
+    """
+    if not _IB_AVAILABLE:
+        raise RuntimeError("ib_insync not installed")
+
+    _PRICE_STEP_SEC  = 30
+    _MAX_PRICE_STEPS = 6
+    _TICK = 0.01
+
+    ib = IB()
+    try:
+        await ib.connectAsync(host, port, clientId=client_id, timeout=10)
+        logger.info("[%s] Leg-by-leg order — connecting to %s:%d", session_id, host, port)
+
+        # ── Qualify each leg contract ─────────────────────────────────────────
+        qualified: list[tuple[dict, Any]] = []
+        for leg in legs:
+            opt = Option(
+                symbol=ticker,
+                lastTradeDateOrContractMonth=_next_expiry(leg["expiration_dte"]),
+                strike=float(leg["strike"]),
+                right="C" if leg["option_type"].lower() == "call" else "P",
+                exchange="SMART",
+                currency="USD",
+                multiplier="100",
+            )
+            q = await ib.qualifyContractsAsync(opt)
+            if not q:
+                raise RuntimeError(f"Could not qualify {ticker} {leg['option_type']} {leg['strike']}")
+            qualified.append((leg, q[0]))
+
+        # ── Fetch market data snapshot for initial pricing ────────────────────
+        leg_mids: list[float] = []
+        for leg_spec, contract in qualified:
+            ticker_obj = ib.reqMktData(contract, "", True, False)
+            await asyncio.sleep(2)
+            bid = ticker_obj.bid if ticker_obj.bid and ticker_obj.bid > 0 else 0.0
+            ask = ticker_obj.ask if ticker_obj.ask and ticker_obj.ask > 0 else 0.0
+            mid = round((bid + ask) / 2, 2) if bid > 0 and ask > 0 else max(0.01, abs(entry_price))
+            leg_mids.append(mid)
+            ib.cancelMktData(contract)
+
+        # ── Submit individual leg orders ──────────────────────────────────────
+        trades = []
+        orders = []
+        limits = list(leg_mids)
+        for i, (leg_spec, contract) in enumerate(qualified):
+            action = leg_spec["action"].upper()
+            lmt = limits[i]
+            order = LimitOrder(
+                action=action,
+                totalQuantity=contracts * leg_spec.get("quantity", 1),
+                lmtPrice=max(_TICK, lmt),
+            )
+            order.orderRef = f"{session_id[:35]}-L{i}"
+            order.tif = "DAY"
+            order.transmit = True
+            trade = ib.placeOrder(contract, order)
+            trades.append(trade)
+            orders.append(order)
+            logger.info(
+                "[%s] Leg %d/%d submitted — %s %s %.0f %s @ %.2f",
+                session_id, i + 1, len(legs),
+                action, ticker, leg_spec["strike"], leg_spec["option_type"].upper(), lmt,
+            )
+
+        # ── Adaptive pricing loop ─────────────────────────────────────────────
+        for step in range(_MAX_PRICE_STEPS):
+            await asyncio.sleep(_PRICE_STEP_SEC)
+            all_filled = all(t.orderStatus.status == "Filled" for t in trades)
+            if all_filled:
+                break
+
+            for i, (trade, order) in enumerate(zip(trades, orders)):
+                if trade.orderStatus.status == "Filled":
+                    continue
+                leg_spec = legs[i]
+                action   = leg_spec["action"].upper()
+                # Credit leg (SELL): step price down toward bid; debit leg (BUY): step up toward ask
+                step_dir = -1 if action == "SELL" else +1
+                limits[i] = max(_TICK, round(limits[i] + step_dir * price_step_size, 2))
+                order.lmtPrice = limits[i]
+                order.transmit  = True
+                ib.placeOrder(qualified[i][1], order)
+                logger.info(
+                    "[%s] Leg %d price step %d/%d → %.2f",
+                    session_id, i + 1, step + 1, _MAX_PRICE_STEPS, limits[i],
+                )
+
+        # ── Evaluate final fill state ─────────────────────────────────────────
+        filled = [t for t in trades if t.orderStatus.status == "Filled"]
+        pending = [
+            (i, t, orders[i], qualified[i][1])
+            for i, t in enumerate(trades)
+            if t.orderStatus.status not in ("Filled", "Cancelled", "ApiCancelled")
+        ]
+
+        if pending:
+            for i, trade, order, contract in pending:
+                try:
+                    ib.cancelOrder(order)
+                except Exception:
+                    pass
+            if not filled:
+                return {
+                    "order_id": -1, "status": "Cancelled", "fills": [],
+                    "entry_price": entry_price, "profit_target": profit_target,
+                    "stop_loss": stop_loss,
+                    "reason": f"Unfilled after {_MAX_PRICE_STEPS} price steps (3 min)",
+                }
+            # Partial fill — some legs filled, others timed out.
+            # In paper mode log the mismatch; position manager will track via actual fills.
+            logger.warning(
+                "[%s] Partial leg fill: %d/%d filled — recording position from filled legs",
+                session_id, len(filled), len(trades),
+            )
+
+        all_fills = []
+        avg_entry = entry_price
+        for trade in filled:
+            for f in trade.fills:
+                all_fills.append({
+                    "exec_id": f.execution.execId,
+                    "shares":  f.execution.shares,
+                    "price":   f.execution.price,
+                    "time":    f.execution.time.isoformat() if f.execution.time else None,
+                })
+        if all_fills:
+            prices = [f["price"] for f in all_fills]
+            # Net entry: sum sells (negative) and buys (positive) by action
+            net = 0.0
+            for i, trade in enumerate(filled):
+                action = legs[i]["action"].upper() if i < len(legs) else "BUY"
+                sign   = -1 if action == "SELL" else +1
+                if trade.fills:
+                    net += sign * trade.fills[0].execution.price
+            avg_entry = round(net, 4)
+
+        return {
+            "order_id": trades[0].order.orderId if trades else -1,
+            "status":   "Filled" if filled else "Cancelled",
+            "fills":    all_fills,
+            "entry_price":   avg_entry,
+            "profit_target": profit_target,
+            "stop_loss":     stop_loss,
+        }
+
+    finally:
+        if ib.isConnected():
+            ib.disconnect()
+        logger.debug("[%s] Leg-by-leg connection closed", session_id)
+
+
 async def close_position(
     *,
     ticker: str,

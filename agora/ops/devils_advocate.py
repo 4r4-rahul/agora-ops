@@ -23,9 +23,15 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from ..core.models import TradeRecommendation, OpenPosition, StrategyPillar
 
-_CONVICTION_FLOOR = 30.0
-_CREDIT_PILLARS = frozenset({"vol_premium"})
-_EVENT_PILLARS  = frozenset({"event_fomc", "event_cpi", "post_earnings"})
+def _get_conviction_floor() -> float:
+    from agora.core.config import get_settings
+    return get_settings().disagreement_resolver_floor  # reuse the same paper-mode floor
+
+_CONVICTION_FLOOR = 30.0  # kept for reference; runtime uses _get_conviction_floor()
+_CREDIT_STRATEGY_TYPES = frozenset({
+    "bull_put_spread", "bear_call_spread", "iron_condor", "iron_butterfly", "cash_secured_put",
+})
+_EVENT_PILLARS = frozenset({"event_fomc", "event_cpi", "post_earnings"})
 
 
 def _check_earnings_spans_expiry(
@@ -36,8 +42,8 @@ def _check_earnings_spans_expiry(
     """Block credit positions that inadvertently span an earnings date."""
     if not earnings_date or is_pre_earnings:
         return True, ""
-    pillar_str = str(getattr(recommendation.pillar, "value", recommendation.pillar))
-    if pillar_str not in _CREDIT_PILLARS:
+    strategy_str = str(getattr(recommendation.strategy, "value", recommendation.strategy))
+    if strategy_str not in _CREDIT_STRATEGY_TYPES:
         return True, ""
     expiry = min((leg.expiration for leg in recommendation.legs), default=None)
     if expiry is None:
@@ -94,16 +100,19 @@ def _check_vol_selling_ok(
     macro_context: Any,
 ) -> tuple[bool, str]:
     """Block vol_premium entries when macro context says IVR is too low."""
-    pillar_str = str(getattr(recommendation.pillar, "value", recommendation.pillar))
-    if pillar_str not in _CREDIT_PILLARS:
+    strategy_str = str(getattr(recommendation.strategy, "value", recommendation.strategy))
+    if strategy_str not in _CREDIT_STRATEGY_TYPES:
         return True, ""
     if macro_context is None:
         return True, ""
     vol_ok = getattr(macro_context, "vol_selling_ok", True)
     if not vol_ok:
+        from agora.core.config import get_settings
+        if get_settings().force_vol_selling_ok:
+            return True, ""
         return (
             False,
-            f"MacroContext.vol_selling_ok=False — IVR inadequate for {pillar_str} credit entry",
+            f"MacroContext.vol_selling_ok=False — IVR inadequate for {strategy_str} credit entry",
         )
     return True, ""
 
@@ -111,10 +120,11 @@ def _check_vol_selling_ok(
 def _check_conviction_floor(recommendation: Any) -> tuple[bool, str]:
     """Absolute minimum conviction gate — catches low-edge setups that slipped through scoring."""
     score = getattr(recommendation, "conviction_score", 100.0)
-    if score < _CONVICTION_FLOOR:
+    floor = _get_conviction_floor()
+    if score < floor:
         return (
             False,
-            f"Conviction {score:.0f} below absolute floor {_CONVICTION_FLOOR:.0f} — insufficient edge",
+            f"Conviction {score:.0f} below absolute floor {floor:.0f} — insufficient edge",
         )
     return True, ""
 

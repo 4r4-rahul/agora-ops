@@ -71,7 +71,7 @@ Resolution Layer:
 
 Model assignments (all in agora/core/config.py):
   claude_fast_model:  claude-haiku-4-5-20251001   — rapid classification (CatalystDiscovery, SmartMoney Form4 triage)
-  claude_model:       claude-opus-4-7             — full analysis (13D intent, MacroSynthesizer synthesis, EarningsTranscript deep inference)
+  claude_model:       claude-opus-4-8             — full analysis (13D intent, MacroSynthesizer synthesis, EarningsTranscript deep inference)
 
 API features in use:
   Streaming:        CatalystDiscoveryAgent — <3s first-token for urgent 8-K classification

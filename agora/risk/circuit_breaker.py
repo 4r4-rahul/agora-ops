@@ -67,6 +67,45 @@ class CircuitBreakerAgent:
         # Trip log for reporting
         self._trip_log: list[dict] = []
 
+        # Daily mark-to-market baseline — set on first check of each trading day.
+        # Daily loss = (total_unrealized_now - _daily_unrealized_baseline) + realized_today.
+        # Persisted to disk so mid-day restarts don't forgive morning losses.
+        self._daily_unrealized_baseline: float | None = None
+        self._baseline_date: str = ""
+        self._baseline_path = (
+            self._settings.db_path.parent / "cb_baseline.json"
+        )
+        self._load_baseline()
+
+    # ── Baseline persistence ───────────────────────────────────────
+
+    def _load_baseline(self) -> None:
+        """Load persisted baseline from prior session if date matches today."""
+        try:
+            import json
+            from datetime import date
+            if self._baseline_path.exists():
+                data = json.loads(self._baseline_path.read_text())
+                if data.get("date") == date.today().isoformat():
+                    self._daily_unrealized_baseline = float(data["baseline"])
+                    self._baseline_date = data["date"]
+                    logger.info(
+                        "CircuitBreaker: loaded persisted baseline $%.0f for %s",
+                        self._daily_unrealized_baseline, self._baseline_date,
+                    )
+        except Exception as exc:
+            logger.debug("CircuitBreaker: could not load baseline: %s", exc)
+
+    def _save_baseline(self) -> None:
+        """Persist current baseline so mid-day restarts honour morning losses."""
+        try:
+            import json
+            self._baseline_path.write_text(
+                json.dumps({"date": self._baseline_date, "baseline": self._daily_unrealized_baseline})
+            )
+        except Exception as exc:
+            logger.debug("CircuitBreaker: could not save baseline: %s", exc)
+
     def register_csuite_manager(self, manager: Any) -> None:
         """Wire the CROAgent as the supervising executive for alert escalation."""
         self._csuite_manager = manager
@@ -98,8 +137,11 @@ class CircuitBreakerAgent:
         logger.info("CircuitBreakerAgent started")
         while self._running:
             now_et = datetime.now(tz=ET)
-            # Only run during extended market hours (8 AM – 5 PM ET)
-            if 8 <= now_et.hour < 17:
+            # Only run from 9:30 AM (market open) to 4:30 PM ET.
+            # Pre-market prices are stale/wide — running before 9:30 would set
+            # a garbage baseline and absorb real morning losses into it.
+            from datetime import time as _t
+            if now_et.weekday() < 5 and _t(9, 30) <= now_et.time() < _t(16, 30):
                 try:
                     await self._check_cycle()
                 except Exception as exc:
@@ -130,14 +172,28 @@ class CircuitBreakerAgent:
                     self._risk.trip_kill_switch(msg, tripped_by="circuit_breaker")
                 await self._alert("critical", f"🚨 Position loss limit: {msg}")
 
-        # 2. Daily portfolio loss — combines unrealized (open) + realized (closed today)
+        # 2. Daily portfolio loss — mark-to-market change since session open + realized today.
+        # We track a baseline (set once per calendar day on first check) so that losses
+        # carried over from prior sessions do not re-trip the switch on restart.
         total_unrealized = sum(p.unrealized_pnl for p in positions)
         realized_today   = self._get_todays_realized_pnl()
-        total_pnl        = total_unrealized + realized_today
+        today_str        = date.today().isoformat()
         limit            = self._settings.daily_loss_limit_dollars
 
-        # Push to RiskCouncil DB so _check_daily_loss() has live data
-        # This is what the kill switch reads — without this call it reads an empty table
+        # Reset baseline each new calendar day, or on first check ever.
+        if self._baseline_date != today_str or self._daily_unrealized_baseline is None:
+            self._daily_unrealized_baseline = total_unrealized
+            self._baseline_date             = today_str
+            self._save_baseline()
+            logger.info(
+                "CircuitBreaker: daily unrealized baseline set to $%.0f for %s",
+                total_unrealized, today_str,
+            )
+
+        # Daily P&L = today's movement in unrealized + today's realized closes.
+        daily_pnl = (total_unrealized - self._daily_unrealized_baseline) + realized_today
+
+        # Push live snapshot to RiskCouncil for dashboard/readiness reporting.
         if self._risk:
             self._risk.record_daily_pnl(
                 realized=realized_today,
@@ -145,11 +201,11 @@ class CircuitBreakerAgent:
                 trades=len([p for p in positions if p.unrealized_pnl != 0]),
             )
 
-        if total_pnl < -limit:
+        if daily_pnl < -limit:
             msg = (
-                f"Daily loss limit breached: total=${total_pnl:.0f} "
-                f"(unrealized=${total_unrealized:.0f} + realized=${realized_today:.0f}) "
-                f"vs limit=${-limit:.0f}"
+                f"Daily loss limit breached: ${daily_pnl:.0f} today "
+                f"(Δunrealized=${total_unrealized - self._daily_unrealized_baseline:.0f} "
+                f"+ realized=${realized_today:.0f}) vs limit=${-limit:.0f}"
             )
             logger.critical("CIRCUIT BREAKER (daily loss): %s", msg)
             if self._risk and not self._risk.is_kill_switch_active():
@@ -221,7 +277,8 @@ class CircuitBreakerAgent:
         try:
             import sqlite3
             from datetime import date
-            conn = sqlite3.connect(str(self._settings.db_path), check_same_thread=False)
+            conn = sqlite3.connect(str(self._settings.db_path), check_same_thread=False, timeout=10)
+            conn.execute("PRAGMA journal_mode=WAL")
             row = conn.execute(
                 "SELECT SUM(realized_pnl) FROM trade_records WHERE close_date=?",
                 (date.today().isoformat(),),

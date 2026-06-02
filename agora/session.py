@@ -79,11 +79,16 @@ from agora.signals.iv_premium import IvPremiumScreen
 from agora.signals.sector_momentum_intraday import IntradaySectorMomentumDetector, SECTOR_MAP as _SECTOR_MAP
 from agora.signals.vol_regime import VolRegimeClassifier
 from agora.strategies.rules_engine import StrategyRulesEngine
+from agora.ops.dynamic_params import DynamicParams, compute_dynamic_params
 from agora.scan import ScanPriority, UniverseScanEngine
 from agora.agents.stock_analyst import StockAnalystAgent
 from agora.agents.strategy_selector import StrategySelectorAgent, StrategySelection
 from agora.agents.advocate_agent import AdvocateAgent
+from agora.agents.thesis_defender import ThesisDefenderAgent
 from agora.agents.exit_management import ExitIntelligenceAgent
+from agora.memory.semantic_store import SemanticTradeStore
+from agora.services.chart_renderer import render_chart_base64
+from agora.services.flow_detector import get_flow_signals
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +104,14 @@ class AgoraSession:
     def __init__(self, settings: AgoraSettings | None = None) -> None:
         self._settings = settings or get_settings()
         self._session_id = f"AGORA-{datetime.now(tz=ET).strftime('%Y%m%d-%H%M')}"
+
+        # DB migrations — idempotent, runs before any agent opens the DB
+        try:
+            from agora.ops.db_migrations import run_all as _run_db_migrations
+            _run_db_migrations(str(self._settings.db_path))
+        except Exception as _mig_exc:
+            import logging as _log
+            _log.getLogger(__name__).warning("DB migration error (non-fatal): %s", _mig_exc)
 
         # Signal generators
         self._vol_classifier   = VolRegimeClassifier()
@@ -275,6 +288,26 @@ class AgoraSession:
             self._discord_commander.set_session(self)
             logger.info("DiscordCommander configured")
 
+        # UW Discord alert listener + Market Intel Agent (optional — requires DISCORD_UW_CHANNEL_ID)
+        self._uw_listener    = None
+        self._uw_market_intel = None
+        if self._settings.discord_bot_token and self._settings.discord_uw_channel_id:
+            from agora.ops.uw_discord_listener import UWDiscordListener
+            from agora.agents.uw_market_intel import UWMarketIntelAgent
+            self._uw_listener = UWDiscordListener(
+                token=self._settings.discord_bot_token,
+                channel_id=self._settings.discord_uw_channel_id,
+                account_size=float(self._settings.account_size),
+                db_path=str(self._settings.db_path),
+            )
+            self._uw_market_intel = UWMarketIntelAgent(
+                db_path=str(self._settings.db_path),
+                settings=self._settings,
+                webhook_url=self._settings.alert_webhook_url,
+            )
+            logger.info("UWDiscordListener + UWMarketIntelAgent configured — channel=%s",
+                        self._settings.discord_uw_channel_id)
+
         # ── C-suite executives ──────────────────────────────────────
         self._cro = CROAgent(
             self._settings,
@@ -417,6 +450,18 @@ class AgoraSession:
         # Wire readiness + exec quality into CEO for integrity patrol
         self._ceo.wire_readiness(self._readiness)
         self._ceo.wire_exec_quality(self._exec_quality)
+
+        # Autonomous action callbacks — CEO can close positions and refresh macro
+        # without asking the owner for approval.
+        async def _ceo_close_position(ticker: str, reason: str) -> None:
+            pos = self._position_mgr.get_open_position_by_ticker(ticker)
+            if pos:
+                await self._execute_close(pos, reason)
+            else:
+                logger.warning("CEO close_position: no open position found for %s", ticker)
+
+        self._ceo.wire_close_callback(_ceo_close_position)
+        self._ceo.wire_macro_refresh_callback(self._premarket_macro_scan)
         self._readiness.register_agents(
             risk_council=self._risk,
             circuit_breaker=self._circuit_breaker,
@@ -442,7 +487,11 @@ class AgoraSession:
 
         # State
         self._macro_context   = None
+        self._dynamic_params  = DynamicParams()   # adaptive parameters, refreshed each macro cycle
         self._running         = False
+        # NewsContext: updated every 30s by _news_watch_loop, read by agents
+        from agora.services.news_signals import NewsContext as _NewsContext
+        self._news_context: _NewsContext = _NewsContext()
 
         # ── Event-driven scan state ────────────────────────────────
         # Tier 1: always scanned every 30-min cycle (highest liquidity / most active)
@@ -517,6 +566,21 @@ class AgoraSession:
         # ── AdvocateAgent (Phase 5 LLM adversarial review) ────────────────────
         # Runs after all deterministic gates, before IBKR submission.
         # Shadow: journals BLOCK verdicts but never stops execution.
+        # Per-ticker advocate/defender fingerprint cache.
+        # Re-runs the debate only when something material changes — not on a fixed clock.
+        #
+        # Cache entry: (timestamp, macro_stance, spot_price, open_position_count, adv_verdict, def_verdict)
+        # Invalidated when ANY of these change:
+        #   1. Time > 3h (backstop — catches anything else we miss)
+        #   2. Macro stance changed (risk_on/off flip from CPI, FOMC, etc.)
+        #   3. Spot price moved > 3% (thesis, strikes, and risk profile all change)
+        #   4. Open position count changed (correlation argument in Mode 2 becomes wrong)
+        #
+        # Prevents: 13 POWL calls in 3h when thesis is unchanged.
+        # Allows re-run: macro flips, big price move, position fill/close.
+        self._advocate_cache: dict[str, tuple[float, str, float, int, Any, Any]] = {}
+        _ADVOCATE_COOLDOWN_SECS = 3 * 3600   # backstop TTL
+
         self._advocate: AdvocateAgent | None = None
         if self._settings.advocate_enabled:
             self._advocate = AdvocateAgent(
@@ -527,6 +591,26 @@ class AgoraSession:
                 "AdvocateAgent configured: shadow=%s",
                 self._settings.advocate_shadow_mode,
             )
+
+        # ── ThesisDefenderAgent — counterweight to AdvocateAgent ──────────────
+        self._defender: ThesisDefenderAgent | None = None
+        if self._settings.thesis_defender_enabled:
+            self._defender = ThesisDefenderAgent(
+                settings=self._settings,
+                shadow_mode=self._settings.thesis_defender_shadow_mode,
+            )
+            logger.info(
+                "ThesisDefenderAgent configured: shadow=%s",
+                self._settings.thesis_defender_shadow_mode,
+            )
+
+        # ── Semantic trade memory (ChromaDB) ──────────────────────────────────
+        self._semantic_store: SemanticTradeStore | None = None
+        try:
+            self._semantic_store = SemanticTradeStore(self._settings.chroma_db_path)
+            logger.info("SemanticTradeStore ready at %s", self._settings.chroma_db_path)
+        except Exception as _e:
+            logger.warning("SemanticTradeStore init failed (memory disabled): %s", _e)
 
         # ── ExitIntelligenceAgent (Phase 6 hourly position monitor) ───────────
         # Evaluates every open position hourly during market hours.
@@ -543,6 +627,64 @@ class AgoraSession:
                 self._settings.exit_intelligence_shadow_mode,
                 self._settings.exit_intelligence_interval_hours,
             )
+
+        # ── NakedOptionsAgent — specialist scan (independent 30-min cycle) ───────
+        self._naked_options_agent = None
+        if self._settings.naked_options_enabled:
+            from agora.agents.naked_options_agent import NakedOptionsAgent
+            self._naked_options_agent = NakedOptionsAgent(self._settings)
+            logger.info(
+                "NakedOptionsAgent enabled: delta=%.2f min_prem=$%.0f interval=%dm max_pos=%d",
+                self._settings.naked_options_target_delta,
+                self._settings.naked_options_min_premium,
+                self._settings.naked_options_scan_interval_minutes,
+                self._settings.naked_options_max_positions,
+            )
+
+        # ── LongOptionsAgent — directional swing (independent 15-min cycle) ───
+        self._long_options_agent = None
+        self._long_peak_pnl: dict[str, float] = {}   # position_id → peak P&L fraction
+        if self._settings.long_options_enabled:
+            from agora.agents.long_options_agent import LongOptionsAgent
+            self._long_options_agent = LongOptionsAgent(self._settings)
+            logger.info(
+                "LongOptionsAgent enabled: delta=%.2f ivr_cap=%.0f hold=%dd "
+                "profit=%.0f%% stop=%.0f%% trail=+%.0f%%/floor%.0f%% "
+                "interval=%dm max_pos=%d max_contracts=%d",
+                self._settings.long_options_target_delta,
+                self._settings.long_options_ivr_cap,
+                self._settings.long_options_max_hold_days,
+                self._settings.long_options_profit_target_pct * 100,
+                self._settings.long_options_stop_loss_pct * 100,
+                self._settings.long_options_trailing_stop_trigger * 100,
+                self._settings.long_options_trailing_stop_floor * 100,
+                self._settings.long_options_scan_interval_minutes,
+                self._settings.long_options_max_positions,
+                self._settings.long_options_max_contracts,
+            )
+
+        # ── LongOptionsVetterAgent — Opus 4.8 pre-trade quality gate ──────────
+        self._long_vetter = None
+        if self._settings.long_options_enabled and self._settings.long_options_vetter_enabled:
+            from agora.agents.long_options_vetter import LongOptionsVetterAgent
+            self._long_vetter = LongOptionsVetterAgent(self._settings)
+
+        # ── Finance intelligence modules ────────────────────────────────────────
+        # Sector rotation RS monitor — daily-cached GICS sector ranking via ETF RS
+        from agora.ops.sector_rotation import SectorRotationMonitor
+        self._sector_monitor = SectorRotationMonitor()
+
+        # Fundamental valuation + earnings revision gate — 4h TTL cache
+        from agora.ops.valuation import ValuationGate
+        self._valuation_gate = ValuationGate()
+
+        # Portfolio correlation monitor — blocks near-duplicate same-direction positions
+        from agora.ops.correlation_monitor import CorrelationMonitor
+        self._correlation_monitor = CorrelationMonitor()
+
+        logger.info(
+            "Finance intelligence modules initialized: SectorRotation, Valuation, Correlation"
+        )
 
         # ── Intraday macro refresh state ───────────────────────────
         # Tracks market levels at last synthesis so we can detect regime shifts
@@ -571,6 +713,9 @@ class AgoraSession:
         # Prevents the same illiquid spread from consuming execution budget on every scan.
         self._exec_cooldowns: dict[str, datetime] = {}
         self._EXEC_COOLDOWN_SECS: int = 7200  # 2 hours after a timeout/reject
+        # Tickers that got Error 201 in live mode (riskless combo limit exceeded).
+        # In paper mode this won't fire since we use leg-by-leg submission.
+        self._error_201_blocked: set[str] = set()
 
         # ── Earnings proximity cache ───────────────────────────────
         # Per-session cache of next earnings dates from yfinance.calendar.
@@ -614,6 +759,11 @@ class AgoraSession:
         # that are NOT marked is_pre_earnings (i.e., won't be auto-closed by T-1 logic).
         asyncio.create_task(self._earnings_proximity_startup_check())
 
+        # Pre-warm the earnings date cache for all universe tickers via IBKR CalendarReport.
+        # Runs async in background so it doesn't delay startup; first-scan latency reduced
+        # since _evaluate_ticker finds cached results instead of issuing live IBKR calls.
+        asyncio.create_task(self._prefetch_earnings_cache())
+
         # Run a macro synthesis immediately on startup so the readiness meter shows
         # macro_context_available=True after restart (not just after the 7 AM window).
         asyncio.create_task(self._premarket_macro_scan(reason="startup"))
@@ -642,6 +792,9 @@ class AgoraSession:
             self._strategy_health.start(),     # Sharpe monitor — auto-pauses failing pillar/regime cells
             self._outcome_attributor.start(),  # Analyst feedback loop — attributes closed trades
             *(([self._discord_commander.start()]) if self._discord_commander else []),
+            *(([self._uw_listener.start()]) if self._uw_listener else []),
+            *(([self._uw_market_intel.start()]) if self._uw_market_intel else []),
+            self._news_watch_loop(),
             # C-suite executives (including new CTechAgent)
             self._cro.start(),
             self._cio.start(),
@@ -654,12 +807,15 @@ class AgoraSession:
             self._price_monitor_loop(),
             *(([self._scan_engine.start()]) if self._scan_engine else []),
             *(([self._exit_intelligence_loop()]) if self._exit_agent else []),
+            *(([self._naked_options_loop()]) if self._naked_options_agent else []),
+            *(([self._long_options_loop()]) if self._long_options_agent else []),
         )
 
     async def stop(self) -> None:
         self._running = False
         await asyncio.gather(
             self._catalyst_agent.stop(),
+            # return_exceptions=True prevents one failing stop() from aborting the rest
             self._earnings_agent.stop(),
             self._earnings_calendar.stop(),
             self._smart_money.stop(),
@@ -690,6 +846,7 @@ class AgoraSession:
             self._rnd.stop(),
             self._ctech.stop(),
             *(([self._scan_engine.stop()]) if self._scan_engine else []),
+            return_exceptions=True,
         )
         logger.info("AGORA session stopped: %s", self._session_id)
 
@@ -816,34 +973,98 @@ class AgoraSession:
     # ── Earnings proximity alert ───────────────────────────────────
 
     async def _get_next_earnings(self, ticker: str) -> "date | None":
-        """Fetch and cache next earnings date from yfinance (one call per ticker per session)."""
+        """
+        Fetch and cache next earnings date.
+
+        Priority:
+          1. IBKR CalendarReport (Refinitiv data — accurate, no scraping issues)
+          2. yfinance .calendar (fallback when IBKR is unavailable)
+
+        Result is cached per-session; subsequent calls for the same ticker
+        return immediately from cache.
+        """
         if ticker in self._earnings_date_cache:
             return self._earnings_date_cache[ticker]
+
+        result: "date | None" = None
+
+        # 1. IBKR Fundamental Data (CalendarReport)
         try:
-            from datetime import date as _date
-            import yfinance as yf
+            from agora.ops.fundamental_data import get_next_earnings_ibkr
+            result = await get_next_earnings_ibkr(
+                ticker,
+                host=self._settings.ibkr_host,
+                port=self._settings.ibkr_port,
+            )
+        except Exception as exc:
+            logger.debug("IBKR CalendarReport failed for %s: %s", ticker, exc)
 
-            def _fetch():
-                cal = yf.Ticker(ticker).calendar
-                if not cal or not isinstance(cal, dict):
-                    return None
-                raw = cal.get("Earnings Date", [])
-                if not raw:
-                    return None
-                today = _date.today()
-                future = []
-                for d in (raw if hasattr(raw, "__iter__") and not isinstance(raw, str) else [raw]):
-                    if hasattr(d, "date"):
-                        d = d.date()
-                    if isinstance(d, _date) and d >= today:
-                        future.append(d)
-                return min(future) if future else None
+        # 2. yfinance fallback
+        if result is None:
+            try:
+                from datetime import date as _date
+                import yfinance as yf
 
-            result = await asyncio.to_thread(_fetch)
-        except Exception:
-            result = None
+                def _fetch():
+                    cal = yf.Ticker(ticker).calendar
+                    if not cal or not isinstance(cal, dict):
+                        return None
+                    raw = cal.get("Earnings Date", [])
+                    if not raw:
+                        return None
+                    today = _date.today()
+                    future = []
+                    for d in (raw if hasattr(raw, "__iter__") and not isinstance(raw, str) else [raw]):
+                        if hasattr(d, "date"):
+                            d = d.date()
+                        if isinstance(d, _date) and d >= today:
+                            future.append(d)
+                    return min(future) if future else None
+
+                result = await asyncio.to_thread(_fetch)
+                if result is not None:
+                    logger.debug("yfinance earnings fallback for %s: %s", ticker, result)
+            except Exception:
+                result = None
+
         self._earnings_date_cache[ticker] = result
         return result
+
+    async def _prefetch_earnings_cache(self) -> None:
+        """
+        Pre-warm the per-session earnings date cache for all universe tickers
+        using IBKR CalendarReport in batches of 3.
+
+        Runs once at session startup (fire-and-forget via create_task).
+        After this completes, every _evaluate_ticker call gets a cached hit
+        instead of issuing a live IBKR request mid-scan.
+        """
+        try:
+            from agora.ops.fundamental_data import prefetch_earnings_dates
+            all_tickers = list(dict.fromkeys(
+                getattr(self, "_tier1", []) + getattr(self, "_tier2", [])
+            ))
+            if not all_tickers:
+                return
+            logger.info("Prefetching IBKR earnings dates for %d tickers", len(all_tickers))
+            fetched = await prefetch_earnings_dates(
+                all_tickers,
+                host=self._settings.ibkr_host,
+                port=self._settings.ibkr_port,
+                concurrency=3,
+            )
+            # Merge into cache without overwriting any result already cached
+            # by an earlier _get_next_earnings call that fired concurrently.
+            for t, dt in fetched.items():
+                if t not in self._earnings_date_cache:
+                    self._earnings_date_cache[t] = dt
+            hits = sum(1 for v in self._earnings_date_cache.values() if v is not None)
+            logger.info(
+                "Earnings cache prefetch complete: %d tickers, %d with upcoming earnings",
+                len(all_tickers), hits,
+            )
+        except Exception as exc:
+            logger.warning("Earnings cache prefetch failed: %s", exc)
 
     async def _earnings_proximity_startup_check(self) -> None:
         """
@@ -968,6 +1189,23 @@ class AgoraSession:
             # Push latest macro stance into profit engine so exits are regime-aware
             self._position_mgr.set_macro_context(self._macro_context)
 
+            # Refresh adaptive parameters from new macro context
+            try:
+                gex_regime_str = "neutral"
+                self._dynamic_params = compute_dynamic_params(
+                    vix=vix,
+                    iv_rank=spy_snap.iv_rank,
+                    macro_stance=self._macro_context.macro_stance,
+                    gex_regime=gex_regime_str,
+                    db_path=str(self._settings.db_path),
+                )
+            except Exception as dp_exc:
+                logger.warning("DynamicParams refresh failed: %s — using defaults", dp_exc)
+
+            # Auto-graduation: promote StrategySelectorAgent from shadow to live
+            # once direction hit rate >= 55% over 40+ closed positions
+            self._maybe_graduate_strategy_selector()
+
             logger.info(
                 "Macro context: stance=%s | vol_selling_ok=%s | size_bias=%s",
                 self._macro_context.macro_stance,
@@ -978,6 +1216,66 @@ class AgoraSession:
             logger.error("Pre-market scan failed: %s", exc)
         finally:
             self._synthesis_in_progress = False
+
+    def _maybe_graduate_strategy_selector(self) -> None:
+        """
+        Auto-promote StrategySelectorAgent from shadow → live mode when:
+          - It is currently in shadow mode
+          - ≥ 40 positions have been evaluated by the selector
+          - Selector direction hit rate ≥ 55% (where selector chose != rules engine)
+        This removes the manual step of watching metrics and flipping the flag.
+        """
+        if self._strategy_selector is None or not self._strategy_selector.shadow_mode:
+            return
+        try:
+            import sqlite3
+            with sqlite3.connect(str(self._settings.db_path)) as conn:
+                row = conn.execute(
+                    """
+                    SELECT COUNT(*) as total,
+                           SUM(CASE WHEN decision IN ('endorse','override') THEN 1 ELSE 0 END) as evaluated
+                    FROM strategy_journal
+                    WHERE shadow_mode = 1
+                    """
+                ).fetchone()
+                if not row or row[0] < 40:
+                    return
+                # Check how analyst direction theses have been performing as a proxy
+                # (strategy_journal doesn't have outcomes yet — use analyst_journal hit rate)
+                hit_row = conn.execute(
+                    """
+                    SELECT COUNT(*) as total,
+                           SUM(CASE WHEN decision = 'thesis' THEN 1 ELSE 0 END) as thesis_count
+                    FROM analyst_journal
+                    WHERE shadow_mode = 0
+                    """
+                ).fetchone()
+                if not hit_row or hit_row[0] < 40:
+                    return
+                # Use conviction outcomes as hit-rate proxy
+                outcomes = conn.execute(
+                    """
+                    SELECT outcome, COUNT(*) as cnt
+                    FROM decision_chains
+                    WHERE outcome IN ('profit','loss','filled','stopped')
+                    GROUP BY outcome
+                    """
+                ).fetchall()
+            outcome_map = {r[0]: r[1] for r in outcomes}
+            wins  = outcome_map.get("profit", 0) + outcome_map.get("filled", 0)
+            total = sum(outcome_map.values())
+            if total < 40:
+                return
+            hit_rate = wins / total
+            if hit_rate >= 0.55:
+                self._strategy_selector.shadow_mode = False
+                logger.info(
+                    "StrategySelectorAgent AUTO-GRADUATED to live mode "
+                    "(hit_rate=%.0f%% over %d closed positions)",
+                    hit_rate * 100, total,
+                )
+        except Exception as exc:
+            logger.debug("Auto-graduation check failed: %s", exc)
 
     # ── Scan cadence ───────────────────────────────────────────────
 
@@ -1033,6 +1331,844 @@ class AgoraSession:
                 except Exception as exc:
                     logger.warning("ExitAgent loop error for %s: %s", pos.ticker, exc)
 
+    async def _naked_options_loop(self) -> None:
+        """
+        NakedOptionsAgent independent scan cycle.
+
+        Runs every naked_options_scan_interval_minutes during market hours.
+        Fully separate from the spread pipeline — different gates, different sizing,
+        different journal table. Paper-mode only until execution quality confirmed.
+
+        Gates applied (everything else bypassed):
+          1. Market hours (9:30–15:30 ET, weekdays only)
+          2. Max naked positions cap
+          3. Earnings blackout (same _get_next_earnings helper as spread pipeline)
+          4. Duplicate ticker (already holding naked or spread position in same ticker)
+        """
+        from datetime import time as _time
+        from trading_platform.services.market_data.yfinance_provider import _YF_OPTIONS_LOCK
+        import yfinance as yf
+        from datetime import date as _date
+
+        interval_secs = self._settings.naked_options_scan_interval_minutes * 60
+        agent = self._naked_options_agent
+
+        # Stagger startup by 90s so the main pipeline has time to load macro
+        await asyncio.sleep(90)
+
+        while self._running:
+            now_et = datetime.now(tz=ET)
+            if now_et.weekday() >= 5 or not (_time(9, 30) <= now_et.time() <= _time(15, 30)):
+                await asyncio.sleep(60)
+                continue
+
+            # Cap check — count open naked positions
+            open_positions = self._position_mgr.get_open_positions()
+            naked_count = sum(
+                1 for p in open_positions
+                if str(getattr(p.strategy, "value", p.strategy)) in ("naked_put", "naked_call")
+            )
+            if naked_count >= self._settings.naked_options_max_positions:
+                logger.debug(
+                    "NakedOptions: cap reached (%d/%d) — sleeping %ds",
+                    naked_count, self._settings.naked_options_max_positions, interval_secs,
+                )
+                await asyncio.sleep(interval_secs)
+                continue
+
+            universe = list(dict.fromkeys(
+                self._settings.etf_universe
+                + (self._universe_disc.get_dynamic_tickers()
+                   if hasattr(self, "_universe_disc") else [])
+            ))
+
+            logger.info("NakedOptions scan: %d tickers | naked_pos=%d/%d",
+                        len(universe), naked_count, self._settings.naked_options_max_positions)
+
+            for ticker in universe:
+                if not self._running:
+                    break
+
+                # Re-check cap each iteration (fills can happen mid-loop)
+                open_positions = self._position_mgr.get_open_positions()
+                naked_count = sum(
+                    1 for p in open_positions
+                    if str(getattr(p.strategy, "value", p.strategy)) in ("naked_put", "naked_call")
+                )
+                if naked_count >= self._settings.naked_options_max_positions:
+                    break
+
+                # Duplicate ticker gate (any strategy)
+                if any(p.ticker == ticker for p in open_positions):
+                    logger.debug("NakedOptions skip %s — already holding position", ticker)
+                    continue
+
+                # Earnings blackout gate
+                try:
+                    earnings_date = await self._get_next_earnings(ticker)
+                    if earnings_date:
+                        days_to_earnings = (earnings_date - _date.today()).days
+                        if 0 <= days_to_earnings <= self._settings.earnings_blackout_days:
+                            logger.debug(
+                                "NakedOptions skip %s — earnings in %dd (blackout)",
+                                ticker, days_to_earnings,
+                            )
+                            continue
+                except Exception:
+                    earnings_date = None
+
+                # Fetch options chain (same pattern as spread pipeline)
+                try:
+                    def _fetch_naked_chain(t: str) -> dict:
+                        chain_dict: dict = {}
+                        _DTE_BRACKETS = [(14, 30), (31, 45), (46, 60)]
+                        for _attempt in range(2):
+                            try:
+                                with _YF_OPTIONS_LOCK:
+                                    tk = yf.Ticker(t)
+                                    exps = tk.options or []
+                                    if not exps and _attempt == 0:
+                                        import time as _tm; _tm.sleep(0.5)
+                                        continue
+                                    today_d = _date.today()
+                                    filled: set[int] = set()
+                                    for exp in exps:
+                                        try:
+                                            exp_date = _date.fromisoformat(exp)
+                                        except ValueError:
+                                            continue
+                                        dte = (exp_date - today_d).days
+                                        for i, (lo, hi) in enumerate(_DTE_BRACKETS):
+                                            if i not in filled and lo <= dte <= hi:
+                                                try:
+                                                    c = tk.option_chain(exp)
+                                                    chain_dict[exp] = {"calls": c.calls, "puts": c.puts}
+                                                    filled.add(i)
+                                                except Exception:
+                                                    pass
+                                                break
+                                        if len(filled) == len(_DTE_BRACKETS):
+                                            break
+                                break
+                            except Exception:
+                                if _attempt == 0:
+                                    import time as _tm; _tm.sleep(1.0)
+                        return chain_dict
+
+                    chain_dict = await asyncio.wait_for(
+                        asyncio.to_thread(_fetch_naked_chain, ticker), timeout=30.0
+                    )
+                except (asyncio.TimeoutError, Exception) as exc:
+                    logger.debug("NakedOptions chain fetch error [%s]: %s", ticker, exc)
+                    continue
+
+                if not chain_dict:
+                    continue
+
+                # Spot price
+                try:
+                    spot = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            lambda t=ticker: float(
+                                yf.Ticker(t).fast_info.get("lastPrice", 0) or
+                                yf.Ticker(t).fast_info.get("previousClose", 0)
+                            )
+                        ),
+                        timeout=10.0,
+                    )
+                except Exception:
+                    spot = 0.0
+
+                if spot <= 0:
+                    continue
+
+                # Flow signals (optional, best-effort)
+                try:
+                    flow_signals = await asyncio.wait_for(
+                        asyncio.to_thread(get_flow_signals, ticker), timeout=5.0
+                    )
+                except Exception:
+                    flow_signals = None
+
+                # Evaluate
+                decision = agent.evaluate(
+                    ticker=ticker,
+                    spot=spot,
+                    options_chain=chain_dict,
+                    macro_context=self._macro_context,
+                    flow_signals=flow_signals,
+                    session_id=self._session_id,
+                    open_positions=open_positions,
+                )
+
+                # Journal every decision (filled or skipped)
+                agent.journal(decision, str(self._settings.db_path))
+
+                if decision.recommendation is None:
+                    if decision.outcome != "skipped" or decision.block_reason:
+                        logger.debug(
+                            "NakedOptions [%s] skip: %s", ticker, decision.block_reason
+                        )
+                    continue
+
+                # Submit via same IBKR bridge as spread pipeline
+                rec = decision.recommendation
+                logger.info(
+                    "NakedOptions SUBMITTING [%s] %s strike=%.0f exp=%s prem=$%.2f",
+                    ticker, decision.strategy, decision.strike,
+                    rec.legs[0].expiration, decision.premium,
+                )
+                try:
+                    order = await submit_trade(rec, self._settings, self._session_id)
+                    order_status = order.get("status", "")
+                    logger.info(
+                        "NakedOptions order [%s]: status=%s order_id=%s",
+                        ticker, order_status, order.get("order_id"),
+                    )
+                    if order_status == "Filled":
+                        fills = order.get("fills", [])
+                        fill_price = float(fills[0]["price"]) if fills else decision.premium
+                        position_id = self._record_position(
+                            rec,
+                            ibkr_order_id=order.get("order_id", -1),
+                            regime=self._macro_context.macro_stance if self._macro_context else "",
+                            earnings_date=earnings_date,
+                            is_pre_earnings=False,
+                            spot=spot,
+                            fill_price=fill_price,
+                        )
+                        agent.journal(decision, str(self._settings.db_path), position_id or "")
+                        self._exec_quality.record_fill(ticker, fill_price, decision.premium, decision.strategy)
+                    elif order_status in ("Cancelled", "ApiCancelled", "Inactive"):
+                        self._exec_quality.record_reject(
+                            ticker, str(order.get("error_code", "")),
+                            order.get("reason", ""), decision.strategy,
+                        )
+                except Exception as submit_exc:
+                    logger.warning("NakedOptions submit error [%s]: %s", ticker, submit_exc)
+
+                # Brief pause between submissions to avoid IBKR rate limit
+                await asyncio.sleep(2)
+
+            await asyncio.sleep(interval_secs)
+
+    async def _long_options_loop(self) -> None:
+        """
+        LongOptionsAgent independent scan cycle — professional-grade directional swing.
+
+        Runs every long_options_scan_interval_minutes (default 15) during market hours.
+        Buys calls (bullish) or puts (bearish) on directional conviction.
+
+        Entry gates:
+          1. Market hours (9:30–15:30 ET, weekdays)
+          2. Intraday timing: no new entries 9:30–9:45 (price discovery) or after 3:10 (EOD risk)
+          3. Max concurrent long positions cap
+          4. Earnings blackout (same helper as spread pipeline)
+          5. Duplicate ticker (any open position in same ticker)
+          6. Per-ticker IVR gate (ATM IV / HV20 proxy — more accurate than portfolio IVR)
+
+        Exit gates (enforced per-cycle):
+          A. 5-day time stop — hard close regardless of P&L
+          B. Trailing stop  — trail 15% below peak once +30% gain is reached
+          C. 50% flat stop  — cut when option loses 50% of purchase price (pre-trail)
+          D. 50% profit target — take profit before trail activates (optional direct exit)
+        """
+        from datetime import time as _time, date as _date, timedelta
+        from trading_platform.services.market_data.yfinance_provider import _YF_OPTIONS_LOCK
+        from agora.execution.ibkr_bridge import close_trade
+        import yfinance as yf
+
+        interval_secs = self._settings.long_options_scan_interval_minutes * 60
+        max_hold      = self._settings.long_options_max_hold_days
+        # profit_tgt is the fallback; dynamic per-position target stored in pos.metadata
+        profit_tgt    = self._settings.long_options_profit_target_pct
+        stop_tgt      = self._settings.long_options_stop_loss_pct
+        trail_trigger = self._settings.long_options_trailing_stop_trigger
+        trail_floor   = self._settings.long_options_trailing_stop_floor
+        agent         = self._long_options_agent
+
+        # Stagger: 210s after spread pipeline (which staggers 90s after naked)
+        await asyncio.sleep(210)
+
+        while self._running:
+            now_et = datetime.now(tz=ET)
+            if now_et.weekday() >= 5 or not (_time(9, 30) <= now_et.time() <= _time(15, 30)):
+                await asyncio.sleep(60)
+                continue
+
+            # ── A. Time-stop sweep ────────────────────────────────────────────────
+            open_positions = self._position_mgr.get_open_positions()
+            for pos in open_positions:
+                strat = str(getattr(pos.strategy, "value", pos.strategy))
+                if strat not in ("long_call", "long_put"):
+                    continue
+                age_days = (_date.today() - pos.entry_date).days
+                if age_days >= max_hold:
+                    logger.info(
+                        "LongOptions time-stop [%s] %s — held %dd ≥ %dd limit",
+                        pos.ticker, strat, age_days, max_hold,
+                    )
+                    try:
+                        await asyncio.wait_for(close_trade(pos, self._settings), timeout=30.0)
+                        self._position_mgr.close_position(pos.position_id, reason="time_stop")
+                        from agora.agents.long_options_agent import LongOptionsAgent as _LOA
+                        _LOA.update_signal_stats(str(self._settings.db_path), pos.position_id, pos.unrealized_pnl)
+                        self._long_peak_pnl.pop(pos.position_id, None)
+                    except Exception as close_exc:
+                        logger.warning("LongOptions time-stop close error [%s]: %s", pos.ticker, close_exc)
+
+            # ── B. Trailing stop + flat stop sweep ────────────────────────────────
+            open_positions = self._position_mgr.get_open_positions()
+            for pos in open_positions:
+                strat = str(getattr(pos.strategy, "value", pos.strategy))
+                if strat not in ("long_call", "long_put"):
+                    continue
+                if pos.entry_price <= 0:
+                    continue
+
+                pnl_pct = pos.unrealized_pnl / (pos.entry_price * pos.contracts * 100)
+                pid     = pos.position_id
+
+                # Update peak P&L tracker
+                peak = self._long_peak_pnl.get(pid, 0.0)
+                if pnl_pct > peak:
+                    self._long_peak_pnl[pid] = pnl_pct
+                    peak = pnl_pct
+
+                closed = False
+
+                # Use dynamic per-position profit target if stored at entry; else config default.
+                # Dynamic target: conviction 2→40%, 3→50%, 4→75%, 5+→100%.
+                _pos_pt = float(
+                    (getattr(pos, "metadata", None) or {}).get("profit_target_pct", profit_tgt)
+                )
+                pos_profit_tgt = _pos_pt if 0.10 <= _pos_pt <= 2.0 else profit_tgt
+
+                # Urgency taper: within 3 days of target_close, halve the profit threshold
+                # and tighten the trail floor. Time value is evaporating — lock in any gain.
+                days_to_close = (pos.target_close_date - _date.today()).days if pos.target_close_date else 999
+                urgent = days_to_close <= 3
+                effective_profit_tgt  = pos_profit_tgt * 0.5 if urgent else pos_profit_tgt
+                effective_trail_floor = trail_floor * 0.5 if urgent else trail_floor
+                if urgent and pnl_pct > 0:
+                    logger.debug(
+                        "LongOptions [%s] urgency mode: %dd to close, PT=%.0f%% floor=%.0f%%",
+                        pos.ticker, days_to_close, effective_profit_tgt * 100, effective_trail_floor * 100,
+                    )
+
+                # Hard profit target (fires before trail is active)
+                if pnl_pct >= effective_profit_tgt and peak < trail_trigger:
+                    logger.info(
+                        "LongOptions profit-target [%s] +%.0f%% — closing",
+                        pos.ticker, pnl_pct * 100,
+                    )
+                    try:
+                        await asyncio.wait_for(close_trade(pos, self._settings), timeout=30.0)
+                        self._position_mgr.close_position(pid, reason="profit_target")
+                        from agora.agents.long_options_agent import LongOptionsAgent as _LOA
+                        _LOA.update_signal_stats(str(self._settings.db_path), pid, pos.unrealized_pnl)
+                        self._long_peak_pnl.pop(pid, None)
+                        closed = True
+                    except Exception as e:
+                        logger.warning("LongOptions profit-close error [%s]: %s", pos.ticker, e)
+
+                # Trailing stop (activates after peak ≥ trail_trigger)
+                if not closed and peak >= trail_trigger:
+                    trail_stop = peak - effective_trail_floor
+                    if pnl_pct <= trail_stop:
+                        logger.info(
+                            "LongOptions trail-stop [%s] pnl=+%.0f%% peak=+%.0f%% trail=+%.0f%% — closing",
+                            pos.ticker, pnl_pct * 100, peak * 100, trail_stop * 100,
+                        )
+                        try:
+                            await asyncio.wait_for(close_trade(pos, self._settings), timeout=30.0)
+                            self._position_mgr.close_position(pid, reason="trailing_stop")
+                            from agora.agents.long_options_agent import LongOptionsAgent as _LOA
+                            _LOA.update_signal_stats(str(self._settings.db_path), pid, pos.unrealized_pnl)
+                            self._long_peak_pnl.pop(pid, None)
+                            closed = True
+                        except Exception as e:
+                            logger.warning("LongOptions trail-close error [%s]: %s", pos.ticker, e)
+
+                # Flat stop loss (pre-trail, position has not yet gone +30%)
+                if not closed and pnl_pct <= -stop_tgt:
+                    logger.info(
+                        "LongOptions stop-loss [%s] %.0f%% ≤ -%.0f%% — closing",
+                        pos.ticker, pnl_pct * 100, stop_tgt * 100,
+                    )
+                    try:
+                        await asyncio.wait_for(close_trade(pos, self._settings), timeout=30.0)
+                        self._position_mgr.close_position(pid, reason="stop_loss")
+                        from agora.agents.long_options_agent import LongOptionsAgent as _LOA
+                        _LOA.update_signal_stats(str(self._settings.db_path), pid, pos.unrealized_pnl)
+                        self._long_peak_pnl.pop(pid, None)
+                    except Exception as e:
+                        logger.warning("LongOptions stop-close error [%s]: %s", pos.ticker, e)
+
+            # ── C. Intraday timing gate — no entries in price discovery or EOD window ──
+            # Skip entries 9:30–9:45 ET (price discovery) and after 3:10 ET (EOD risk).
+            now_et = datetime.now(tz=ET)
+            in_price_discovery = _time(9, 30) <= now_et.time() < _time(9, 45)
+            too_late_for_entry = now_et.time() >= _time(15, 10)
+            if in_price_discovery or too_late_for_entry:
+                reason = "price_discovery" if in_price_discovery else "eod_window"
+                logger.debug("LongOptions entry gate: %s — skipping scan", reason)
+                await asyncio.sleep(interval_secs)
+                continue
+
+            # ── D. Entry scan ─────────────────────────────────────────────────────
+            open_positions = self._position_mgr.get_open_positions()
+            long_count = sum(
+                1 for p in open_positions
+                if str(getattr(p.strategy, "value", p.strategy)) in ("long_call", "long_put")
+            )
+            if long_count >= self._settings.long_options_max_positions:
+                logger.debug(
+                    "LongOptions: cap reached (%d/%d) — sleeping %ds",
+                    long_count, self._settings.long_options_max_positions, interval_secs,
+                )
+                await asyncio.sleep(interval_secs)
+                continue
+
+            universe = list(dict.fromkeys(
+                self._settings.etf_universe
+                + (self._universe_disc.get_dynamic_tickers()
+                   if hasattr(self, "_universe_disc") else [])
+            ))
+
+            logger.info("LongOptions scan: %d tickers | long_pos=%d/%d",
+                        len(universe), long_count, self._settings.long_options_max_positions)
+
+            # Per-cycle dedupe: prevents duplicate orders when overlapping scan cycles
+            # evaluate the same ticker (observed with FLNC at 13:13/13:14, MU 3× same session)
+            _submitted_this_cycle: set[str] = set()
+
+            for ticker in universe:
+                if not self._running:
+                    break
+
+                # Re-check cap mid-loop
+                open_positions = self._position_mgr.get_open_positions()
+                long_count = sum(
+                    1 for p in open_positions
+                    if str(getattr(p.strategy, "value", p.strategy)) in ("long_call", "long_put")
+                )
+                if long_count >= self._settings.long_options_max_positions:
+                    break
+
+                # Duplicate ticker gate
+                if any(p.ticker == ticker for p in open_positions):
+                    continue
+
+                # Earnings blackout gate + days_to_catalyst computation
+                earnings_date     = None
+                days_to_catalyst  = None
+                try:
+                    earnings_date = await self._get_next_earnings(ticker)
+                    if earnings_date:
+                        days_to_earnings = (earnings_date - _date.today()).days
+                        if 0 <= days_to_earnings <= self._settings.earnings_blackout_days:
+                            logger.debug(
+                                "LongOptions skip %s — earnings in %dd (blackout)",
+                                ticker, days_to_earnings,
+                            )
+                            continue
+                        if days_to_earnings > 0:
+                            days_to_catalyst = days_to_earnings
+                except Exception:
+                    pass
+
+                # Options chain fetch — DTE window [21, 60]
+                try:
+                    def _fetch_long_chain(t: str) -> dict:
+                        chain_dict: dict = {}
+                        _DTE_BRACKETS = [(21, 35), (36, 50), (51, 60)]
+                        for _attempt in range(2):
+                            try:
+                                with _YF_OPTIONS_LOCK:
+                                    tk   = yf.Ticker(t)
+                                    exps = tk.options or []
+                                    if not exps and _attempt == 0:
+                                        import time as _tm; _tm.sleep(0.5)
+                                        continue
+                                    today_d = _date.today()
+                                    filled: set[int] = set()
+                                    for exp in exps:
+                                        try:
+                                            exp_date = _date.fromisoformat(exp)
+                                        except ValueError:
+                                            continue
+                                        dte = (exp_date - today_d).days
+                                        for i, (lo, hi) in enumerate(_DTE_BRACKETS):
+                                            if i not in filled and lo <= dte <= hi:
+                                                try:
+                                                    c = tk.option_chain(exp)
+                                                    chain_dict[exp] = {"calls": c.calls, "puts": c.puts}
+                                                    filled.add(i)
+                                                except Exception:
+                                                    pass
+                                                break
+                                        if len(filled) == len(_DTE_BRACKETS):
+                                            break
+                                break
+                            except Exception:
+                                if _attempt == 0:
+                                    import time as _tm; _tm.sleep(1.0)
+                        return chain_dict
+
+                    chain_dict = await asyncio.wait_for(
+                        asyncio.to_thread(_fetch_long_chain, ticker), timeout=30.0
+                    )
+                except Exception as exc:
+                    logger.debug("LongOptions chain fetch error [%s]: %s", ticker, exc)
+                    continue
+
+                if not chain_dict:
+                    continue
+
+                # Spot price
+                try:
+                    spot = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            lambda t=ticker: float(
+                                yf.Ticker(t).fast_info.get("lastPrice", 0) or
+                                yf.Ticker(t).fast_info.get("previousClose", 0)
+                            )
+                        ),
+                        timeout=10.0,
+                    )
+                except Exception:
+                    spot = 0.0
+                if spot <= 0:
+                    continue
+
+                # Momentum (RSI14 + SMA20/50 + 10d return) — also returns closes for IVR
+                momentum: dict = {}
+                closes_series = None
+                try:
+                    def _compute_momentum(t: str, s: float) -> tuple[dict, Any]:
+                        import pandas as pd
+                        hist = yf.Ticker(t).history(period="3mo", interval="1d")
+                        if hist.empty or len(hist) < 22:
+                            return {}, None
+                        closes = hist["Close"].dropna()
+                        sma20  = float(closes.rolling(20).mean().iloc[-1])
+                        sma50  = float(closes.rolling(50).mean().iloc[-1]) if len(closes) >= 50 else sma20
+                        delta  = closes.diff()
+                        gain   = delta.clip(lower=0).rolling(14).mean()
+                        loss   = (-delta.clip(upper=0)).rolling(14).mean()
+                        rs     = gain.iloc[-1] / (loss.iloc[-1] + 1e-9)
+                        rsi    = float(100 - (100 / (1 + rs)))
+                        # 10-day relative return for RS signal
+                        ret_10d = (
+                            float(closes.iloc[-1] / closes.iloc[-11] - 1)
+                            if len(closes) >= 11 else 0.0
+                        )
+                        # Volume surge: today vs 20-day avg
+                        vol_surge = False
+                        if "Volume" in hist.columns:
+                            vols = hist["Volume"].dropna()
+                            if len(vols) >= 21:
+                                avg_vol20 = float(vols.iloc[-21:-1].mean())
+                                vol_surge = avg_vol20 > 0 and float(vols.iloc[-1]) > 2.0 * avg_vol20
+                        # HV5/HV20 breakout signal for DTE compression
+                        hv5  = 0.0
+                        hv20 = 0.0
+                        if len(closes) >= 21:
+                            import numpy as _np
+                            log_ret = _np.log(closes / closes.shift(1)).dropna()
+                            hv20 = float(log_ret.tail(20).std() * _np.sqrt(252))
+                            if len(log_ret) >= 5:
+                                hv5 = float(log_ret.tail(5).std() * _np.sqrt(252))
+                        mom = {
+                            "rsi":         rsi,
+                            "rsi_norm":    rsi / 100.0,
+                            "sma20":       sma20,
+                            "sma50":       sma50,
+                            "above_sma20": s > sma20,
+                            "above_sma50": s > sma50,
+                            "ret_10d":     ret_10d,
+                            "vol_surge":   vol_surge,
+                            "hv5":         hv5,
+                            "hv20":        hv20,
+                        }
+                        return mom, closes
+
+                    mom_result = await asyncio.wait_for(
+                        asyncio.to_thread(_compute_momentum, ticker, spot), timeout=15.0
+                    )
+                    momentum, closes_series = mom_result
+                except Exception:
+                    momentum = {}
+                    closes_series = None
+
+                # Per-ticker IVR (ATM IV / HV20 proxy — more precise than portfolio IVR)
+                per_ticker_ivr: float | None = None
+                if closes_series is not None and chain_dict:
+                    try:
+                        per_ticker_ivr = agent.compute_per_ticker_ivr(
+                            chain_dict, spot, closes_series
+                        )
+                        if per_ticker_ivr is not None:
+                            logger.debug(
+                                "LongOptions [%s] per-ticker IVR=%.0f", ticker, per_ticker_ivr
+                            )
+                    except Exception:
+                        pass
+
+                # GEX regime (best-effort)
+                gex_regime = "neutral"
+                try:
+                    from trading_platform.services.options_flow import get_gex
+                    gex_data   = await asyncio.wait_for(
+                        asyncio.to_thread(get_gex, ticker), timeout=5.0
+                    )
+                    gex_regime = str(getattr(gex_data, "regime", "neutral") or "neutral")
+                except Exception:
+                    pass
+
+                # Flow signals (best-effort)
+                flow_signals = None
+                try:
+                    flow_signals = await asyncio.wait_for(
+                        asyncio.to_thread(get_flow_signals, ticker), timeout=5.0
+                    )
+                except Exception:
+                    pass
+
+                # ── #8 Portfolio net-delta budget — block new LONG CALL if net delta
+                # exceeds 150 per $10k of account. Prevents runaway directional exposure
+                # when the whole long options book is already leaning one way.
+                # Net delta = sum of (contract_delta × contracts × 100) for all longs.
+                try:
+                    _acct_units   = max(1, self._settings.account_size / 10_000)
+                    _delta_budget = 150.0 * _acct_units
+                    _all_pos      = self._position_mgr.get_open_positions()
+                    _net_delta    = 0.0
+                    for _p in _all_pos:
+                        _strat = str(getattr(_p.strategy, "value", _p.strategy))
+                        _d     = float(getattr(_p, "delta", 0.0) or 0.0)
+                        _c     = int(getattr(_p, "contracts", 1) or 1)
+                        if _strat == "long_call":
+                            _net_delta += _d * _c * 100
+                        elif _strat == "long_put":
+                            _net_delta -= abs(_d) * _c * 100
+                    if _net_delta >= _delta_budget:
+                        logger.debug(
+                            "LongOptions [%s] skip — net delta %.0f ≥ budget %.0f",
+                            ticker, _net_delta, _delta_budget,
+                        )
+                        continue
+                except Exception:
+                    pass
+
+                # Pre-earnings drift window: T-7 to T-3 with positive RS
+                # (stock drifts toward catalyst — buy the drift, not the event)
+                _pre_drift = (
+                    days_to_catalyst is not None
+                    and 3 <= days_to_catalyst <= 7
+                    and momentum.get("ret_10d", 0.0) > 0.03
+                )
+                if _pre_drift:
+                    logger.debug(
+                        "LongOptions [%s] pre-earnings drift window: %dd to earnings, "
+                        "RS=%.1f%% — lowering conviction floor to 1",
+                        ticker, days_to_catalyst, momentum.get("ret_10d", 0.0) * 100,
+                    )
+
+                # Evaluate — pass per-ticker IVR, catalyst context, and live news signals
+                decision = agent.evaluate(
+                    ticker=ticker,
+                    spot=spot,
+                    options_chain=chain_dict,
+                    macro_context=self._macro_context,
+                    flow_signals=flow_signals,
+                    momentum=momentum,
+                    gex_regime=gex_regime,
+                    session_id=self._session_id,
+                    per_ticker_ivr=per_ticker_ivr,
+                    days_to_catalyst=days_to_catalyst,
+                    pre_earnings_drift=_pre_drift,
+                    news_context=self._news_context,
+                )
+
+                # Journal every decision (entry + skips)
+                agent.journal(decision, str(self._settings.db_path))
+
+                if decision.recommendation is None:
+                    if decision.block_reason:
+                        logger.debug("LongOptions [%s] skip: %s", ticker, decision.block_reason)
+                    continue
+
+                # ── Opus 4.8 quality vetter (shadow or live) ─────────────────
+                if self._long_vetter is not None:
+                    try:
+                        verdict = await asyncio.wait_for(
+                            self._long_vetter.vet(decision, self._macro_context, momentum),
+                            timeout=60.0,
+                        )
+                        if verdict is not None:
+                            self._long_vetter.journal(
+                                decision, verdict, str(self._settings.db_path)
+                            )
+                            if not verdict.shadow_mode:
+                                if verdict.verdict == "skip":
+                                    logger.info(
+                                        "LongOptions vetter BLOCK [%s] conf=%d: %s",
+                                        ticker, verdict.confidence, verdict.key_risk,
+                                    )
+                                    continue
+                                elif verdict.verdict == "reduce" and verdict.adjusted_contracts:
+                                    adj = max(1, verdict.adjusted_contracts)
+                                    if adj < decision.contracts:
+                                        logger.info(
+                                            "LongOptions vetter REDUCE [%s] %d→%d contracts: %s",
+                                            ticker, decision.contracts, adj, verdict.reasoning,
+                                        )
+                                        decision.contracts = adj
+                                        rec = decision.recommendation
+                                        rec.legs[0].contracts = adj
+                                        rec.contracts = adj
+                                        rec.entry_debit_credit = round(
+                                            decision.premium * 100 * adj, 2
+                                        )
+                    except asyncio.TimeoutError:
+                        logger.warning("LongOptionsVetter timeout [%s] — proceeding", ticker)
+                    except Exception as vex:
+                        logger.debug("LongOptionsVetter error [%s]: %s", ticker, vex)
+
+                # Per-cycle dedupe gate
+                if ticker in _submitted_this_cycle:
+                    logger.debug("LongOptions [%s] skipped — already submitted this cycle", ticker)
+                    continue
+
+                # Submit
+                rec = decision.recommendation
+                logger.info(
+                    "LongOptions SUBMITTING [%s] %s strike=%.0f exp=%s prem=$%.2f "
+                    "contracts=%d conviction=%d ptIVR=%.0f",
+                    ticker, decision.strategy, decision.strike,
+                    rec.legs[0].expiration, decision.premium,
+                    decision.contracts, decision.conviction,
+                    decision.per_ticker_ivr,
+                )
+                try:
+                    order = await submit_trade(rec, self._settings, self._session_id)
+                    order_status = order.get("status", "")
+                    logger.info(
+                        "LongOptions order [%s]: status=%s order_id=%s",
+                        ticker, order_status, order.get("order_id"),
+                    )
+                    if order_status == "Filled":
+                        fills      = order.get("fills", [])
+                        fill_price = float(fills[0]["price"]) if fills else decision.premium
+                        time_stop_date = _date.today() + timedelta(days=max_hold)
+                        position_id = self._record_position(
+                            rec,
+                            ibkr_order_id=order.get("order_id", -1),
+                            regime=self._macro_context.macro_stance if self._macro_context else "",
+                            earnings_date=earnings_date,
+                            is_pre_earnings=False,
+                            spot=spot,
+                            fill_price=fill_price,
+                            target_close_date_override=time_stop_date,
+                            extra_metadata={
+                                "profit_target_pct": decision.profit_target_pct,
+                                "signal_quality":    decision.signal_quality,
+                                "conviction":        decision.conviction,
+                            },
+                        )
+                        if position_id:
+                            self._long_peak_pnl[position_id] = 0.0
+                        agent.journal(decision, str(self._settings.db_path), position_id or "")
+                        self._exec_quality.record_fill(ticker, fill_price, decision.premium, decision.strategy)
+                        _submitted_this_cycle.add(ticker)
+                    elif order_status in ("Cancelled", "ApiCancelled", "Inactive"):
+                        self._exec_quality.record_reject(
+                            ticker, str(order.get("error_code", "")),
+                            order.get("reason", ""), decision.strategy,
+                        )
+                except Exception as submit_exc:
+                    logger.warning("LongOptions submit error [%s]: %s", ticker, submit_exc)
+
+                await asyncio.sleep(2)
+
+            await asyncio.sleep(interval_secs)
+
+    async def _news_watch_loop(self) -> None:
+        """
+        Polls NewsSignalBus every 30s and acts on three tiers:
+
+          Tier 1 — Trading halts: immediately close any position in a halted ticker.
+          Tier 2 — Macro events: override self._macro_context.macro_stance so all
+                   subsequent scoring calls see the updated regime without waiting
+                   for the next MacroSynthesizer cycle (which runs every 30 min).
+          Tier 3 — Ticker flags: stored in self._news_context for agents to read
+                   when scoring direction (advisory +1 signal, never a hard block).
+
+        Runs even when uw_alerts table is empty — get_news_context() returns
+        an empty NewsContext silently in that case.
+        """
+        from agora.services.news_signals import get_news_context, NewsContext
+        from agora.execution.ibkr_bridge import close_trade as _close_trade
+
+        _alerted_halts:  set[str] = set()   # suppress repeated Discord alerts per halt
+        _last_macro_ts:  str      = ""      # track which macro event we've already applied
+
+        while self._running:
+            try:
+                ctx = get_news_context(str(self._settings.db_path))
+                self._news_context = ctx
+
+                # ── Tier 1: halt detection → close positions ────────────────
+                if ctx.halted_tickers:
+                    open_pos = self._position_mgr.get_open_positions()
+                    for pos in open_pos:
+                        if pos.ticker not in ctx.halted_tickers:
+                            continue
+                        if pos.ticker in _alerted_halts:
+                            continue  # already actioned this halt
+                        logger.warning(
+                            "NEWS HALT: %s trading halted — closing position %s",
+                            pos.ticker, pos.position_id,
+                        )
+                        try:
+                            await asyncio.wait_for(
+                                _close_trade(pos, self._settings), timeout=30.0
+                            )
+                            self._position_mgr.close_position(
+                                pos.position_id, reason="news_halt"
+                            )
+                            _alerted_halts.add(pos.ticker)
+                        except Exception as ce:
+                            logger.error("News halt close error [%s]: %s", pos.ticker, ce)
+                else:
+                    # Halt lifted — clear suppression so we'd re-act on a new halt
+                    _alerted_halts.clear()
+
+                # ── Tier 2: macro event → update macro_stance ──────────────
+                if ctx.macro_event and self._macro_context:
+                    event_key = f"{ctx.macro_event.stance}|{ctx.macro_event.ts.isoformat()}"
+                    if event_key != _last_macro_ts:
+                        old = self._macro_context.macro_stance
+                        new = ctx.macro_event.stance
+                        if old != new:
+                            logger.info(
+                                "NEWS MACRO: stance %s → %s (%s)",
+                                old, new, ctx.macro_event.reason,
+                            )
+                            self._macro_context.macro_stance = new
+                            # Refresh timestamp so macro staleness gate sees this as fresh
+                            self._macro_context.timestamp = ctx.macro_event.ts
+                        _last_macro_ts = event_key
+
+                # Tier 3 (ticker flags) is read passively by agents via self._news_context.
+
+            except Exception as exc:
+                logger.debug("_news_watch_loop error: %s", exc)
+
+            await asyncio.sleep(30)
+
     async def _exit_agent_close_position(self, position_id: str, reason: str) -> None:
         """
         Callback invoked by ExitIntelligenceAgent when it recommends CLOSE_NOW in live mode.
@@ -1048,7 +2184,7 @@ class AgoraSession:
             logger.warning("ExitAgent close: position %s not found", position_id)
             return
         try:
-            order = await close_trade(pos, self._settings, reason=f"exit_agent: {reason[:100]}")
+            order = await close_trade(pos, self._settings, self._session_id)
             logger.info("ExitAgent close order: %s | status=%s", pos.ticker, order.get("status"))
             # Broadcast CLOSE_NOW to dashboard WebSocket clients
             try:
@@ -1302,14 +2438,36 @@ class AgoraSession:
         """Full signal stack for one ticker → trade recommendation → risk gate → order."""
         _sector_direction_override: str | None = None   # set by sector momentum bypass
         try:
+            # Error 201 session block: paper account can't do combo orders for this ticker.
+            if ticker in self._error_201_blocked:
+                logger.debug("Skip %s: Error 201 blocked for this session", ticker)
+                return
+
             # Earnings interlock: skip if we already have a pre-earnings position
-            # to prevent double-entry, and block vol-premium entry within blackout window.
+            # to prevent double-entry.
             if ticker in self._pre_earnings_tickers:
                 logger.debug(
                     "Skip %s: pre-earnings position already active (earnings %s)",
                     ticker, self._pre_earnings_tickers[ticker],
                 )
                 return
+
+            # Earnings blackout gate: block new vol-premium entries within N days of earnings.
+            # Uses IBKR CalendarReport (primary) / yfinance (fallback) via _get_next_earnings.
+            # Pre-earnings plays are exempted — they are intentionally entered before earnings.
+            from datetime import date as _date
+            _today = _date.today()
+            _blackout = self._settings.earnings_blackout_days
+            _next_earn = await self._get_next_earnings(ticker)
+            if _next_earn is not None:
+                _days_to_earn = (_next_earn - _today).days
+                if 0 <= _days_to_earn <= _blackout:
+                    logger.info(
+                        "EARNINGS BLACKOUT: %s — earnings in %dd (%s), blocking new entry "
+                        "(blackout=%dd). Use pre-earnings play to trade into this event.",
+                        ticker, _days_to_earn, _next_earn, _blackout,
+                    )
+                    return
 
             from trading_platform.services.market_data.yfinance_provider import YFinanceProvider
             from trading_platform.services.options_flow import get_gex
@@ -1319,8 +2477,12 @@ class AgoraSession:
             if not snap or not snap.price:
                 return
 
-            # IV premium signal — use VIX/100 as ATM IV proxy; hist_vol_30 as realized vol
-            atm_iv_proxy = (snap.vix / 100) if (snap.vix is not None and snap.vix > 0) else (snap.hist_vol_30 * 1.25 if snap.hist_vol_30 else None)
+            # IV premium signal — use ticker-specific hist_vol * 1.25 as ATM IV proxy.
+            # VIX/100 is SPX vol and is wrong by 3x for high-IV stocks (NVDA ~60% vs VIX ~20%).
+            atm_iv_proxy = (
+                snap.hist_vol_30 * 1.25 if snap.hist_vol_30
+                else (snap.vix / 100 if snap.vix and snap.vix > 0 else None)
+            )
             iv_signal = self._iv_screen.check(ticker, atm_iv_proxy, snap.hist_vol_30)
 
             # GEX signal
@@ -1372,14 +2534,26 @@ class AgoraSession:
                 confidence=self._macro_context.confidence if self._macro_context else 0.5,
             )
 
-            # Microstructure signal
+            # Microstructure signal: OR logic — any single condition fires direction.
+            # GEX negative: dealers short-gamma, direction from price vs SMA50.
+            # RSI > 65 or RSI < 35: standalone momentum extreme (no GEX required).
+            # IV premium: vol environment confirmed, directional edge requires GEX/RSI.
             micro_dir = "neutral"
             micro_conf = 0.5
-            if gex and gex.regime == GexRegime.NEGATIVE and snap.rsi_14 and snap.rsi_14 > 55:
+            if gex and gex.regime == GexRegime.NEGATIVE:
+                micro_conf = 0.60
+                if snap.price and snap.sma_50:
+                    micro_dir = "bullish" if snap.price > snap.sma_50 else "bearish"
+                elif snap.rsi_14:
+                    micro_dir = "bullish" if snap.rsi_14 > 50 else "bearish"
+            elif snap.rsi_14 and snap.rsi_14 > 65:
                 micro_dir = "bullish"
-                micro_conf = 0.65
+                micro_conf = 0.60
+            elif snap.rsi_14 and snap.rsi_14 < 35:
+                micro_dir = "bearish"
+                micro_conf = 0.60
             elif iv_prem and iv_prem.signal_active:
-                micro_conf = 0.70
+                micro_conf = 0.55  # vol environment confirmed, no directional signal
 
             micro_input = SignalInput(
                 source="microstructure",
@@ -1402,6 +2576,16 @@ class AgoraSession:
             # Market interest score — fetched before scorer so it's a proper weighted component
             mi_score = self._market_interest.get_interest_score(ticker)
 
+            # Build catalyst signal from event when present (catalysts via async callback
+            # only reach running positions; universe scan uses event_engine as the proxy).
+            catalyst_input: SignalInput | None = None
+            if event and event.direction != "neutral":
+                catalyst_input = SignalInput(
+                    source="catalyst",
+                    direction=event.direction,
+                    confidence=event.confidence,
+                )
+
             conviction = self._scorer.score(
                 ticker=ticker,
                 session_id=self._session_id,
@@ -1420,12 +2604,15 @@ class AgoraSession:
                 # Boost conviction when peers confirm direction
                 intel_dir = sector_intel.read_through_direction
                 macro_dir = self._macro_context.macro_stance if self._macro_context else "neutral"
+                pre_boost = conviction.total_score
                 if intel_dir == "bullish" and macro_dir in ("risk_on", "neutral"):
                     conviction.total_score = min(conviction.total_score * 1.10, 95.0)
-                    logger.debug("Sector intel boost for %s: %.0f → %.0f", ticker,
-                                 conviction.total_score / 1.10, conviction.total_score)
+                    logger.debug("Sector intel boost (bullish) for %s: %.0f → %.0f",
+                                 ticker, pre_boost, conviction.total_score)
                 elif intel_dir == "bearish" and macro_dir in ("risk_off", "neutral"):
                     conviction.total_score = min(conviction.total_score * 1.10, 95.0)
+                    logger.debug("Sector intel boost (bearish) for %s: %.0f → %.0f",
+                                 ticker, pre_boost, conviction.total_score)
 
             # Record pillar health signals for liveness tracking
             macro_dir = (self._macro_context.macro_stance if self._macro_context else "neutral")
@@ -1445,20 +2632,34 @@ class AgoraSession:
                     ticker=ticker, score=mi_score.score * 10,
                 )
 
+            # Supplementary: sector momentum when avg_move ≥ 2% (not a spike)
+            _resolver_supplementary: list | None = None
+            _sm_pre = self._intraday_sector.get_active_signal(ticker)
+            if _sm_pre is not None and abs(_sm_pre.avg_move_pct) >= 2.0:
+                _resolver_supplementary = [
+                    SignalInput(
+                        source="sector_momentum",
+                        direction=_sm_pre.direction,
+                        confidence=min(0.75, 0.50 + abs(_sm_pre.avg_move_pct) / 20.0),
+                    )
+                ]
+
             # Resolve disagreement → size multiplier
             resolution = self._resolver.resolve(
                 macro=macro_input,
                 microstructure=micro_input,
-                catalyst=None,
+                catalyst=catalyst_input,
                 regime=self._macro_context.macro_stance if self._macro_context else "normal",
                 total_conviction=conviction.total_score,
+                supplementary=_resolver_supplementary,
             )
 
             if resolution["gate"] == "no_trade":
                 # Vol-premium bypass: when IV rank is elevated and macro allows selling,
                 # sell premium non-directionally. Uses a lower conviction floor than
                 # directional trades since credit spreads are non-directional.
-                ivr_threshold = self._settings.ivr_bypass_threshold
+                # IVR threshold and conviction floor scale with market regime via DynamicParams.
+                ivr_threshold = self._dynamic_params.ivr_bypass_threshold
                 iv_rank_elevated = snap.iv_rank is not None and snap.iv_rank >= ivr_threshold
                 # At extreme IVR (≥ high_ivr_threshold, default 90), IV compression is the
                 # primary risk — a conviction of 50 is noise, not edge. Require full floor.
@@ -1490,7 +2691,7 @@ class AgoraSession:
                     _macro_stance = self._macro_context.macro_stance if self._macro_context else "neutral"
                     _sm_spike_ok = (
                         _sm_sig is not None
-                        and abs(_sm_sig.avg_move_pct) <= 8.0
+                        and abs(_sm_sig.avg_move_pct) <= self._dynamic_params.sector_spike_cap_pct
                     )
                     _sm_regime_ok = (
                         regime_signal is None
@@ -1697,6 +2898,9 @@ class AgoraSession:
                 options_chain=chain_dict,
                 gex=gex,
                 direction_override=_direction_hint,
+                iv_rank=snap.iv_rank,
+                vix=snap.vix,
+                dynamic_params=self._dynamic_params,
             )
 
             if not recommendation:
@@ -1708,7 +2912,10 @@ class AgoraSession:
             # ── StrategySelectorAgent (Phase 6) ───────────────────────
             # Shadow: journals selection, rules engine result used for execution.
             # Live: override decision can change strategy type (rules engine re-runs).
-            if self._strategy_selector and _thesis:
+            # Run regardless of whether analyst produced a thesis — selector validates
+            # the rules engine output even when no analyst thesis is available
+            # (e.g. vol_premium bypass where conviction < stock_analyst_min_conviction).
+            if self._strategy_selector:
                 _selection = await self._strategy_selector.select(
                     ticker=ticker,
                     thesis=_thesis,
@@ -1728,6 +2935,37 @@ class AgoraSession:
                                     strategy="selector_no_structure")
                     logger.info("StrategySelector: no_structure for %s — %s", ticker, _selection.rationale)
                     return
+
+            # ── IV Skew informational log (non-blocking) ─────────────────
+            # Steep put skew on a bullish trade signals puts are rich;
+            # note this so traders can consider put-credit structures instead.
+            try:
+                from agora.ops.skew_analyzer import analyze_skew as _analyze_skew
+                _skew_result = _analyze_skew(chain_dict, snap.price)
+                if _skew_result is not None:
+                    if (
+                        _skew_result.skew_regime == "steep_put_skew"
+                        and recommendation.direction == "bullish"
+                    ):
+                        logger.info(
+                            "Skew alert [%s]: steep put skew (skew_pct=%.1%%) on bullish trade — "
+                            "puts are rich; consider put-credit structure (CSP/bull-put-spread) "
+                            "over long call. %s",
+                            ticker, _skew_result.skew_pct, _skew_result.reason_str,
+                        )
+                    elif _skew_result.skew_regime == "call_skewed":
+                        logger.info(
+                            "Skew alert [%s]: call skew detected (skew_pct=%.1%%) — "
+                            "calls are expensive; prefer call-credit structures. %s",
+                            ticker, _skew_result.skew_pct, _skew_result.reason_str,
+                        )
+                    else:
+                        logger.debug(
+                            "Skew [%s]: regime=%s skew_pct=%.1%%",
+                            ticker, _skew_result.skew_regime, _skew_result.skew_pct,
+                        )
+            except Exception as _skew_exc:
+                logger.debug("Skew analysis failed for %s: %s", ticker, _skew_exc)
 
             await self._submit_recommendation(
                 recommendation, ticker, snap.price,
@@ -1924,6 +3162,40 @@ class AgoraSession:
                 # Past journal entries for learning context
                 past_entries = self._swing_journal.get_past_entries(ticker, limit=5)
 
+                # Semantic memory: similar past trades
+                _similar_trades: list[dict] = []
+                if self._semantic_store:
+                    try:
+                        _similar_trades = self._semantic_store.find_similar(
+                            ticker=ticker,
+                            direction=factors.direction,
+                            factor_breakdown=factors.as_dict(),
+                            k=5,
+                        )
+                    except Exception:
+                        pass
+
+                # Options flow: volume/OI anomaly signals (3s timeout, non-blocking)
+                _flow_signals: dict | None = None
+                try:
+                    _flow_result = await asyncio.wait_for(
+                        get_flow_signals(ticker), timeout=8.0
+                    )
+                    if _flow_result is not None:
+                        import dataclasses as _dc
+                        _flow_signals = _dc.asdict(_flow_result)
+                except Exception:
+                    pass
+
+                # Chart vision: candlestick chart → base64 PNG for Claude Vision
+                _chart_b64: str | None = None
+                try:
+                    _chart_b64 = await asyncio.wait_for(
+                        render_chart_base64(ticker, period="3mo"), timeout=15.0
+                    )
+                except Exception:
+                    pass
+
                 # Build snapshot summary dict for Claude prompt
                 snap_summary = {
                     "rsi_14":         snap.rsi_14,
@@ -1937,6 +3209,7 @@ class AgoraSession:
                     "volume":         snap.volume,
                 }
 
+                _swing_trace_id = f"SWING-{ticker}-{self._session_id}"
                 decision = await self._swing_judge.judge(
                     ticker=ticker,
                     price=snap.price,
@@ -1945,6 +3218,12 @@ class AgoraSession:
                     sector_context=sector_context,
                     past_journal_entries=past_entries,
                     options_chain_summary=chain_summary or None,
+                    vix=snap.vix,
+                    regime=self._macro_context.macro_stance if self._macro_context else "normal",
+                    chart_b64=_chart_b64,
+                    similar_trades=_similar_trades or None,
+                    flow_signals=_flow_signals,
+                    trace_id=_swing_trace_id,
                 )
 
                 # Set 30-min cooldown so we don't re-score the same ticker this cycle
@@ -1957,6 +3236,17 @@ class AgoraSession:
                     price_at_decision=snap.price,
                     session_id=self._session_id,
                 )
+
+                # Index decision in semantic memory for future similarity searches
+                if self._semantic_store and journal_id:
+                    try:
+                        self._semantic_store.index_decision(
+                            journal_id=journal_id,
+                            ticker=ticker,
+                            decision=decision,
+                        )
+                    except Exception:
+                        pass
 
                 logger.info(
                     "Swing decision %s: go=%s confidence=%.0f%% | %s",
@@ -2077,7 +3367,15 @@ class AgoraSession:
                     ),
                 )
 
-                await self._submit_recommendation(rec, ticker, snap.price, triggered_by="swing")
+                _swing_chain_id = _start_chain(
+                    str(self._settings.db_path), ticker,
+                    triggered_by="swing", session_id=self._session_id,
+                    conviction=decision.confidence * 100,
+                )
+                await self._submit_recommendation(
+                    rec, ticker, snap.price,
+                    triggered_by="swing", chain_id=_swing_chain_id,
+                )
 
             except Exception as exc:
                 logger.error("Swing scan failed for %s: %s", ticker, exc)
@@ -2206,7 +3504,15 @@ class AgoraSession:
             )
 
             if recommendation:
-                await self._submit_recommendation(recommendation, catalyst.ticker, spot, triggered_by="catalyst")
+                _catalyst_chain_id = _start_chain(
+                    str(self._settings.db_path), catalyst.ticker,
+                    triggered_by="catalyst", session_id=self._session_id,
+                    conviction=conviction.total_score,
+                )
+                await self._submit_recommendation(
+                    recommendation, catalyst.ticker, spot,
+                    triggered_by="catalyst", chain_id=_catalyst_chain_id,
+                )
         except Exception as exc:
             logger.error("Catalyst trade build failed for %s: %s", catalyst.ticker, exc)
 
@@ -2321,11 +3627,17 @@ class AgoraSession:
                 direction_override=setup.direction,
             )
             if recommendation:
+                _earnings_chain_id = _start_chain(
+                    str(self._settings.db_path), setup.ticker,
+                    triggered_by="earnings", session_id=self._session_id,
+                    conviction=conviction_score,
+                )
                 await self._submit_recommendation(
                     recommendation, setup.ticker, spot,
                     earnings_date=setup.earnings_date,
                     is_pre_earnings=True,
                     triggered_by="earnings",
+                    chain_id=_earnings_chain_id,
                 )
         except Exception as exc:
             logger.error("Pre-earnings trade build failed for %s: %s", setup.ticker, exc)
@@ -2417,7 +3729,15 @@ class AgoraSession:
                 direction_override=signal["direction"],
             )
             if recommendation:
-                await self._submit_recommendation(recommendation, result.ticker, spot, triggered_by="earnings")
+                _postearnings_chain_id = _start_chain(
+                    str(self._settings.db_path), result.ticker,
+                    triggered_by="earnings", session_id=self._session_id,
+                    conviction=conviction.total_score,
+                )
+                await self._submit_recommendation(
+                    recommendation, result.ticker, spot,
+                    triggered_by="earnings", chain_id=_postearnings_chain_id,
+                )
         except Exception as exc:
             logger.error("Post-earnings trade build failed for %s: %s", result.ticker, exc)
 
@@ -2467,6 +3787,9 @@ class AgoraSession:
         compliance_result = self._compliance.check_trade(recommendation, positions)
         if not compliance_result["compliant"]:
             logger.info("BLOCKED by compliance: %s | %s", ticker, compliance_result["reason"])
+            if chain_id:
+                _complete_chain(str(self._settings.db_path), chain_id, "rejected",
+                                gates_passed=["timing", "macro_cal"])
             return
         for warning in compliance_result.get("warnings", []):
             logger.warning("Compliance warning [%s]: %s", ticker, warning)
@@ -2477,6 +3800,9 @@ class AgoraSession:
         risk_result = self._risk.approve_trade(recommendation, greeks, positions, spot, regime=_current_regime)
         if not risk_result["approved"]:
             logger.info("BLOCKED by risk council: %s | %s", ticker, risk_result["reason"])
+            if chain_id:
+                _complete_chain(str(self._settings.db_path), chain_id, "risk_blocked",
+                                gates_passed=["timing", "macro_cal", "compliance"])
             return
 
         strategy_str = getattr(recommendation, "strategy", "unknown")
@@ -2505,7 +3831,81 @@ class AgoraSession:
                 "ENTRY BLOCKED by open-combo limit: %d/%d active GTC brackets | %s",
                 len(open_positions), self._settings.gtc_max_open_combo_orders, ticker,
             )
+            if chain_id:
+                _complete_chain(str(self._settings.db_path), chain_id, "rejected",
+                                gates_passed=["timing", "macro_cal", "compliance", "risk"])
             return
+
+        # ── Sector rotation + fundamental valuation adjustments ──────────────────
+        # Applied after conviction scoring; modulates score before advocate gate.
+        # Both checks are fast (cached daily / 4h) and never block on their own —
+        # they adjust conviction_score so the advocate gate becomes the final arbiter.
+        _fin_adj_total = 0
+        _fin_adj_reasons: list[str] = []
+
+        try:
+            _sector_sig = self._sector_monitor.get_signal(ticker)
+            if _sector_sig.conviction_adj != 0:
+                _fin_adj_total += _sector_sig.conviction_adj
+                _fin_adj_reasons.append(f"sector_rs={_sector_sig.conviction_adj:+d} ({_sector_sig.reason_str})")
+        except Exception as _sec_exc:
+            logger.debug("Sector rotation check failed for %s: %s", ticker, _sec_exc)
+
+        try:
+            _val_result = self._valuation_gate.evaluate(ticker)
+            if _val_result.conviction_adj != 0:
+                _fin_adj_total += _val_result.conviction_adj
+                _fin_adj_reasons.append(f"valuation={_val_result.conviction_adj:+d} ({_val_result.reason_str})")
+        except Exception as _val_exc:
+            logger.debug("Valuation check failed for %s: %s", ticker, _val_exc)
+
+        if _fin_adj_total != 0:
+            _pre_adj = recommendation.conviction_score
+            recommendation.conviction_score = float(
+                max(0.0, min(100.0, _pre_adj + _fin_adj_total))
+            )
+            logger.info(
+                "Finance intel adj for %s: %.0f → %.0f (Δ%+d) | %s",
+                ticker,
+                _pre_adj,
+                recommendation.conviction_score,
+                _fin_adj_total,
+                " | ".join(_fin_adj_reasons),
+            )
+
+        # ── Correlation gate — block near-duplicate same-direction positions ───
+        # Runs after sector/valuation so the conviction score reflects all signals.
+        try:
+            _corr_result = self._correlation_monitor.check(
+                new_ticker=ticker,
+                existing_positions=open_positions,
+                direction=recommendation.direction,
+            )
+            if _corr_result.risk_level == "block":
+                logger.info(
+                    "ENTRY BLOCKED by correlation monitor: %s | %s",
+                    ticker, _corr_result.block_reason,
+                )
+                if chain_id:
+                    _complete_chain(
+                        str(self._settings.db_path), chain_id, "risk_blocked",
+                        gates_passed=["timing", "macro_cal", "compliance", "risk", "combo_limit"],
+                    )
+                return
+            elif _corr_result.conviction_adj < 0:
+                # High/medium correlation — reduce position size, don't block
+                _pre_contracts = recommendation.contracts
+                _size_factor = 0.5 if _corr_result.risk_level == "high" else 0.75
+                recommendation.contracts = max(1, int(_pre_contracts * _size_factor))
+                logger.info(
+                    "Correlation %s [%s]: contracts %d → %d (%.0f%%) | %s",
+                    _corr_result.risk_level, ticker,
+                    _pre_contracts, recommendation.contracts,
+                    _size_factor * 100,
+                    _corr_result.block_reason,
+                )
+        except Exception as _corr_exc:
+            logger.debug("Correlation check failed for %s: %s", ticker, _corr_exc)
 
         # 4e. DevilsAdvocate — 5-check deterministic pre-IBKR checklist (no LLM, no network)
         _da_ok, _da_reason, _da_results = _devils_advocate(
@@ -2517,24 +3917,102 @@ class AgoraSession:
         )
         if not _da_ok:
             logger.info("BLOCKED by DevilsAdvocate: %s | %s", ticker, _da_reason)
+            if chain_id:
+                _complete_chain(str(self._settings.db_path), chain_id, "risk_blocked",
+                                gates_passed=["timing", "macro_cal", "compliance", "risk", "combo_limit"])
             return
 
-        # 4f. LLM AdvocateAgent (Phase 5) — adversarial review after all deterministic gates.
-        # Shadow: journals BLOCK verdicts but never stops execution.
-        # Live: BLOCK → complete chain as risk_blocked and return.
+        # 4f. Debate gate: AdvocateAgent + ThesisDefenderAgent run in parallel.
+        # Advocate generates 3 failure modes; defender generates 3 success modes.
+        # A strong defense (confidence ≥ 0.65 + thesis_strength="strong") moderates
+        # a BLOCK to CAUTION, letting the trade through. Without a defender, behaviour
+        # is identical to the previous single-advocate gate.
+        #
+        # Cooldown: 2h per ticker. The thesis doesn't change between 30-min scan cycles —
+        # without this, a high-scoring ticker that fails a later gate re-fires the full
+        # debate every cycle (observed: 13 calls on POWL in 3h = $0.80 wasted).
+        _advocate_verdict = None
+        _defender_verdict = None
         if self._advocate:
-            _advocate_verdict = await self._advocate.review(
-                ticker=ticker,
-                recommendation=recommendation,
-                thesis=thesis,
-                positions=open_positions,
-                macro_context=self._macro_context,
-                decision_id=chain_id,
-            )
+            import time as _time_mod
+            _now_ts      = _time_mod.monotonic()
+            _cached      = self._advocate_cache.get(ticker)
+            _cur_macro   = str(getattr(self._macro_context, "macro_stance", "neutral") or "neutral")
+            _cur_spot    = spot if spot > 0 else 1.0
+            _cur_pos_cnt = len(open_positions)
+
+            _use_cache = False
+            if _cached:
+                _c_ts, _c_macro, _c_spot, _c_pos_cnt, _, _ = _cached
+                _time_ok  = (_now_ts - _c_ts) < _ADVOCATE_COOLDOWN_SECS
+                _macro_ok = _c_macro == _cur_macro
+                _spot_ok  = abs(_cur_spot - _c_spot) / max(_c_spot, 1.0) < 0.03
+                _pos_ok   = _c_pos_cnt == _cur_pos_cnt
+                _use_cache = _time_ok and _macro_ok and _spot_ok and _pos_ok
+                if _cached and not _use_cache:
+                    reasons = []
+                    if not _time_ok:  reasons.append(f"age>{_ADVOCATE_COOLDOWN_SECS/3600:.0f}h")
+                    if not _macro_ok: reasons.append(f"macro {_c_macro}→{_cur_macro}")
+                    if not _spot_ok:  reasons.append(f"spot moved {abs(_cur_spot-_c_spot)/_c_spot:.1%}")
+                    if not _pos_ok:   reasons.append(f"positions {_c_pos_cnt}→{_cur_pos_cnt}")
+                    logger.debug("Advocate cache STALE [%s]: %s — re-running", ticker, ", ".join(reasons))
+
+            if _use_cache:
+                _advocate_verdict = _cached[4]
+                _defender_verdict = _cached[5]
+                logger.debug(
+                    "Advocate/Defender cache hit [%s] — %.0fm ago macro=%s spot=%.2f, reusing verdict=%s",
+                    ticker,
+                    (_now_ts - _cached[0]) / 60,
+                    _cur_macro,
+                    _cur_spot,
+                    getattr(_advocate_verdict, "verdict", "?"),
+                )
+            else:
+                _adv_coro = self._advocate.review(
+                    ticker=ticker,
+                    recommendation=recommendation,
+                    thesis=thesis,
+                    positions=open_positions,
+                    macro_context=self._macro_context,
+                    decision_id=chain_id,
+                )
+                _def_coro = (
+                    self._defender.defend(
+                        ticker=ticker,
+                        recommendation=recommendation,
+                        thesis=thesis,
+                        positions=open_positions,
+                        macro_context=self._macro_context,
+                        decision_id=chain_id,
+                    )
+                    if self._defender else None
+                )
+                if _def_coro is not None:
+                    _debate_results = await asyncio.gather(_adv_coro, _def_coro, return_exceptions=True)
+                    _advocate_verdict = _debate_results[0] if not isinstance(_debate_results[0], Exception) else None
+                    _defender_verdict = _debate_results[1] if not isinstance(_debate_results[1], Exception) else None
+                else:
+                    _advocate_verdict = await _adv_coro
+                    _defender_verdict = None
+                # Cache verdict with fingerprint snapshot — but never cache an
+                # error (None advocate verdict): caching it would propagate the
+                # failure across the whole cooldown window. Leaving it uncached
+                # forces a fresh review attempt on the next trade.
+                if _advocate_verdict is not None:
+                    self._advocate_cache[ticker] = (
+                        _now_ts, _cur_macro, _cur_spot, _cur_pos_cnt,
+                        _advocate_verdict, _defender_verdict,
+                    )
+
+            # Fail-closed gate: the advocate is LIVE but produced no verdict, meaning
+            # the adversarial review never ran (API error, timeout, credit exhaustion —
+            # review() returns None only on exception). Do NOT submit an un-reviewed
+            # trade: a degraded risk gate must fail closed, not silently fall through.
             if (
-                _advocate_verdict
-                and _advocate_verdict.is_block
+                _advocate_verdict is None
                 and not self._advocate.shadow_mode
+                and self._settings.advocate_fail_closed
             ):
                 _complete_chain(
                     str(self._settings.db_path), chain_id, "risk_blocked",
@@ -2542,13 +4020,49 @@ class AgoraSession:
                     gates_passed=["timing", "macro_cal", "compliance", "risk",
                                   "combo_limit", "devils_advocate"],
                 ) if chain_id else None
-                logger.info(
-                    "BLOCKED by LLM Advocate: %s | %s | top_failure=%s",
-                    ticker, _advocate_verdict.verdict_reasoning,
-                    _advocate_verdict.failure_modes[0]["mode_name"]
-                    if _advocate_verdict.failure_modes else "n/a",
+                logger.warning(
+                    "BLOCKED (fail-closed): LLM Advocate unavailable for %s — no adversarial "
+                    "review ran (likely API error / credit exhaustion). Trade not submitted. "
+                    "Set ADVOCATE_FAIL_CLOSED=false to fall open instead.",
+                    ticker,
                 )
                 return
+
+            if (
+                _advocate_verdict
+                and _advocate_verdict.is_block
+                and not self._advocate.shadow_mode
+            ):
+                # Check if defender provides strong-enough counterweight to override
+                _defender_strong = (
+                    _defender_verdict is not None
+                    and not self._defender.shadow_mode  # type: ignore[union-attr]
+                    and getattr(_defender_verdict, "thesis_strength", "") == "strong"
+                    and getattr(_defender_verdict, "confidence", 0.0) >= 0.65
+                )
+                if _defender_strong:
+                    logger.info(
+                        "ADVOCATE BLOCK moderated by strong DEFENDER [%s]: "
+                        "advocate=%s | defender=strong (conf=%.0f%%) — trade continues as CAUTION",
+                        ticker,
+                        _advocate_verdict.verdict_reasoning[:80],
+                        _defender_verdict.confidence * 100,  # type: ignore[union-attr]
+                    )
+                    # Fall through — trade continues with caution flag
+                else:
+                    _complete_chain(
+                        str(self._settings.db_path), chain_id, "risk_blocked",
+                        strategy=str(strategy_str),
+                        gates_passed=["timing", "macro_cal", "compliance", "risk",
+                                      "combo_limit", "devils_advocate"],
+                    ) if chain_id else None
+                    logger.info(
+                        "BLOCKED by LLM Advocate: %s | %s | top_failure=%s",
+                        ticker, _advocate_verdict.verdict_reasoning,
+                        _advocate_verdict.failure_modes[0]["mode_name"]
+                        if _advocate_verdict.failure_modes else "n/a",
+                    )
+                    return
 
         # 4d. Discord DM approval gate — required for high-conviction trades when bot is configured
         if (
@@ -2619,8 +4133,11 @@ class AgoraSession:
                     "EXEC COOLDOWN set: %s blocked until %s (spread too illiquid at current pricing)",
                     ticker, _cooldown_until.strftime("%H:%M ET"),
                 )
-            # If Error 201 detected, trigger orphan reconciliation immediately
+            # If Error 201 detected, trigger orphan reconciliation and block ticker for session.
+            # Paper accounts can't do combo orders for single-name equities — no point retrying.
             if error_code == "201" or "201" in reason:
+                self._error_201_blocked.add(ticker)
+                logger.info("Error 201 session block: %s will not be re-evaluated this session", ticker)
                 asyncio.create_task(self._orphan_reconciler.reconcile_now())
         elif order_status == "Filled":
             # Only record the position on confirmed fill — not on Submitted/PreSubmitted
@@ -2727,15 +4244,29 @@ class AgoraSession:
         is_pre_earnings: bool = False,
         spot: float = 0.0,
         fill_price: float = 0.0,
+        target_close_date_override: "date | None" = None,
     ) -> str:
         from datetime import date, timedelta
         from .core.models import OpenPosition, PositionStatus
         expiry = rec.legs[0].expiration if rec.legs else (date.today() + timedelta(days=45))
-        # Use actual IBKR fill price when available; fall back to recommendation mid-price.
-        # fill_price is always positive (IBKR convention). entry_debit_credit sign:
-        #   negative = credit received, positive = debit paid.
-        rec_mid = abs(rec.entry_debit_credit / max(1, rec.contracts * 100))
-        entry_price = fill_price if fill_price > 0 else rec_mid
+        # entry_price must use the SIGNED net value per share so the P&L formula
+        # (current_mid - entry_price) * 100 is always correct:
+        #   Credit spreads: entry_price = negative (net credit received, e.g. -$1.47)
+        #   Debit spreads / long options: entry_price = positive (net debit paid, e.g. +$7.84)
+        #
+        # IBKR paper trading fill prices for BAG combos are unreliable — they often report a
+        # single leg's price rather than the net spread value.  For multi-leg positions we
+        # ignore fill_price entirely and derive entry_price from entry_debit_credit.
+        # For single-leg positions the fill price is trustworthy and we keep it.
+        signed_mid  = rec.entry_debit_credit / max(1, rec.contracts * 100)
+        is_multi_leg = len(rec.legs) > 1
+        if is_multi_leg:
+            entry_price = signed_mid          # signed: negative for credit, positive for debit
+        else:
+            entry_price = fill_price if fill_price > 0 else abs(signed_mid)
+        # target_close_date_override lets callers set a time-stop (e.g. long options: +5 days)
+        # Default behaviour: close at 21 DTE remaining (spread/naked convention).
+        target_close_date = target_close_date_override or (expiry - timedelta(days=21))
         pos = OpenPosition(
             position_id=str(uuid.uuid4()),
             ticker=rec.ticker,
@@ -2748,7 +4279,7 @@ class AgoraSession:
             entry_price=entry_price,
             entry_date=date.today(),
             expiry_date=expiry,
-            target_close_date=expiry - timedelta(days=21),
+            target_close_date=target_close_date,
             max_loss_dollars=rec.max_loss_dollars,
             max_gain_dollars=rec.max_gain_dollars,
             ibkr_order_ids=[ibkr_order_id] if ibkr_order_id != -1 else [],
@@ -2810,19 +4341,35 @@ class AgoraSession:
 
             async def _fetch() -> list[dict]:
                 ib = IB()
+                # Try configured clientId first, then two fallbacks if it's still in use
+                # from a rapid restart (TWS holds connections for ~30s after disconnect).
+                base_id = self._settings.startup_tws_sync_client_id
                 try:
-                    await ib.connectAsync(
-                        self._settings.ibkr_host,
-                        self._settings.ibkr_port,
-                        clientId=self._settings.startup_tws_sync_client_id,
-                        timeout=10,
-                    )
+                    connected = False
+                    for _cid in (base_id, base_id + 10, base_id + 20):
+                        try:
+                            await ib.connectAsync(
+                                self._settings.ibkr_host,
+                                self._settings.ibkr_port,
+                                clientId=_cid,
+                                timeout=10,
+                            )
+                            connected = True
+                            break
+                        except Exception as _ce:
+                            if "already in use" in str(_ce).lower() or "326" in str(_ce):
+                                logger.debug("Startup sync clientId %d in use, trying %d", _cid, _cid + 10)
+                                continue
+                            raise
+                    if not connected:
+                        logger.warning("Startup TWS sync: all clientIds in use, skipping")
+                        return []
                     fills = await ib.reqExecutionsAsync()
                     return [
                         {
                             "symbol":   f.contract.symbol,
                             "secType":  f.contract.secType,
-                            "action":   f.execution.side,      # "BOT" or "SLD"
+                            "action":   f.execution.side,
                             "price":    f.execution.price,
                             "shares":   f.execution.shares,
                             "time":     str(f.execution.time),
@@ -2882,8 +4429,16 @@ class AgoraSession:
             )
             closed += 1
 
-        # Warn about tickers filled in TWS (BOT) but not in our shadow book
-        missing = bag_buys - set(open_by_ticker) - {f["symbol"] for f in bag_sells}
+        # Warn about tickers filled in TWS (BOT) but not in our shadow book.
+        # Exclude tickers that already appear in our DB as recently closed — these
+        # are legitimate round-trips whose close fill may linger in IBKR's exec log.
+        recently_closed = set(
+            r[0] for r in self._position_mgr._db.execute(
+                "SELECT DISTINCT ticker FROM positions WHERE status='closed' "
+                "AND date(close_date) >= date('now','-2 days')"
+            ).fetchall()
+        ) if hasattr(self._position_mgr, "_db") else set()
+        missing = bag_buys - set(open_by_ticker) - {f["symbol"] for f in bag_sells} - recently_closed
         for ticker in missing:
             logger.warning(
                 "STARTUP SYNC: %s has a TWS entry fill but no shadow-book position — "
@@ -3031,7 +4586,15 @@ class AgoraSession:
                 direction_override=direction,
             )
             if recommendation:
-                await self._submit_recommendation(recommendation, position.ticker, spot, triggered_by="roll")
+                _roll_chain_id = _start_chain(
+                    str(self._settings.db_path), position.ticker,
+                    triggered_by="roll", session_id=self._session_id,
+                    conviction=conviction.total_score,
+                )
+                await self._submit_recommendation(
+                    recommendation, position.ticker, spot,
+                    triggered_by="roll", chain_id=_roll_chain_id,
+                )
                 logger.info("Roll reopen submitted for %s → %s", position.ticker, new_expiry)
         except Exception as exc:
             logger.error("Roll-reopen failed for %s: %s", position.ticker, exc)

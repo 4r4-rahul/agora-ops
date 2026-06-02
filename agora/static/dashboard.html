@@ -916,7 +916,7 @@ tr.pos-detail-row td { padding: 0; background: var(--bg1); }
     <!-- ── Intelligence tab ── -->
     <div id="tab-intel" class="rtab-content">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-        <span style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px">Shadow → Live Promotion Readiness</span>
+        <span style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px">Agent Performance Track Record</span>
         <button onclick="fetchIntel()" style="background:none;border:1px solid var(--border);border-radius:3px;color:var(--text2);font-size:10px;padding:2px 6px;cursor:pointer">↻</button>
       </div>
       <div id="intel-promo" style="margin-bottom:14px"></div>
@@ -2204,8 +2204,8 @@ async function fetchIntel() {
       let metric = '';
       if (key === 'analyst')            metric = `${a.attributed_count} attributed · hit ${a.direction_hit_rate != null ? (a.direction_hit_rate * 100).toFixed(0) + '%' : '—'} (need ≥40, ≥55%)`;
       else if (key === 'strategy_selector') metric = `${a.attributed_count} attributed · win ${a.win_rate != null ? (a.win_rate * 100).toFixed(0) + '%' : '—'} (need ≥40, ≥55%)`;
-      else if (key === 'advocate')       metric = `${a.attributed_count} attributed · prec ${a.precision != null ? (a.precision * 100).toFixed(0) + '%' : '—'} · rec ${a.recall != null ? (a.recall * 100).toFixed(0) + '%' : '—'} (need ≥60%/50%)`;
-      else if (key === 'exit_intelligence') metric = `${a.attributed_count} attributed · alpha ${a.avg_exit_alpha_pct != null ? (a.avg_exit_alpha_pct * 100).toFixed(1) + '%' : 'pending'} (need >5%)`;
+      else if (key === 'advocate')       metric = `${a.attributed_count} attributed · prec ${a.precision != null ? (a.precision * 100).toFixed(0) + '%' : '—'} · rec ${a.recall != null ? (a.recall * 100).toFixed(0) + '%' : '—'} (need ≥30, ≥60%/50%)`;
+      else if (key === 'exit_intelligence') metric = `${a.attributed_count} attributed · accuracy ${a.decision_accuracy != null ? (a.decision_accuracy * 100).toFixed(0) + '%' : '—'} (need ≥20, ≥60%)`;
 
       return `<div style="border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:6px;background:var(--bg3)">
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">

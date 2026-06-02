@@ -1146,7 +1146,7 @@ async def get_promotion_readiness() -> JSONResponse:
       analyst:            ≥40 attributed, direction_hit_rate ≥55%
       advocate:           ≥30 attributed, precision ≥60%, recall ≥50%
       strategy_selector:  ≥40 attributed, win_rate ≥55%
-      exit_intelligence:  ≥20 attributed, avg_exit_alpha > 5%
+      exit_intelligence:  ≥20 attributed, decision_accuracy ≥60%
 
     Also runs a fresh attribution pass so stats reflect the latest closes.
     Status field: READY | NOT_READY | INSUFFICIENT_DATA

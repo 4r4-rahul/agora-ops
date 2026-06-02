@@ -13,7 +13,7 @@ Live mode:
   Selector drives strategy type selection. Rules engine executes strike placement
   for the selected strategy type (it remains as fallback on timeout/failure).
 
-Model: claude-opus-4-7 (no extended thinking — fast structural selection)
+Model: claude-sonnet-4-6 (fast structural selection — cost-efficient for per-ticker calls)
 Cost: ~$0.05/call × ≤10 calls/day ≈ $0.50/day
 Schema: strategy_journal — managed by migrations/2026_05_phase2_journals.sql
 
@@ -31,90 +31,70 @@ from datetime import date, datetime, timezone
 from typing import Any
 
 import anthropic
+from pydantic import BaseModel
 
-from agora.ops.llm_cost_log import log_call as _log_llm
+from agora.ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
 from agora.ops.lessons_store import load_approved_lessons as _load_lessons
 from agora.ops.payload_compressor import compress_payload as _compress
 
 logger = logging.getLogger(__name__)
 
 PROMPT_VERSION = "1.0.0"
-_MODEL = "claude-opus-4-7"
+_MODEL = "claude-sonnet-4-6"
 
-# ── System prompt (spec §13.3, adapted for selector-only role) ────────────────
+# ── System prompt (spec §13.3) ─────────────────────────────────────────────────
 
-_SYSTEM = """You are an options structuring specialist with 15 years of experience. You receive an analyst thesis (direction + magnitude + horizon + confidence) and the current option chain summary, then validate or override the rules engine's proposed structure.
-
-You do NOT re-question the thesis. Your job is structure validation and optimization.
+_SYSTEM = """Options structuring specialist. Receive analyst thesis + chain summary, validate or override the rules engine's structure choice.
 
 HARD CONSTRAINTS:
-C1. Structure MUST match thesis horizon: target DTE = horizon_days × 1.5 to 2.5.
-C2. Structure MUST match thesis magnitude and direction.
-C3. Use ONLY approved strategies: bull_put_spread, bear_call_spread, iron_condor, iron_butterfly, cash_secured_put, bull_call_spread, bear_put_spread, long_call, long_put, calendar_spread.
-C4. Reject structures with R/R worse than: Debit max_profit/max_loss < 1.3 | Credit max_loss/max_profit > 4.0.
-C5. Reject structures with bid-ask > 10% of mid for any leg.
-C6. Position size: 1 contract default. Scale only on size_multiplier ≥ 1.0 AND thesis confidence ≥ 70%. Max 2 contracts.
+C1. DTE = horizon_days × 1.5–2.5.
+C2. Structure must match thesis direction and magnitude.
+C3. Approved strategies only: bull_put_spread, bear_call_spread, iron_condor, iron_butterfly, cash_secured_put, bull_call_spread, bear_put_spread, long_call, long_put, calendar_spread.
+C4. Reject if: Debit max_profit/max_loss < 1.3 OR Credit max_loss/max_profit > 4.0.
+C5. Reject if bid-ask > 10% of mid for any leg.
+C6. Default 1 contract. Scale to 2 only if size_multiplier ≥ 1.0 AND confidence ≥ 70%.
 
-STRATEGY SELECTION METHODOLOGY:
-Step 1 — MAP THESIS TO STRATEGY FAMILY:
-  - premium_selling + IV rank > 50 → credit spread / iron
-  - directional_debit + IV rank < 40 → debit spread / long single
-  - directional_debit + IV rank > 60 → vertical debit (avoid IV crush)
-  - neutral_range + IV rank > 50 → iron condor / butterfly
-  - avoid → no_structure
+STRATEGY MAP:
+  premium_selling + IVR > 50  → credit spread / iron
+  directional_debit + IVR < 40 → debit spread / long single
+  directional_debit + IVR > 60 → vertical debit (avoid IV crush)
+  neutral_range + IVR > 50    → iron condor / butterfly
+  avoid                        → no_structure
 
-Step 2 — VALIDATE RULES ENGINE CHOICE:
-  - Does the rules engine's strategy_type match the thesis direction and iv_rank?
-  - Does the chosen expiry match horizon_days × 1.5–2.5?
-  - If yes to both → endorse it.
-  - If no → propose the correct strategy_type.
+VALIDATION STEPS:
+1. Does rules engine strategy match direction and IVR? Does expiry match DTE target?
+   Yes → endorse. No → propose correct type.
+2. Flag any legs with OI < 100 or bid-ask > 10%.
 
-Step 3 — CHECK CHAIN LIQUIDITY (from chain summary provided):
-  - If the proposed structure has legs with OI < 100 or implied bid-ask > 10% → flag.
+ANTI-PATTERNS: DTE creep, premium chasing, width compression, single-leg debit in high IV.
 
-ANTI-PATTERNS:
-A1. "Chasing premium": going deeper OTM than delta targets for more credit
-A2. "DTE creep": picking 60 DTE for a 5-day thesis
-A3. "Width compression": narrowing spreads below 1σ for better paper R/R
-A4. "Single-leg debit in high IV": IV crush risk on directional debit theses
-A5. "Ignoring size_multiplier": defaulting to 2 contracts without checking constraints
+OUTPUT — exactly this JSON, no markdown:
 
-OUTPUT — return exactly this JSON, no markdown, no prose:
+Endorse: {"decision":"endorse","strategy_type":"<type>","expiry_preference":"YYYY-MM-DD","contracts":1,"endorses_rules":true,"rationale_one_line":"string","structure_reasoning":"2-3 sentences","concerns":[],"liquidity_score":1-10,"thesis_alignment_score":1-10}
+Override: {"decision":"override","strategy_type":"<corrected>","expiry_preference":"YYYY-MM-DD","contracts":1,"endorses_rules":false,"rationale_one_line":"string","override_reason":"string","structure_reasoning":"2-3 sentences","concerns":["string"],"liquidity_score":1-10,"thesis_alignment_score":1-10}
+No structure: {"decision":"no_structure","reason":"specific reason"}"""
 
-If endorsing rules engine:
-{
-  "decision": "endorse",
-  "strategy_type": "<same as rules engine>",
-  "expiry_preference": "YYYY-MM-DD",
-  "contracts": 1,
-  "endorses_rules": true,
-  "rationale_one_line": "string",
-  "structure_reasoning": "3–5 sentences for AdvocateAgent to review",
-  "concerns": ["string or empty list"],
-  "liquidity_score": 1-10,
-  "thesis_alignment_score": 1-10
-}
+_CACHED_SYSTEM = [{"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}]
 
-If overriding rules engine:
-{
-  "decision": "override",
-  "strategy_type": "<corrected type>",
-  "expiry_preference": "YYYY-MM-DD",
-  "contracts": 1,
-  "endorses_rules": false,
-  "rationale_one_line": "why override (one sentence)",
-  "override_reason": "what rules engine got wrong",
-  "structure_reasoning": "3–5 sentences for AdvocateAgent",
-  "concerns": ["string"],
-  "liquidity_score": 1-10,
-  "thesis_alignment_score": 1-10
-}
 
-If no viable structure:
-{
-  "decision": "no_structure",
-  "reason": "specific reason (e.g., all expiries too illiquid for this thesis horizon)"
-}"""
+# ── Structured output schema ───────────────────────────────────────────────────
+# All three decision shapes (endorse / override / no_structure) collapsed into
+# one model with optional fields — SDK enforces this schema via output_config.format,
+# so _parse_selection never sees malformed JSON.
+
+class _SelectorOutput(BaseModel):
+    decision: str                      # "endorse" | "override" | "no_structure"
+    strategy_type: str | None = None
+    expiry_preference: str | None = None
+    contracts: int = 1
+    endorses_rules: bool = True
+    rationale_one_line: str = ""
+    override_reason: str | None = None  # override only
+    reason: str | None = None           # no_structure only
+    structure_reasoning: str = ""
+    concerns: list[str] = []
+    liquidity_score: int = 5
+    thesis_alignment_score: int = 5
 
 
 # ── Output dataclass ──────────────────────────────────────────────────────────
@@ -146,10 +126,17 @@ class StrategySelectorAgent:
     with the corrected strategy_type, while a 'no_structure' decision blocks submission.
     """
 
+    # Result cache TTL — reuse a selection for the same ticker/conviction/pillar
+    # within one scan cycle (30 min) to avoid burning LLM tokens on repeated
+    # evaluations that differ only in market microstructure noise.
+    _CACHE_TTL_SECS = 1800
+
     def __init__(self, settings: Any, shadow_mode: bool = True) -> None:
         self._settings    = settings
         self._shadow_mode = shadow_mode
         self._client      = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+        # cache: key → (cached_at, StrategySelection)
+        self._cache: dict[str, tuple[datetime, "StrategySelection"]] = {}
         logger.info("StrategySelectorAgent ready: model=%s shadow=%s", _MODEL, shadow_mode)
 
     @property
@@ -177,6 +164,23 @@ class StrategySelectorAgent:
         Returns StrategySelection in both shadow and live mode.
         Never raises — failures return None.
         """
+        # ── Cache check ───────────────────────────────────────────────────────
+        # Key: ticker + conviction band (nearest 5) + pillar + direction
+        _conv_band = int(getattr(conviction, "total_score", 0) // 5) * 5
+        _pillar    = str(getattr(conviction, "pillar", ""))
+        _direction = str(getattr(thesis, "direction", "") if thesis else "")
+        _cache_key = f"{ticker}|{_conv_band}|{_pillar}|{_direction}"
+        _now = datetime.now(timezone.utc)
+        if _cache_key in self._cache:
+            _cached_at, _cached_sel = self._cache[_cache_key]
+            if (_now - _cached_at).total_seconds() < self._CACHE_TTL_SECS:
+                logger.debug(
+                    "StrategySelector cache hit [%s]: %s (age=%ds, saves ~$0.03)",
+                    ticker, _cache_key,
+                    int((_now - _cached_at).total_seconds()),
+                )
+                return _cached_sel
+
         lessons = _load_lessons(str(self._settings.db_path), "strategy")
         payload = self._build_payload(ticker, thesis, conviction, snapshot,
                                       options_chain, rules_recommendation, lessons)
@@ -185,33 +189,36 @@ class StrategySelectorAgent:
         raw_output: dict = {}
 
         try:
-            response = await self._client.messages.create(
+            response = await self._client.messages.parse(
                 model=_MODEL,
                 max_tokens=1024,
-                system=_SYSTEM,
+                system=_CACHED_SYSTEM,
                 messages=[{"role": "user", "content": _compress(payload)}],
+                output_format=_SelectorOutput,
                 timeout=anthropic.Timeout(connect=30.0, read=45.0, write=30.0, pool=30.0),
             )
             latency_ms = int((time.monotonic() - t0) * 1000)
             in_tok  = response.usage.input_tokens  if response.usage else 0
             out_tok = response.usage.output_tokens if response.usage else 0
 
-            text_blocks = [b for b in response.content if b.type == "text"]
-            raw_text = text_blocks[-1].text.strip() if text_blocks else "{}"
-            if raw_text.startswith("```"):
-                raw_text = raw_text.split("```")[1].lstrip("json").strip()
-
-            raw_output = json.loads(raw_text)
+            parsed = response.parsed_output
+            if parsed is None:
+                raise ValueError("messages.parse returned no structured output")
+            raw_output = parsed.model_dump()
             selection  = _parse_selection(raw_output)
 
             try:
-                _log_llm(str(self._settings.db_path), "StrategySelectorAgent", _MODEL,
-                         in_tok, out_tok, purpose=f"strategy_{ticker}")
+                _log_msg(str(self._settings.db_path), "StrategySelectorAgent", _MODEL,
+                         response.usage, purpose=f"strategy_{ticker}",
+                         trace_id=decision_id)
             except Exception:
                 pass
 
             self._write_journal(decision_id, ticker, conviction, rules_recommendation,
                                 selection, raw_output, in_tok, out_tok, latency_ms)
+
+            if selection is not None:
+                self._cache[_cache_key] = (_now, selection)
 
             logger.info(
                 "StrategySelector [%s] %s | type=%s align=%d/10 liq=%d/10%s",
@@ -304,7 +311,7 @@ class StrategySelectorAgent:
         out_tok:              int,
         latency_ms:           int,
     ) -> None:
-        cost = (in_tok * 5.0 + out_tok * 25.0) / 1_000_000  # Opus 4.7 pricing
+        cost = (in_tok * 3.0 + out_tok * 15.0) / 1_000_000  # Sonnet 4.6 pricing
         try:
             with sqlite3.connect(str(self._settings.db_path)) as conn:
                 conn.execute(
@@ -336,7 +343,7 @@ class StrategySelectorAgent:
                     ),
                 )
         except Exception as exc:
-            logger.debug("strategy_journal write error: %s", exc)
+            logger.warning("strategy_journal write error: %s", exc)
 
 
 # ── Pure helpers ──────────────────────────────────────────────────────────────
@@ -348,7 +355,7 @@ def _parse_selection(raw: dict) -> StrategySelection:
         expiry_preference=raw.get("expiry_preference"),
         contracts=raw.get("contracts", 1),
         endorses_rules=raw.get("endorses_rules", True),
-        rationale=raw.get("rationale_one_line", raw.get("reason", "")),
+        rationale=raw.get("rationale_one_line") or raw.get("reason", ""),
         structure_reasoning=raw.get("structure_reasoning", ""),
         concerns=raw.get("concerns", []),
         liquidity_score=raw.get("liquidity_score", 5),
@@ -358,9 +365,9 @@ def _parse_selection(raw: dict) -> StrategySelection:
 
 
 def _summarize_chain(chain_dict: dict, spot: float) -> dict:
-    """Compact options chain for LLM: top 3 expiries, 6 strikes near spot each side."""
+    """Compact options chain for LLM: top 2 expiries, 4 strikes near spot each side."""
     summary = {}
-    for expiry, data in list(chain_dict.items())[:3]:
+    for expiry, data in list(chain_dict.items())[:2]:
         try:
             calls_df = data.get("calls")
             puts_df  = data.get("puts")
@@ -372,13 +379,13 @@ def _summarize_chain(chain_dict: dict, spot: float) -> dict:
                     return []
                 mask = (df["strike"] >= spot * lo_pct) & (df["strike"] <= spot * hi_pct)
                 sub = df[mask][["strike", "bid", "ask", "openInterest",
-                                "impliedVolatility"]].head(6)
+                                "impliedVolatility"]].head(4)
                 return json.loads(sub.round(4).to_json(orient="records"))
 
             summary[expiry] = {
                 "dte":   dte,
-                "calls": _fmt(calls_df, 0.95, 1.15),
-                "puts":  _fmt(puts_df,  0.85, 1.05),
+                "calls": _fmt(calls_df, 0.97, 1.10),
+                "puts":  _fmt(puts_df,  0.90, 1.03),
             }
         except Exception:
             continue

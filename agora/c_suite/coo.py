@@ -162,7 +162,7 @@ SQLite Operations:
   Index critical columns: ticker, is_active, attempt_date for fast queries
 
 API Rate Limiting:
-  Anthropic: claude-opus-4-7 — default limits apply. Use prompt caching (cache_control: ephemeral)
+  Anthropic: claude-opus-4-8 — default limits apply. Use prompt caching (cache_control: ephemeral)
     on system prompts to reduce token cost on repeated calls.
   yfinance: unofficial API, no SLA. Rate limit = soft (HTTP 429 / 401).
   EDGAR: 10 req/sec. 40k/hour. Use polling interval ≥ 300s.

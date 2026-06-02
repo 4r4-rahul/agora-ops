@@ -18,8 +18,8 @@ Live mode:
   CLOSE_NOW triggers position close via the on_close callback.
   TIGHTEN_STOP and TAKE_PARTIAL are advisory (logged, no automated action yet).
 
-Model: claude-opus-4-7 (no extended thinking — speed matters for hourly cadence)
-Cost: ~$0.04/call × 4 positions × 6 hours ≈ $0.96/day (under $10 budget)
+Model: reads settings.claude_model (paper: sonnet-4-6 ~$0.024/call; production: opus-4-8 ~$0.04/call)
+Cost: ~$0.024/call × 4 positions × 3 checks/day (2h interval) ≈ $0.29/day paper mode
 Schema: exit_journal — managed by migrations/2026_05_phase2_journals.sql
 
 System prompt: §13.4 of AGORA Grand Specification v1.0
@@ -37,14 +37,14 @@ from typing import Any, Callable, Awaitable
 
 import anthropic
 
-from agora.ops.llm_cost_log import log_call as _log_llm
+from agora.ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
 from agora.ops.lessons_store import load_approved_lessons as _load_lessons
 from agora.ops.payload_compressor import compress_payload as _compress
 
 logger = logging.getLogger(__name__)
 
 PROMPT_VERSION = "1.0.0"
-_MODEL = "claude-opus-4-7"
+_MODEL_FALLBACK = "claude-sonnet-4-6"  # used only if settings not available
 
 # ── System prompt (spec §13.4) ────────────────────────────────────────────────
 
@@ -156,8 +156,9 @@ class ExitIntelligenceAgent:
         self._shadow_mode        = shadow_mode
         self._on_close           = on_close_callback
         self._client             = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+        self._model              = getattr(settings, "claude_model", _MODEL_FALLBACK)
         self._last_evaluated:    dict[str, datetime] = {}  # position_id → last eval time
-        logger.info("ExitIntelligenceAgent ready: model=%s shadow=%s", _MODEL, shadow_mode)
+        logger.info("ExitIntelligenceAgent ready: model=%s shadow=%s", self._model, shadow_mode)
 
     @property
     def shadow_mode(self) -> bool:
@@ -192,7 +193,7 @@ class ExitIntelligenceAgent:
 
         try:
             response = await self._client.messages.create(
-                model=_MODEL,
+                model=self._model,
                 max_tokens=1024,
                 system=_SYSTEM,
                 messages=[{"role": "user", "content": _compress(payload)}],
@@ -212,8 +213,9 @@ class ExitIntelligenceAgent:
             rec = _parse_recommendation(raw_output)
 
             try:
-                _log_llm(str(self._settings.db_path), "ExitIntelligenceAgent", _MODEL,
-                         in_tok, out_tok, purpose=f"exit_{position.ticker}")
+                _log_msg(str(self._settings.db_path), "ExitIntelligenceAgent", self._model,
+                         response.usage, purpose=f"exit_{position.ticker}",
+                         trace_id=decision_id)
             except Exception:
                 pass
 
@@ -274,7 +276,7 @@ class ExitIntelligenceAgent:
                               strategy_family, kill_conditions_json, reasoning_trace,
                               decided_at_utc
                        FROM analyst_journal WHERE decision_id = ?
-                       ORDER BY journal_id ASC LIMIT 1""",
+                       ORDER BY journal_id DESC LIMIT 1""",
                     (chain[0],),
                 ).fetchone()
                 if not row:
@@ -386,7 +388,7 @@ class ExitIntelligenceAgent:
                         position.position_id,
                         position.ticker,
                         datetime.now(tz=timezone.utc).isoformat(),
-                        PROMPT_VERSION, _MODEL,
+                        PROMPT_VERSION, self._model,
                         json.dumps({"ticker": position.ticker}, default=str),
                         rec.thesis_validity           if rec else "error",
                         rec.kill_condition_status     if rec else "unknown",

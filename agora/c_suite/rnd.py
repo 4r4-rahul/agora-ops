@@ -193,7 +193,7 @@ Module: agora/backtester/ (separate from any trading_platform/backtester/)
   mock_claude.py: MockClaudeClient — replaces anthropic.Anthropic() during backtests.
                   Returns deterministic synthetic MacroContext responses (no real API calls).
                   Critical: prevents $50-100 API cost on 1000-fold walk-forward iterations.
-                  Only active in backtesting mode; live session uses real claude-opus-4-7.
+                  Only active in backtesting mode; live session uses real claude-opus-4-8.
 
 Data Limitations (document these in every backtest report):
   IV data:         Synthetic — estimated from HV ratios (HV30, HV60). NOT real options chain history.
@@ -380,16 +380,18 @@ class RNDAgent(ExecutiveAgent):
                 pass
 
         # ── Analyst revisions: data freshness ──
+        # Only flag if the tracker has been active for ≥3 days and still shows 0 revisions.
+        # Day-1 silence is normal — revisions only flow in after earnings events.
         if self._analyst_rev and is_market_hours:
             try:
                 count = self._analyst_rev.get_recent_revision_count()
-                if count == 0:
+                analyzed = getattr(self._analyst_rev, "_analyzed", {})
+                if count == 0 and len(analyzed) >= 3:
                     findings.append((
                         "analyst_revisions_silent",
                         "warning",
-                        "Analyst revision tracker shows 0 recent revisions. "
-                        "Feed may be stale or the agent is not polling successfully. "
-                        "Analyst signals absent from conviction scoring.",
+                        f"Analyst revision tracker shows 0 recent revisions across {len(analyzed)} "
+                        "tickers analyzed post-earnings. Feed may be stale.",
                     ))
             except Exception:
                 pass

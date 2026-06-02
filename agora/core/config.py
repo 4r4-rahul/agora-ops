@@ -24,8 +24,8 @@ class AgoraSettings(BaseSettings):
     # ── Anthropic ──────────────────────────────────────────────────
     anthropic_api_key: str = Field(..., description="Anthropic API key")
     claude_model: str = Field(
-        default="claude-opus-4-7",
-        description="Primary model — Opus 4.7 for Macro Synthesizer, Resolver, 8-K parser",
+        default="claude-sonnet-4-6",
+        description="Primary model — Sonnet 4.6 for paper/dev; set CLAUDE_MODEL=claude-opus-4-8 in .env for production",
     )
     claude_fast_model: str = Field(
         default="claude-haiku-4-5-20251001",
@@ -42,7 +42,7 @@ class AgoraSettings(BaseSettings):
     max_position_size_pct: float = Field(default=0.02, ge=0.005, le=0.05)
     max_open_positions: int = Field(default=4, ge=1, le=20)
     max_per_correlation_group: int = Field(default=1, ge=1, le=5)
-    daily_loss_limit_pct: float = Field(default=0.02, ge=0.005, le=0.10)
+    daily_loss_limit_pct: float = Field(default=0.02, ge=0.005, le=0.25)
     weekly_loss_limit_pct: float = Field(default=0.06, ge=0.01, le=0.20)
     min_rr_ratio: float = Field(default=1.3, ge=0.5)
     min_credit_spread_rr_ratio: float = Field(
@@ -117,8 +117,11 @@ class AgoraSettings(BaseSettings):
     min_conviction_score: float = Field(default=60.0, description="Minimum score to enter any trade")
     vol_premium_conviction_floor: float = Field(default=50.0, description="Lower conviction floor for non-directional vol-premium plays (IVR bypass path)")
     high_ivr_threshold: float = Field(default=90.0, description="IVR at or above this is 'extreme' — IV compression risk is highest, requires full conviction floor")
-    high_ivr_conviction_floor: float = Field(default=60.0, description="Conviction floor when IVR >= high_ivr_threshold; overrides the lower vol_premium_conviction_floor")
+    high_ivr_conviction_floor: float = Field(default=55.0, description="Conviction floor when IVR >= high_ivr_threshold; overrides the lower vol_premium_conviction_floor")
     high_conviction_score: float = Field(default=80.0, description="Score for 1.5x size multiplier")
+    disagreement_resolver_floor: float = Field(default=40.0, description="Hard no-trade floor in DisagreementResolver. Lower for paper-mode validation.")
+    min_credit_per_share: float = Field(default=0.50, description="Minimum credit collected per share for credit spreads. $0.50 avoids IBKR leg rejections in live; lower in paper mode.")
+    force_vol_selling_ok: bool = Field(default=False, description="Paper-mode override: bypass MacroContext.vol_selling_ok=False gate. Lets credit spreads through when IVR/VIX are just below threshold.")
 
     # ── Universe ───────────────────────────────────────────────────
     etf_universe: list[str] = Field(
@@ -237,6 +240,33 @@ class AgoraSettings(BaseSettings):
         default=True,
         description="When True: advocate journals but BLOCK verdicts never stop execution.",
     )
+    advocate_fail_closed: bool = Field(
+        default=True,
+        description="When True (and advocate is live): if the advocate produces no verdict "
+                    "(API error, timeout, credit exhaustion), the trade is BLOCKED rather than "
+                    "submitted un-reviewed. Set ADVOCATE_FAIL_CLOSED=false to fall open (legacy "
+                    "behaviour — trades proceed when the risk gate is unavailable).",
+    )
+
+    # ── ThesisDefenderAgent — counterweight to AdvocateAgent ──────────────────
+    thesis_defender_enabled: bool = Field(
+        default=False,
+        description="Run ThesisDefenderAgent in parallel with AdvocateAgent. "
+                    "A strong defense (confidence ≥ 0.65) moderates an advocate BLOCK to CAUTION, "
+                    "letting the trade through. Enable after advocate is out of shadow mode.",
+    )
+    thesis_defender_shadow_mode: bool = Field(
+        default=True,
+        description="When True: defender journals but never overrides BLOCK verdicts.",
+    )
+
+    # ── Semantic trade memory (ChromaDB) ──────────────────────────────────────
+    chroma_db_path: str = Field(
+        default=".agora/chroma",
+        description="Path to ChromaDB persistence directory for semantic trade memory. "
+                    "Automatically indexed on every swing decision; queried by SwingJudge "
+                    "to surface the 5 most similar historical trades before deciding.",
+    )
 
     # ── ExitIntelligenceAgent (Phase 6 position monitoring) ───────────────────
     exit_intelligence_enabled: bool = Field(
@@ -270,6 +300,188 @@ class AgoraSettings(BaseSettings):
         description="Number of concurrent ticker-evaluation workers. "
                     "4 is conservative for IBKR pacing; increase to 6-8 once stable.",
         ge=1, le=16,
+    )
+
+    # ── MCP / External intelligence tools ──────────────────────────
+    tavily_api_key: str | None = Field(
+        default=None,
+        description="Tavily API key for web search MCP tools (search_news, verify_earnings_date, etc). "
+                    "Get from app.tavily.com. Free tier: 1k searches/month.",
+    )
+    unusual_whales_api_key: str | None = Field(
+        default=None,
+        description="Unusual Whales API key for real options flow (sweeps, dark pool, premium). "
+                    "Get from unusualwhales.com/api. When set, replaces yfinance-based flow detection. "
+                    "Falls back to yfinance if not set or on error.",
+    )
+    discord_uw_channel_id: str | None = Field(
+        default=None,
+        description="Discord channel ID where Unusual Whales posts flow alerts via webhook. "
+                    "Bot polls this channel every 60s and converts alerts to FlowSignals. "
+                    "Setup: create #uw-alerts channel → create webhook → paste URL in UW dashboard → "
+                    "invite bot to server → copy channel ID here. "
+                    "Right-click channel in Discord (Developer Mode on) → Copy Channel ID.",
+    )
+    edgar_user_agent: str = Field(
+        default="AGORA Trading System rahulvari2021@gmail.com",
+        description="User-Agent header required by SEC EDGAR API (SEC policy). "
+                    "Format: 'AppName/version Contact@email'. Do not leave generic.",
+    )
+    mcp_tools_enabled: bool = Field(
+        default=True,
+        description="Enable MCP tools (sqlite_tools, search_tools, edgar_tools, market_tools) "
+                    "for AdvocateAgent, StockAnalystAgent, and CatalystAgent. "
+                    "Disable to revert to single-call no-tool mode.",
+    )
+
+    # ── Naked Options Specialist ──────────────────────────────────
+    naked_options_enabled: bool = Field(
+        default=False,
+        description="Enable NakedOptionsAgent dedicated scan loop. Paper mode only until "
+                    "execution quality confirmed. No risk-rule gates apply — earnings blackout "
+                    "and duplicate-ticker check are the only hard stops.",
+    )
+    naked_options_target_delta: float = Field(
+        default=0.16,
+        description="Target delta for short strike (16Δ = ~1 SD OTM, ~84% PoP). "
+                    "Raise to 0.30 for more premium in thin-IV environments.",
+        ge=0.05, le=0.50,
+    )
+    naked_options_min_premium: float = Field(
+        default=30.0,
+        description="Minimum premium per contract (dollars) to enter. Below this the "
+                    "theta reward doesn't justify commission + margin cost.",
+        ge=5.0,
+    )
+    naked_options_scan_interval_minutes: int = Field(
+        default=30,
+        description="Minutes between naked options scan cycles. Runs independently of "
+                    "the main spread pipeline.",
+        ge=5, le=120,
+    )
+    naked_options_max_positions: int = Field(
+        default=5,
+        description="Max concurrent naked option positions (separate from spread limit).",
+        ge=1, le=20,
+    )
+    naked_options_profit_target_pct: float = Field(
+        default=0.50,
+        description="Close when premium decays to this fraction of original credit. "
+                    "50% is tastytrade-validated for 21-45 DTE naked options.",
+        ge=0.25, le=0.90,
+    )
+
+    # ── Long Options Swing Specialist ──────────────────────────────
+    long_options_enabled: bool = Field(
+        default=False,
+        description="Enable LongOptionsAgent. Buys calls/puts on directional conviction. "
+                    "5-day time stop. Independent 15-min scan cycle.",
+    )
+    long_options_target_delta: float = Field(
+        default=0.35,
+        description="Target delta for strike selection. 0.35 (35Δ) is the professional "
+                    "sweet-spot: moves with the stock, affordable premium.",
+        ge=0.10, le=0.60,
+    )
+    long_options_ivr_cap: float = Field(
+        default=45.0,
+        description="Skip when IVR exceeds this — options too expensive to buy. "
+                    "Buyers want low IVR (cheap premium) before IV expansion.",
+        ge=20.0, le=80.0,
+    )
+    long_options_min_premium: float = Field(
+        default=50.0,
+        description="Minimum premium per contract (dollars). Below this the option "
+                    "is too illiquid or too OTM to generate a meaningful swing return.",
+        ge=10.0,
+    )
+    long_options_max_hold_days: int = Field(
+        default=5,
+        description="Hard time stop: close the position this many calendar days after "
+                    "entry regardless of P&L. Prevents theta decay from compounding.",
+        ge=1, le=30,
+    )
+    long_options_profit_target_pct: float = Field(
+        default=0.50,
+        description="Take profit when position gains this fraction of premium paid. "
+                    "50% is the standard swing rule — lock in the move, don't overstay.",
+        ge=0.20, le=2.0,
+    )
+    long_options_stop_loss_pct: float = Field(
+        default=0.50,
+        description="Cut loss when position loses this fraction of premium paid. "
+                    "50% stop keeps max loss at 50% of capital deployed per trade.",
+        ge=0.10, le=1.0,
+    )
+    long_options_scan_interval_minutes: int = Field(
+        default=15,
+        description="Minutes between long options scan cycles. Faster than naked (15 vs 30) "
+                    "to capture momentum signals before they decay.",
+        ge=5, le=60,
+    )
+    long_options_max_positions: int = Field(
+        default=5,
+        description="Max concurrent long option positions (separate from spread and naked limits).",
+        ge=1, le=20,
+    )
+    long_options_min_conviction: int = Field(
+        default=2,
+        description="Minimum signal score (out of 5 possible) to enter a trade. "
+                    "Score 2 = 2 confirming signals; 3+ = high conviction.",
+        ge=1, le=5,
+    )
+    long_options_min_oi: int = Field(
+        default=200,
+        description="Minimum open interest at the selected strike. Ensures marketable quotes "
+                    "and avoids wide bid-ask on thinly-traded strikes.",
+        ge=0,
+    )
+    long_options_max_contracts: int = Field(
+        default=3,
+        description="Maximum contracts per long option trade. Scaled by conviction: "
+                    "score 2→1, 3→2, 4+→max. Hard cap regardless of conviction.",
+        ge=1, le=10,
+    )
+    long_options_trailing_stop_trigger: float = Field(
+        default=0.30,
+        description="Activate trailing stop once position gains this fraction of premium paid. "
+                    "E.g. 0.30 = trail kicks in after +30% gain.",
+        ge=0.10, le=1.0,
+    )
+    long_options_trailing_stop_floor: float = Field(
+        default=0.15,
+        description="Trail floor below peak P&L. Position closes if P&L falls this fraction "
+                    "below its all-time peak after trailing stop is triggered.",
+        ge=0.05, le=0.50,
+    )
+    long_options_rsi_overbought: int = Field(
+        default=72,
+        description="Block LONG CALL entries when RSI14 exceeds this level. "
+                    "Prevents chasing extended rallies near mean-reversion exhaustion.",
+        ge=60, le=90,
+    )
+    long_options_rsi_oversold: int = Field(
+        default=28,
+        description="Block LONG PUT entries when RSI14 is below this level. "
+                    "Prevents chasing extended selloffs near bounce exhaustion.",
+        ge=10, le=40,
+    )
+    long_options_vetter_enabled: bool = Field(
+        default=False,
+        description="Enable Opus 4.8 pre-trade quality gate. Reviews signal confluence "
+                    "with adaptive thinking before committing capital. Run in shadow mode "
+                    "for ≥20 trades before setting shadow_mode=false.",
+    )
+    long_options_vetter_shadow_mode: bool = Field(
+        default=True,
+        description="Shadow mode: vetter logs verdicts but does NOT block or modify trades. "
+                    "Flip to false only after calibrating on real trade outcomes.",
+    )
+    long_options_vetter_min_conviction: int = Field(
+        default=3,
+        description="Only vet setups at this conviction score or above. "
+                    "Low-conviction trades are too borderline for the LLM to add signal.",
+        ge=2, le=5,
     )
 
     # ── Alerts ─────────────────────────────────────────────────────

@@ -89,7 +89,7 @@ class LessonsGenerator:
     async def generate_all(self) -> dict[str, int]:
         """Generate lessons for all agents. Returns {agent: lessons_written}."""
         results: dict[str, int] = {}
-        for agent in ("analyst", "strategy", "advocate", "exit"):
+        for agent in ("analyst", "strategy", "advocate", "exit", "swing_judge", "defender"):
             try:
                 n = await self._generate_for_agent(agent)
                 results[agent] = n
@@ -213,13 +213,40 @@ class LessonsGenerator:
                             "thesis_validity", "kill_condition_status", "recommendation",
                             "confidence_pct", "action_taken", "action_quality",
                             "outcome_pnl", "pnl_pct_of_max", "shadow_mode"]
+                elif agent == "swing_judge":
+                    rows = conn.execute(
+                        """SELECT ticker, decision_ts, raw_score, direction, go,
+                                  option_type, confidence, key_thesis, what_kills_trade,
+                                  outcome, pnl_pct, post_trade_audit, lesson_learned,
+                                  method
+                           FROM swing_journal
+                           WHERE outcome IS NOT NULL
+                           ORDER BY decision_ts DESC LIMIT ?""",
+                        (_SAMPLE_SIZE,),
+                    ).fetchall()
+                    cols = ["ticker", "decision_ts", "raw_score", "direction", "go",
+                            "option_type", "confidence", "key_thesis", "what_kills_trade",
+                            "outcome", "pnl_pct", "post_trade_audit", "lesson_learned",
+                            "method"]
+                elif agent == "defender":
+                    rows = conn.execute(
+                        """SELECT decision_id, ticker, decided_at_utc, thesis_strength,
+                                  confidence, go_recommendation, success_modes_json,
+                                  most_likely_win_scenario, shadow_mode
+                           FROM defender_journal
+                           ORDER BY decided_at_utc DESC LIMIT ?""",
+                        (_SAMPLE_SIZE,),
+                    ).fetchall()
+                    cols = ["decision_id", "ticker", "decided_at_utc", "thesis_strength",
+                            "confidence", "go_recommendation", "success_modes",
+                            "most_likely_win_scenario", "shadow_mode"]
                 else:
                     return []
 
                 result = [dict(zip(cols, r)) for r in rows]
                 # Parse any JSON string columns
                 for row in result:
-                    for key in ("kill_conditions", "failure_modes"):
+                    for key in ("kill_conditions", "failure_modes", "success_modes", "factor_breakdown"):
                         if key in row and isinstance(row[key], str):
                             try:
                                 row[key] = json.loads(row[key] or "[]")
@@ -231,9 +258,13 @@ class LessonsGenerator:
             return []
 
     def _build_payload(self, agent: str, rows: list[dict]) -> dict:
-        wins  = sum(1 for r in rows if (r.get("thesis_played_out") == 1
-                                        or r.get("realized_pnl", 0) > 0
-                                        or r.get("advocate_was_right") == 1))
+        wins = sum(1 for r in rows if (
+            r.get("thesis_played_out") == 1
+            or (r.get("realized_pnl") or 0) > 0
+            or r.get("advocate_was_right") == 1
+            or r.get("outcome") == "win"
+            or (r.get("pnl_pct") or 0) > 0
+        ))
         total = len(rows)
         return {
             "agent": agent,

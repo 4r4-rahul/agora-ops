@@ -25,9 +25,12 @@ from typing import Any
 
 import anthropic
 
-from agora.ops.llm_cost_log import log_call as _log_llm
+from agora.ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
 from agora.ops.lessons_store import load_approved_lessons as _load_lessons
 from agora.ops.payload_compressor import compress_payload as _compress
+from agora.mcp.sqlite_tools import SQLITE_TOOLS, sqlite_tool_handlers
+from agora.mcp.search_tools import SEARCH_TOOLS, search_tool_handlers
+from agora.mcp.tool_runner import run_with_tools
 
 logger = logging.getLogger(__name__)
 
@@ -150,14 +153,28 @@ class StockAnalystAgent:
         thesis = None
         raw_output: dict = {}
 
+        # MCP tools: analyst can query its own past ticker decisions and search
+        # for recent news before forming a thesis — reduces story-fitting
+        _db = str(self._settings.db_path)
+        _tavily_key = getattr(self._settings, "tavily_api_key", None)
+        _tools = SQLITE_TOOLS + SEARCH_TOOLS
+        _handlers = {
+            **sqlite_tool_handlers(_db),
+            **search_tool_handlers(_tavily_key),
+        }
+
         try:
-            response = await self._client.messages.create(
+            response = await run_with_tools(
+                client=self._client,
                 model=self._model,
-                max_tokens=1024,
-                thinking={"type": "adaptive"},
                 system=_SYSTEM,
                 messages=[{"role": "user", "content": _compress(payload)}],
-                timeout=anthropic.Timeout(connect=30.0, read=60.0, write=30.0, pool=30.0),
+                tools=_tools,
+                handlers=_handlers,
+                max_turns=3,
+                max_tokens=1024,
+                thinking={"type": "adaptive"},
+                timeout=anthropic.Timeout(connect=30.0, read=90.0, write=30.0, pool=30.0),
             )
 
             latency_ms = int((time.monotonic() - t0) * 1000)
@@ -174,9 +191,10 @@ class StockAnalystAgent:
             thesis = _parse_thesis(raw_output)
 
             try:
-                _log_llm(
+                _log_msg(
                     str(self._settings.db_path), "StockAnalystAgent",
-                    self._model, in_tok, out_tok, purpose=f"analyst_{ticker}",
+                    self._model, response.usage, purpose=f"analyst_{ticker}",
+                    trace_id=decision_id,
                 )
             except Exception:
                 pass
@@ -321,7 +339,7 @@ class StockAnalystAgent:
                     ),
                 )
         except Exception as exc:
-            logger.debug("analyst_journal write error: %s", exc)
+            logger.warning("analyst_journal write error: %s", exc)
 
 
 # ── Pure helpers ──────────────────────────────────────────────────────────────

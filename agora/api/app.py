@@ -46,7 +46,7 @@ async def lifespan(app: FastAPI):
     # ib_insync logs harmless IBKR subscription codes at ERROR level.
     # Filter them so they don't drown out real errors.
     class _IBKRNoiseFilter(logging.Filter):
-        _HARMLESS = {"10197", "10090", "2104", "2106", "2158"}
+        _HARMLESS = {"10197", "10090", "10089", "10168", "2104", "2106", "2158", "2103", "2109"}
         def filter(self, record: logging.LogRecord) -> bool:
             msg = record.getMessage()
             return not any(f"Error {c}" in msg or f"Error {c}," in msg
@@ -54,6 +54,19 @@ async def lifespan(app: FastAPI):
 
     for _name in ("ib_insync.wrapper", "ib_insync.client"):
         logging.getLogger(_name).addFilter(_IBKRNoiseFilter())
+
+    # yfinance logs 401s at ERROR level for: (a) stale crumb — our code retries+falls
+    # back to IV cache, (b) Yahoo Premium endpoints we don't need. Neither is actionable.
+    # Filter these specific strings so real yfinance failures still surface.
+    class _YFNoiseFilter(logging.Filter):
+        _SUPPRESS = frozenset(["Invalid Crumb", "User is unable to access this feature"])
+        def filter(self, record: logging.LogRecord) -> bool:
+            msg = record.getMessage()
+            return not any(s in msg for s in self._SUPPRESS)
+
+    _yf_filter = _YFNoiseFilter()
+    for _yf_name in ("yfinance", "yfinance.base", "yfinance.data", "yfinance.utils"):
+        logging.getLogger(_yf_name).addFilter(_yf_filter)
 
     # Attach WebSocket log handler before session starts
     attach_log_handler()
@@ -69,11 +82,14 @@ async def lifespan(app: FastAPI):
     yield  # API is live
 
     logger.info("Shutting down AGORA session…")
-    await session.stop()
+    try:
+        await session.stop()
+    except Exception as exc:
+        logger.warning("Session stop error (non-fatal): %s", exc)
     session_task.cancel()
     try:
         await session_task
-    except asyncio.CancelledError:
+    except (asyncio.CancelledError, Exception):
         pass
 
 
