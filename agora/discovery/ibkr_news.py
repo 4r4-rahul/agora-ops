@@ -27,7 +27,7 @@ import anthropic
 from ib_insync import IB, Stock
 
 from ..core.models import Catalyst, CatalystType
-from ..ops.llm_cost_log import log_call as _log_llm
+from ..ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
 from ..ops.payload_compressor import compress_text as _compress_text
 
 logger = logging.getLogger(__name__)
@@ -323,8 +323,8 @@ class IBKRNewsAgent:
                 messages=[{"role": "user", "content": _compress_text(body, max_chars=4000)}],
             )
             if hasattr(response, "usage") and hasattr(self._settings, "db_path"):
-                _log_llm(str(self._settings.db_path), "IBKRNews", "claude-haiku-4-5-20251001",
-                         response.usage.input_tokens, response.usage.output_tokens, purpose="news_classify")
+                _log_msg(str(self._settings.db_path), "IBKRNews", "claude-haiku-4-5-20251001",
+                         response.usage, purpose="news_classify")
             raw = response.content[0].text.strip()
             if raw.startswith("```"):
                 raw = raw.split("```")[1]

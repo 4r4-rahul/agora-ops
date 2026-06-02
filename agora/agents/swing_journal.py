@@ -31,7 +31,7 @@ from typing import Any
 import anthropic
 
 from ..core.config import AgoraSettings, get_settings
-from ..ops.llm_cost_log import log_call as _log_llm
+from ..ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
 from .swing_judge import SwingDecision
 
 logger = logging.getLogger(__name__)
@@ -282,8 +282,8 @@ class SwingJournal:
             elapsed = time.monotonic() - t0
             logger.info("SwingJournal audit OK in %.1fs | %s id=%d", elapsed, ticker, journal_id)
             if hasattr(response, "usage"):
-                _log_llm(str(self._settings.db_path), "SwingJournal", self._settings.claude_model,
-                         response.usage.input_tokens, response.usage.output_tokens, purpose="post_trade_audit")
+                _log_msg(str(self._settings.db_path), "SwingJournal", self._settings.claude_model,
+                         response.usage, purpose="post_trade_audit")
 
             text_blocks = [b for b in response.content if b.type == "text"]
             if not text_blocks:

@@ -32,7 +32,7 @@ from zoneinfo import ZoneInfo
 import anthropic
 
 from ..core.config import AgoraSettings, get_settings
-from ..ops.llm_cost_log import log_call as _log_llm
+from ..ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
 
 logger = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
@@ -595,8 +595,8 @@ class IBKRKnowledgeAgent:
                 messages=[{"role": "user", "content": prompt}],
             )
             if hasattr(resp, "usage"):
-                _log_llm(str(self._settings.db_path), "IBKRKnowledge", self._settings.claude_model,
-                         resp.usage.input_tokens, resp.usage.output_tokens, purpose="ibkr_diagnosis")
+                _log_msg(str(self._settings.db_path), "IBKRKnowledge", self._settings.claude_model,
+                         resp.usage, purpose="ibkr_diagnosis")
             for block in reversed(resp.content):
                 if hasattr(block, "text"):
                     result = block.text.strip()

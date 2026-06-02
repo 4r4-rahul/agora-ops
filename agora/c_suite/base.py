@@ -43,7 +43,7 @@ import anthropic
 from ..core.config import AgoraSettings, get_settings
 from ..core.events import AgentEventBus, AgentEvent
 from ..core.session_plan import SessionPlan
-from ..ops.llm_cost_log import log_call as _log_llm
+from ..ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
 
 logger = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
@@ -421,10 +421,10 @@ class ExecutiveAgent:
                 messages=[{"role": "user", "content": prompt}],
             )
             if hasattr(resp, "usage"):
-                _log_llm(
+                _log_msg(
                     str(self._settings.db_path), self.TITLE,
                     self._settings.claude_fast_model,
-                    resp.usage.input_tokens, resp.usage.output_tokens,
+                    resp.usage,
                     purpose="patrol_format",
                 )
             for block in reversed(resp.content):
@@ -461,10 +461,10 @@ class ExecutiveAgent:
             ) as stream:
                 msg = await stream.get_final_message()
             if hasattr(msg, "usage"):
-                _log_llm(
+                _log_msg(
                     str(self._settings.db_path), self.TITLE,
                     _model,
-                    msg.usage.input_tokens, msg.usage.output_tokens,
+                    msg.usage,
                     purpose="brief",
                 )
             for block in reversed(msg.content):

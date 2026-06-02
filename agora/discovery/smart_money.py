@@ -30,7 +30,7 @@ import anthropic
 import httpx
 
 from ..core.config import AgoraSettings, get_settings
-from ..ops.llm_cost_log import log_call as _log_llm
+from ..ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
 from ..core.models import Catalyst, CatalystType
 
 logger = logging.getLogger(__name__)
@@ -303,8 +303,8 @@ class SmartMoneyAgent:
                 return None
 
             if hasattr(response, "usage"):
-                _log_llm(str(self._settings.db_path), "SmartMoney13D", self._settings.claude_model,
-                         response.usage.input_tokens, response.usage.output_tokens, purpose="13d_tool_call")
+                _log_msg(str(self._settings.db_path), "SmartMoney13D", self._settings.claude_model,
+                         response.usage, purpose="13d_tool_call")
             messages.append({"role": "assistant", "content": response.content})
 
             # Check if Claude wants to use a tool
@@ -520,8 +520,8 @@ class SmartMoneyAgent:
                 messages=[{"role": "user", "content": user_msg}],
             )
             if hasattr(response, "usage"):
-                _log_llm(str(self._settings.db_path), "SmartMoneyForm4", self._settings.claude_fast_model,
-                         response.usage.input_tokens, response.usage.output_tokens, purpose="form4_classify")
+                _log_msg(str(self._settings.db_path), "SmartMoneyForm4", self._settings.claude_fast_model,
+                         response.usage, purpose="form4_classify")
             raw = response.content[0].text.strip()
             if raw.startswith("```"):
                 raw = raw.split("```")[1].lstrip("json").strip()

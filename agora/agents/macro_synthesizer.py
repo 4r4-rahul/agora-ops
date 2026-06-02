@@ -33,7 +33,7 @@ from typing import Any
 import anthropic
 
 from ..core.config import AgoraSettings, get_settings
-from ..ops.llm_cost_log import log_call as _log_llm
+from ..ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
 from ..ops.payload_compressor import compress_text as _compress_text
 
 logger = logging.getLogger(__name__)
@@ -131,10 +131,10 @@ class MacroSynthesizer:
             )
             logger.info("MacroSynthesizer Claude call OK in %.1fs", _time.monotonic() - _t0)
             if hasattr(response, "usage"):
-                _log_llm(
+                _log_msg(
                     str(self._settings.db_path), "MacroSynthesizer",
                     self._settings.claude_brief_model,
-                    response.usage.input_tokens, response.usage.output_tokens,
+                    response.usage,
                     purpose="macro_synthesis",
                 )
 
