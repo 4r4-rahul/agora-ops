@@ -219,7 +219,13 @@ class SystemHealthAgent:
                 return
 
             conn = sqlite3.connect(str(db_path), check_same_thread=False)
-            row = conn.execute("SELECT COUNT(*) FROM positions WHERE status='open'").fetchone()
+            # Count the SAME live-position set the position manager exposes via
+            # get_open_positions() — 'tested' and 'rolled' positions still hold live
+            # IBKR exposure. Counting only status='open' here produced a spurious
+            # "DB/session mismatch" warning whenever a position was tested or rolled.
+            row = conn.execute(
+                "SELECT COUNT(*) FROM positions WHERE status IN ('open','tested','rolled')"
+            ).fetchone()
             conn.close()
 
             db_count = row[0] if row else 0
