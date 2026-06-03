@@ -2429,7 +2429,7 @@ class AgoraSession:
                 await self._evaluate_ticker(ticker)
                 await asyncio.sleep(1)
             except Exception as exc:
-                logger.error("Evaluate ticker %s failed: %s", ticker, exc)
+                logger.error("Evaluate ticker %s failed: %s", ticker, exc, exc_info=True)
 
     async def _evaluate_ticker(
         self,
