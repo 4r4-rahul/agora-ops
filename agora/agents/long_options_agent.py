@@ -496,7 +496,11 @@ class LongOptionsAgent:
         )
 
         max_loss_dollars = round(premium_per_sh * 100 * contracts, 2)
-        max_gain_dollars = round(premium_per_sh * 100 * contracts * 3.0, 2)
+        # Long-option upside is theoretically unbounded; report the EXIT-POLICY target
+        # gain (profit_target × premium) and the target reward:risk below — NOT a
+        # fabricated 3:1 — so downstream sizing/attribution isn't fed fictional numbers.
+        _sl_pct = float(getattr(self._settings, "long_options_stop_loss_pct", 0.50)) or 0.50
+        max_gain_dollars = round(max_loss_dollars * profit_target_pct, 2)
 
         signals_readable = json.dumps(signal_stack)
         _pt_ivr_str = f"{per_ticker_ivr:.0f}" if per_ticker_ivr is not None else "N/A"
@@ -511,7 +515,7 @@ class LongOptionsAgent:
             entry_debit_credit=round(premium_per_sh * 100 * contracts, 2),
             max_loss_dollars=max_loss_dollars,
             max_gain_dollars=max_gain_dollars,
-            reward_risk_ratio=3.0,
+            reward_risk_ratio=round(profit_target_pct / _sl_pct, 2),
             breakeven_price=(
                 round(strike + premium_per_sh, 2) if opt_type == "call"
                 else round(strike - premium_per_sh, 2)

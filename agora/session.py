@@ -2068,6 +2068,10 @@ class AgoraSession:
                     decision.contracts, decision.conviction,
                     decision.per_ticker_ivr,
                 )
+                # Record the attempt BEFORE submitting so the fill-rate metric has a
+                # proper denominator (long path previously called record_fill with no
+                # preceding record_attempt, corrupting the fill rate).
+                self._exec_quality.record_attempt(ticker, str(decision.strategy), decision.premium)
                 try:
                     order = await submit_trade(rec, self._settings, self._session_id)
                     order_status = order.get("status", "")
@@ -3789,6 +3793,11 @@ class AgoraSession:
         if self._risk.is_kill_switch_active():
             logger.info("LongOptions BLOCKED: kill switch active [%s]", ticker)
             return False
+        # Macro-calendar gate (FOMC/NFP/CPI avoid-days) — parity with the spread pipeline.
+        _can_trade, _cal_why = get_macro_calendar().should_trade()
+        if not _can_trade:
+            logger.info("LongOptions BLOCKED by macro calendar [%s]: %s", ticker, _cal_why)
+            return False
         positions = self._position_mgr.get_open_positions()
         comp = self._compliance.check_trade(rec, positions)
         if not comp.get("compliant", True):
@@ -3804,9 +3813,20 @@ class AgoraSession:
             return False
         # LLM advocate — adversarial review; fail closed when unavailable in live mode.
         if self._advocate is not None:
+            # Give the advocate real direction/horizon context (was thesis=None, which
+            # left it reviewing structure+signals only — a materially weaker gate).
+            from types import SimpleNamespace
+            _thesis = SimpleNamespace(
+                direction=getattr(rec, "direction", "neutral"),
+                magnitude_pct=None,
+                horizon_days=getattr(self._settings, "long_options_max_hold_days", 5),
+                confidence_pct=getattr(rec, "conviction_score", None),
+                strategy_family="long_directional",
+                kill_conditions=[],
+            )
             try:
                 verdict = await self._advocate.review(
-                    ticker=ticker, recommendation=rec, thesis=None,
+                    ticker=ticker, recommendation=rec, thesis=_thesis,
                     positions=positions, macro_context=self._macro_context, decision_id="",
                 )
             except Exception as _aex:
