@@ -309,6 +309,10 @@ class StrategySelectorAgent:
             "chain_summary": _summarize_chain(
                 options_chain,
                 snapshot.price if snapshot and snapshot.price else 0,
+                focus_strikes=(
+                    [lg.strike for lg in rules_recommendation.legs]
+                    if rules_recommendation is not None else None
+                ),
             ),
             "rules_engine_proposal": rules_summary,
             "approved_lessons": lessons or [],
@@ -379,8 +383,12 @@ def _parse_selection(raw: dict) -> StrategySelection:
     )
 
 
-def _summarize_chain(chain_dict: dict, spot: float) -> dict:
-    """Compact options chain for LLM: top 2 expiries, 4 strikes near spot each side."""
+def _summarize_chain(chain_dict: dict, spot: float, focus_strikes=None) -> dict:
+    """Compact options chain for LLM: top 2 expiries, 4 strikes near spot each side PLUS
+    any focus_strikes (the strikes the rules engine actually proposed). Without the focus
+    strikes the selector validates against a window that excludes the very strikes it's
+    judging — e.g. a far-OTM premium-selling leg — and always returns 'no_structure'."""
+    focus = {round(float(s), 2) for s in (focus_strikes or [])}
     summary = {}
     for expiry, data in list(chain_dict.items())[:2]:
         try:
@@ -392,9 +400,10 @@ def _summarize_chain(chain_dict: dict, spot: float) -> dict:
             def _fmt(df, lo_pct, hi_pct):
                 if df is None or df.empty:
                     return []
-                mask = (df["strike"] >= spot * lo_pct) & (df["strike"] <= spot * hi_pct)
-                sub = df[mask][["strike", "bid", "ask", "openInterest",
-                                "impliedVolatility"]].head(4)
+                cols = ["strike", "bid", "ask", "openInterest", "impliedVolatility"]
+                near = df[(df["strike"] >= spot * lo_pct) & (df["strike"] <= spot * hi_pct)]
+                wanted = set(near["strike"].head(4).round(2).tolist()) | focus
+                sub = df[df["strike"].round(2).isin(wanted)][cols].sort_values("strike")
                 return json.loads(sub.round(4).to_json(orient="records"))
 
             summary[expiry] = {
