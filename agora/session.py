@@ -2044,8 +2044,13 @@ class AgoraSession:
                     logger.debug("LongOptions [%s] skipped — already submitted this cycle", ticker)
                     continue
 
-                # Submit
                 rec = decision.recommendation
+                # Shared heavy gates — long options now faces the same review as the main
+                # (spread) pipeline: timing / kill-switch / compliance / risk council / advocate.
+                if not await self._long_options_risk_gates(rec, ticker, spot):
+                    continue
+
+                # Submit
                 logger.info(
                     "LongOptions SUBMITTING [%s] %s strike=%.0f exp=%s prem=$%.2f "
                     "contracts=%d conviction=%d ptIVR=%.0f",
@@ -3746,6 +3751,51 @@ class AgoraSession:
                 )
         except Exception as exc:
             logger.error("Post-earnings trade build failed for %s: %s", result.ticker, exc)
+
+    async def _long_options_risk_gates(self, rec: Any, ticker: str, spot: float) -> bool:
+        """Run the shared heavy gates on a long-options entry so it faces the SAME
+        review as the main (spread) pipeline — previously it bypassed all of these:
+        entry-timing -> kill switch -> compliance -> risk council -> LLM advocate
+        (fail-closed). Returns True only when the trade clears every gate."""
+        permitted, _why = self._entry_timing.is_entry_permitted()
+        if not permitted:
+            logger.info("LongOptions BLOCKED by timing gate [%s]: %s", ticker, _why)
+            return False
+        if self._risk.is_kill_switch_active():
+            logger.info("LongOptions BLOCKED: kill switch active [%s]", ticker)
+            return False
+        positions = self._position_mgr.get_open_positions()
+        comp = self._compliance.check_trade(rec, positions)
+        if not comp.get("compliant", True):
+            logger.info("LongOptions BLOCKED by compliance [%s]: %s", ticker, comp.get("reason"))
+            return False
+        for _w in comp.get("warnings", []):
+            logger.warning("LongOptions compliance warning [%s]: %s", ticker, _w)
+        greeks = self._position_mgr.get_portfolio_greeks()
+        regime = self._macro_context.macro_stance if self._macro_context else "neutral"
+        rr = self._risk.approve_trade(rec, greeks, positions, spot, regime=regime)
+        if not rr.get("approved", False):
+            logger.info("LongOptions BLOCKED by risk council [%s]: %s", ticker, rr.get("reason"))
+            return False
+        # LLM advocate — adversarial review; fail closed when unavailable in live mode.
+        if self._advocate is not None:
+            try:
+                verdict = await self._advocate.review(
+                    ticker=ticker, recommendation=rec, thesis=None,
+                    positions=positions, macro_context=self._macro_context, decision_id="",
+                )
+            except Exception as _aex:
+                verdict = None
+                logger.debug("LongOptions advocate error [%s]: %s", ticker, _aex)
+            live = not self._advocate.shadow_mode
+            if verdict is None and live and self._settings.advocate_fail_closed:
+                logger.warning("LongOptions BLOCKED (fail-closed): advocate unavailable [%s]", ticker)
+                return False
+            if verdict is not None and live and verdict.is_block:
+                logger.info("LongOptions BLOCKED by advocate [%s]: %s",
+                            ticker, (verdict.verdict_reasoning or "")[:80])
+                return False
+        return True
 
     # ── Execution stubs (wired to IBKR in live mode) ──────────────
 
