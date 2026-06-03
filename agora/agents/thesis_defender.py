@@ -206,10 +206,11 @@ class ThesisDefenderAgent:
 
         _db = str(self._settings.db_path)
         _tavily_key = getattr(self._settings, "tavily_api_key", None)
-        _tools = SQLITE_TOOLS + SEARCH_TOOLS
+        # Drop web-search tools when no key — avoids a wasted tool-turn on a dead tool.
+        _tools = SQLITE_TOOLS + (SEARCH_TOOLS if _tavily_key else [])
         _handlers = {
             **sqlite_tool_handlers(_db),
-            **search_tool_handlers(_tavily_key),
+            **(search_tool_handlers(_tavily_key) if _tavily_key else {}),
         }
 
         _cached_system = [{"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}]

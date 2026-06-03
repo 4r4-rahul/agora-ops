@@ -157,10 +157,12 @@ class StockAnalystAgent:
         # for recent news before forming a thesis — reduces story-fitting
         _db = str(self._settings.db_path)
         _tavily_key = getattr(self._settings, "tavily_api_key", None)
-        _tools = SQLITE_TOOLS + SEARCH_TOOLS
+        # Only advertise the web-search tools when a key is configured — otherwise the
+        # model wastes a tool-turn calling a dead tool that always returns "unavailable".
+        _tools = SQLITE_TOOLS + (SEARCH_TOOLS if _tavily_key else [])
         _handlers = {
             **sqlite_tool_handlers(_db),
-            **search_tool_handlers(_tavily_key),
+            **(search_tool_handlers(_tavily_key) if _tavily_key else {}),
         }
 
         try:
