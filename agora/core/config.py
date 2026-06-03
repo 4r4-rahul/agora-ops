@@ -39,9 +39,12 @@ class AgoraSettings(BaseSettings):
     # ── Trading ────────────────────────────────────────────────────
     trading_mode: Literal["paper", "live"] = Field(default="paper")
     account_size: float = Field(default=25_000.0, ge=1_000.0)
-    max_position_size_pct: float = Field(default=0.02, ge=0.005, le=0.05)
-    max_open_positions: int = Field(default=4, ge=1, le=20)
-    max_per_correlation_group: int = Field(default=1, ge=1, le=5)
+    # Upper bounds widened to support "free paper" data-collection mode (caps set via
+    # .env); the conservative production defaults are unchanged. Re-tighten le once
+    # enough paper data exists to choose real caps.
+    max_position_size_pct: float = Field(default=0.02, ge=0.005, le=1.0)
+    max_open_positions: int = Field(default=4, ge=1, le=1000)
+    max_per_correlation_group: int = Field(default=1, ge=1, le=1000)
     daily_loss_limit_pct: float = Field(default=0.02, ge=0.005, le=0.25)
     weekly_loss_limit_pct: float = Field(default=0.06, ge=0.01, le=0.20)
     min_rr_ratio: float = Field(default=1.3, ge=0.5)
@@ -362,7 +365,7 @@ class AgoraSettings(BaseSettings):
     naked_options_max_positions: int = Field(
         default=5,
         description="Max concurrent naked option positions (separate from spread limit).",
-        ge=1, le=20,
+        ge=1, le=1000,
     )
     naked_options_profit_target_pct: float = Field(
         default=0.50,
@@ -422,7 +425,7 @@ class AgoraSettings(BaseSettings):
     long_options_max_positions: int = Field(
         default=5,
         description="Max concurrent long option positions (separate from spread and naked limits).",
-        ge=1, le=20,
+        ge=1, le=1000,
     )
     long_options_min_conviction: int = Field(
         default=2,
@@ -440,7 +443,7 @@ class AgoraSettings(BaseSettings):
         default=3,
         description="Maximum contracts per long option trade. Scaled by conviction: "
                     "score 2→1, 3→2, 4+→max. Hard cap regardless of conviction.",
-        ge=1, le=10,
+        ge=1, le=1000,
     )
     long_options_trailing_stop_trigger: float = Field(
         default=0.30,
