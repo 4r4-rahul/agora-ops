@@ -232,7 +232,7 @@ class AdvocateAgent:
                 tools=_tools,
                 handlers=_handlers,
                 max_turns=3,
-                max_tokens=2000,
+                max_tokens=4000,   # headroom: model often writes prose before the JSON
                 thinking={"type": "disabled"},
                 output_config={"effort": "medium"},
                 timeout=anthropic.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0),
@@ -247,7 +247,17 @@ class AdvocateAgent:
             if raw_text.startswith("```"):
                 raw_text = raw_text.split("```")[1].lstrip("json").strip()
 
-            raw_output = _parse_json_robust(raw_text)
+            try:
+                raw_output = _parse_json_robust(raw_text)
+            except ValueError:
+                # DIAGNOSTIC: surface what the model actually returned so we can fix the
+                # real format issue rather than guess.
+                logger.warning(
+                    "Advocate parse FAIL [%s]: stop=%s blocks=%s text_len=%d raw=%r",
+                    ticker, getattr(response, "stop_reason", "?"),
+                    [b.type for b in response.content], len(raw_text), raw_text[:600],
+                )
+                raise
             # Enforce deterministic verdict from failure mode analysis
             raw_output["verdict"] = _compute_verdict(
                 raw_output.get("failure_modes", []),
@@ -413,22 +423,64 @@ def _parse_json_robust(text: str) -> dict:
     def _valid(obj: object) -> bool:
         return isinstance(obj, dict) and "failure_modes" in obj
 
+    # 1. Whole string is the object.
     try:
         obj = json.loads(text)
         if _valid(obj):
             return obj
     except json.JSONDecodeError:
         pass
-    # Truncation recovery: longest prefix ending in '}' that is a valid verdict object.
-    for end in range(len(text), 0, -1):
-        if text[end - 1] == '}':
-            try:
-                obj = json.loads(text[:end])
-            except json.JSONDecodeError:
-                continue
-            if _valid(obj):
-                return obj
+    # 2. The model commonly wraps the verdict in prose and/or a ```json fence
+    #    ("Here is my verdict:\n```json\n{...}\n```"). Extract the first balanced {...}
+    #    object embedded ANYWHERE in the text (brace-counting, string-aware).
+    obj = _extract_balanced_object(text)
+    if _valid(obj):
+        return obj
+    # 3. Truncation recovery: from the first '{', longest prefix ending in '}' that parses.
+    start = text.find("{")
+    if start != -1:
+        for end in range(len(text), start, -1):
+            if text[end - 1] == '}':
+                try:
+                    obj = json.loads(text[start:end])
+                except json.JSONDecodeError:
+                    continue
+                if _valid(obj):
+                    return obj
     raise ValueError("advocate output not parseable into a verdict object with failure_modes")
+
+
+def _extract_balanced_object(text: str) -> dict | None:
+    """Return the first complete, balanced {...} JSON object embedded in text (handles
+    prose preamble and ```json fences), or None. Brace counting ignores braces inside
+    JSON strings so nested object/array braces don't confuse the match."""
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(text)):
+        c = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start:i + 1])
+                except json.JSONDecodeError:
+                    return None
+    return None
 
 
 def _compute_verdict(failure_modes: list[dict], kill_conditions: list[str]) -> str:
