@@ -69,7 +69,10 @@ _ws_clients: set[WebSocket] = set()
 async def _broadcast(event: dict) -> None:
     _event_buffer.append(event)
     dead: set[WebSocket] = set()
-    for ws in _ws_clients:
+    # Snapshot the client set: send_json() awaits, so a client connecting or
+    # disconnecting mid-broadcast would otherwise mutate _ws_clients during
+    # iteration ("Set changed size during iteration").
+    for ws in list(_ws_clients):
         try:
             await ws.send_json(event)
         except Exception:
