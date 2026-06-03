@@ -445,6 +445,13 @@ class AgoraSettings(BaseSettings):
                     "score 2→1, 3→2, 4+→max. Hard cap regardless of conviction.",
         ge=1, le=1000,
     )
+    long_options_max_premium_pct: float = Field(
+        default=0.15,
+        description="Per-trade dollar risk cap: max premium paid on one long-options "
+                    "trade as a fraction of account_size, regardless of contract count. "
+                    "Bounds per-trade concentration; if one contract exceeds it, skip.",
+        ge=0.01, le=1.0,
+    )
     long_options_trailing_stop_trigger: float = Field(
         default=0.30,
         description="Activate trailing stop once position gains this fraction of premium paid. "

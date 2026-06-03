@@ -82,8 +82,12 @@ from agora.core.models import (
 logger = logging.getLogger(__name__)
 
 # ── DTE window ────────────────────────────────────────────────────────────────
-_DTE_MIN = 21
-_DTE_MAX = 60
+# v2: this is a directional MOMENTUM swing held ~5 days, so the option must be
+# responsive (gamma) over that horizon. The old 21-60 DTE window paid for time a
+# 5-day stop discarded and under-geared the bet. 14-30 DTE matches gamma to the hold
+# while keeping theta tolerable (14+ DTE is off the steep part of the decay curve).
+_DTE_MIN = 14
+_DTE_MAX = 30
 
 # ── Beta map (for DTE compression on high-beta names) ────────────────────────
 _BETA_MAP: dict[str, float] = {
@@ -480,6 +484,27 @@ class LongOptionsAgent:
             contracts = min(max_contracts, 2)
         else:
             contracts = 1
+
+        # ── Per-trade dollar risk cap (v2) ────────────────────────────────────
+        # No single directional long trade may risk more than max_premium_pct of the
+        # account, regardless of contract count. Bounds per-trade concentration and
+        # prevents the oversized-contract class of error. If even one contract exceeds
+        # the budget, the option is too expensive for this account → skip.
+        _max_premium = self._settings.account_size * getattr(
+            self._settings, "long_options_max_premium_pct", 0.15)
+        if premium_per_contract > 0:
+            _affordable = int(_max_premium // premium_per_contract)
+            if _affordable < 1:
+                return LongDecision(
+                    ticker=ticker, strategy=str(strategy), outcome="skipped",
+                    block_reason=(f"premium ${premium_per_contract:.0f}/contract > per-trade "
+                                  f"risk cap ${_max_premium:.0f} ({getattr(self._settings, 'long_options_max_premium_pct', 0.15):.0%})"),
+                    recommendation=None, dte=dte, ivr=ivr_display, vix=vix, regime=regime,
+                    per_ticker_ivr=per_ticker_ivr or 0.0,
+                    flow_direction=flow_dir, conviction=conviction, signal_stack=signal_stack,
+                    strike=strike, delta_approx=delta_approx, dte_reason=dte_reason,
+                )
+            contracts = min(contracts, _affordable)
 
         # Conviction-dynamic profit target — let high-conviction winners run further
         profit_target_pct = self._conviction_profit_target(conviction)
