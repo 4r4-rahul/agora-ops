@@ -105,12 +105,22 @@ class ExecutionQualityAgent:
         slippage = mid_price - fill_price  # positive = better than mid (rare)
         self._session_slippage.append(slippage)
 
-        self._db.execute(
+        cur = self._db.execute(
             "UPDATE execution_quality SET outcome='fill', fill_price=?, slippage_ticks=? "
             "WHERE id = (SELECT id FROM execution_quality WHERE ticker=? AND outcome='pending' "
             "AND attempt_date=? ORDER BY id DESC LIMIT 1)",
             (fill_price, slippage, ticker, date.today().isoformat()),
         )
+        if cur.rowcount == 0:
+            # No prior record_attempt to update — the long-options / naked-options paths
+            # record fills without a preceding attempt row, so the DB-based fill-rate
+            # metric (COO audit) counted them as 0. Insert the fill directly so it counts.
+            self._db.execute(
+                "INSERT INTO execution_quality "
+                "(attempt_date, ticker, strategy, mid_price, outcome, fill_price, slippage_ticks) "
+                "VALUES (?, ?, ?, ?, 'fill', ?, ?)",
+                (date.today().isoformat(), ticker, strategy, mid_price, fill_price, slippage),
+            )
         self._db.commit()
         logger.info(
             "ExecutionQuality FILL: %s | fill=%.4f mid=%.4f slippage=%.4f",

@@ -581,7 +581,7 @@ class AgoraSession:
         # Prevents: 13 POWL calls in 3h when thesis is unchanged.
         # Allows re-run: macro flips, big price move, position fill/close.
         self._advocate_cache: dict[str, tuple[float, str, float, int, Any, Any]] = {}
-        _ADVOCATE_COOLDOWN_SECS = 3 * 3600   # backstop TTL
+        self._ADVOCATE_COOLDOWN_SECS = 3 * 3600   # backstop TTL
 
         self._advocate: AdvocateAgent | None = None
         if self._settings.advocate_enabled:
@@ -2091,7 +2091,7 @@ class AgoraSession:
                             order.get("reason", ""), decision.strategy,
                         )
                 except Exception as submit_exc:
-                    logger.warning("LongOptions submit error [%s]: %r", ticker, submit_exc)
+                    logger.warning("LongOptions submit error [%s]: %r", ticker, submit_exc, exc_info=True)
 
                 await asyncio.sleep(2)
 
@@ -3950,14 +3950,14 @@ class AgoraSession:
             _use_cache = False
             if _cached:
                 _c_ts, _c_macro, _c_spot, _c_pos_cnt, _, _ = _cached
-                _time_ok  = (_now_ts - _c_ts) < _ADVOCATE_COOLDOWN_SECS
+                _time_ok  = (_now_ts - _c_ts) < self._ADVOCATE_COOLDOWN_SECS
                 _macro_ok = _c_macro == _cur_macro
                 _spot_ok  = abs(_cur_spot - _c_spot) / max(_c_spot, 1.0) < 0.03
                 _pos_ok   = _c_pos_cnt == _cur_pos_cnt
                 _use_cache = _time_ok and _macro_ok and _spot_ok and _pos_ok
                 if _cached and not _use_cache:
                     reasons = []
-                    if not _time_ok:  reasons.append(f"age>{_ADVOCATE_COOLDOWN_SECS/3600:.0f}h")
+                    if not _time_ok:  reasons.append(f"age>{self._ADVOCATE_COOLDOWN_SECS/3600:.0f}h")
                     if not _macro_ok: reasons.append(f"macro {_c_macro}→{_cur_macro}")
                     if not _spot_ok:  reasons.append(f"spot moved {abs(_cur_spot-_c_spot)/_c_spot:.1%}")
                     if not _pos_ok:   reasons.append(f"positions {_c_pos_cnt}→{_cur_pos_cnt}")
