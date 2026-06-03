@@ -81,7 +81,7 @@ SQLITE_TOOLS: list[dict] = [
             "properties": {
                 "agent_type": {
                     "type": "string",
-                    "description": "Agent category: analyst | advocate | strategy | swing | exit",
+                    "description": "Agent category: analyst | advocate | strategy | long_options | exit",
                 },
                 "limit": {"type": "integer", "description": "Max lessons to return (default 20)", "default": 20},
             },

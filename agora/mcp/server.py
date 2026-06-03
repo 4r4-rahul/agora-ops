@@ -79,7 +79,7 @@ def query_advocate_history(ticker: str = "", days: int = 30) -> dict:
 
 @mcp.tool()
 def query_approved_lessons(agent_type: str, limit: int = 20) -> list[dict]:
-    """Retrieve approved lessons for an agent type (analyst/advocate/strategy/swing/exit)."""
+    """Retrieve approved lessons for an agent type (analyst/advocate/strategy/long_options/exit)."""
     return _sqlite["query_approved_lessons"](agent_type=agent_type, limit=limit)
 
 

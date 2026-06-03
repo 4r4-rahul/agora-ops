@@ -1664,81 +1664,78 @@ async def chart_pnl(position_id: str) -> JSONResponse:
     })
 
 
-@router.get("/swing/decisions")
-async def get_swing_decisions(limit: int = 30) -> JSONResponse:
+@router.get("/long/status")
+async def get_long_status(limit: int = 25) -> JSONResponse:
     """
-    GET /agora/swing/decisions
-    Recent swing go/no-go decisions (both directions), most recent first.
-    Includes open positions, passed trades, and no-go passes.
+    GET /agora/long/status
+    Crystal-clear view of the long-options book — the system's sole directional path.
+      - open: live long_call/long_put positions with P&L
+      - signal_calibration: per-signal win-rate / P&L (the deterministic learning loop,
+        which auto-weights sizing) — sorted worst-to-best so problem signals lead
+      - recent: last N long-options decisions (proceed/skip/block) from long_journal
     """
     session = get_session()
-    if not session:
+    if session is None:
         return JSONResponse({"error": "session not running"}, status_code=503)
     try:
-        journal = session._swing_journal
-        open_pos = journal.get_all_open()
-        no_go = journal.get_no_go_summary(limit=limit)
-        perf = journal.get_performance_summary()
+        import sqlite3
+        db = str(session._settings.db_path)
+
+        # Open long positions
+        open_long = []
+        for p in session._position_mgr.get_open_positions():
+            strat = str(getattr(p.strategy, "value", p.strategy))
+            if strat in ("long_call", "long_put"):
+                open_long.append({
+                    "ticker": p.ticker, "strategy": strat,
+                    "contracts": p.contracts, "entry_price": p.entry_price,
+                    "unrealized_pnl": round(p.unrealized_pnl or 0.0, 2),
+                    "max_loss": p.max_loss_dollars, "max_gain": p.max_gain_dollars,
+                })
+
+        # Signal calibration (learning loop made visible) — worst win-rate first
+        calibration = []
+        try:
+            with sqlite3.connect(db, timeout=5) as conn:
+                rows = conn.execute(
+                    """SELECT signal_name, direction, total_trades, wins, losses,
+                              win_rate, avg_pnl, total_pnl
+                       FROM signal_stats ORDER BY win_rate ASC, total_trades DESC"""
+                ).fetchall()
+            calibration = [{
+                "signal": r[0], "direction": r[1], "trades": r[2],
+                "wins": r[3], "losses": r[4], "win_rate": round(r[5] or 0.0, 3),
+                "avg_pnl": round(r[6] or 0.0, 2), "total_pnl": round(r[7] or 0.0, 2),
+            } for r in rows]
+        except Exception:
+            pass
+
+        # Recent decisions
+        recent = []
+        try:
+            with sqlite3.connect(db, timeout=5) as conn:
+                rows = conn.execute(
+                    """SELECT decided_at_utc, ticker, strategy, direction, conviction_score,
+                              outcome, block_reason, contracts, strike, dte
+                       FROM long_journal ORDER BY journal_id DESC LIMIT ?""",
+                    (limit,),
+                ).fetchall()
+            recent = [{
+                "ts": r[0], "ticker": r[1], "strategy": r[2], "direction": r[3],
+                "conviction": r[4], "outcome": r[5], "block_reason": r[6],
+                "contracts": r[7], "strike": r[8], "dte": r[9],
+            } for r in rows]
+        except Exception:
+            pass
+
         return JSONResponse({
-            "open_positions": open_pos,
-            "recent_no_go": no_go,
-            "performance": perf,
+            "open": open_long,
+            "open_count": len(open_long),
+            "signal_calibration": calibration,
+            "recent": recent,
         })
     except Exception as exc:
-        logger.error("Swing decisions endpoint error: %s", exc)
-        return JSONResponse({"error": str(exc)}, status_code=500)
-
-
-@router.get("/swing/open")
-async def get_swing_open() -> JSONResponse:
-    """
-    GET /agora/swing/open
-    All open (filled) swing positions with current P&L context.
-    """
-    session = get_session()
-    if not session:
-        return JSONResponse({"error": "session not running"}, status_code=503)
-    try:
-        return JSONResponse({"positions": session._swing_journal.get_all_open()})
-    except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
-
-
-@router.get("/swing/performance")
-async def get_swing_performance() -> JSONResponse:
-    """
-    GET /agora/swing/performance
-    Win rate, avg P&L, total P&L, avg prediction accuracy across all closed swings.
-    """
-    session = get_session()
-    if not session:
-        return JSONResponse({"error": "session not running"}, status_code=503)
-    try:
-        return JSONResponse(session._swing_journal.get_performance_summary())
-    except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
-
-
-class _SwingAuditBody(BaseModel):
-    journal_id: int
-
-
-@router.post("/swing/audit")
-async def trigger_swing_audit(body: _SwingAuditBody) -> JSONResponse:
-    """
-    POST /agora/swing/audit
-    Body: {"journal_id": 42}
-    Manually trigger a post-trade self-audit for a closed swing position.
-    Normally called automatically when record_close() is invoked.
-    """
-    session = get_session()
-    if not session:
-        return JSONResponse({"error": "session not running"}, status_code=503)
-    try:
-        audit = await session._swing_journal.trigger_self_audit(body.journal_id)
-        return JSONResponse({"audit": audit, "journal_id": body.journal_id})
-    except Exception as exc:
-        logger.error("Swing audit endpoint error: %s", exc)
+        logger.error("long/status endpoint error: %s", exc)
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 

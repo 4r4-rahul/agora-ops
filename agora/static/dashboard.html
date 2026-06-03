@@ -785,12 +785,12 @@ tr.pos-detail-row td { padding: 0; background: var(--bg1); }
       </div>
     </div>
 
-    <!-- ── Swing Trading row ── -->
-    <div id="row-swing" style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px">
+    <!-- ── Long Options row (sole directional path) ── -->
+    <div id="row-long" style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px">
       <div class="panel">
-        <div class="panel-header">🎯 Swing Open Positions
-          <span class="count" id="swing-open-count">0</span>
-          <button onclick="fetchSwing()"
+        <div class="panel-header">🎯 Long Options — Open &amp; Recent
+          <span class="count" id="long-open-count">0</span>
+          <button onclick="fetchLong()"
             style="margin-left:auto;padding:1px 7px;font-size:10px;font-family:var(--font);
                    background:rgba(88,166,255,.12);border:1px solid rgba(88,166,255,.3);
                    color:var(--blue);border-radius:4px;cursor:pointer">↻</button>
@@ -798,26 +798,25 @@ tr.pos-detail-row td { padding: 0; background: var(--bg1); }
         <div class="tbl-wrap" style="max-height:160px">
           <table>
             <thead><tr>
-              <th>Ticker</th><th>Type</th><th>Strike</th><th>DTE</th><th>Fill$</th><th>Target</th><th>Stop</th>
+              <th>Ticker</th><th>Type</th><th>Ct</th><th>Fill$</th><th>uPnL</th><th>Dir/Conv</th><th>When</th>
             </tr></thead>
-            <tbody id="swing-open-tbody">
-              <tr><td colspan="7" style="color:var(--text2);text-align:center;padding:8px;font-size:10px">No open swing positions</td></tr>
+            <tbody id="long-open-tbody">
+              <tr><td colspan="7" style="color:var(--text2);text-align:center;padding:8px;font-size:10px">No open long positions</td></tr>
             </tbody>
           </table>
         </div>
       </div>
       <div class="panel">
-        <div class="panel-header">📓 Swing Journal (Recent Passes)
-          <span id="swing-perf-badge" style="margin-left:8px;font-size:10px;color:var(--text2)"></span>
-          <button onclick="promptSwingAudit()" style="margin-left:auto;font-size:9px;padding:2px 7px;background:none;border:1px solid var(--border);border-radius:3px;color:var(--text2);cursor:pointer">Audit</button>
+        <div class="panel-header">🧠 Signal Calibration (learning loop)
+          <span id="long-cal-badge" style="margin-left:8px;font-size:10px;color:var(--text2)"></span>
         </div>
         <div class="tbl-wrap" style="max-height:160px">
           <table>
             <thead><tr>
-              <th>Ticker</th><th>Score</th><th>Dir</th><th>Conf</th><th>Go?</th><th>Thesis</th>
+              <th>Signal</th><th>Dir</th><th>Win%</th><th>n</th><th>Avg$</th><th>Size×</th>
             </tr></thead>
-            <tbody id="swing-journal-tbody">
-              <tr><td colspan="6" style="color:var(--text2);text-align:center;padding:8px;font-size:10px">No swing decisions yet</td></tr>
+            <tbody id="long-cal-tbody">
+              <tr><td colspan="6" style="color:var(--text2);text-align:center;padding:8px;font-size:10px">No signal data yet (needs ≥3 closes/signal)</td></tr>
             </tbody>
           </table>
         </div>
@@ -2402,19 +2401,6 @@ async function fetchCosts() {
   }
 }
 
-// ── Swing audit ───────────────────────────────────────────────────────────────
-async function promptSwingAudit() {
-  const id = prompt('Enter swing journal ID to audit:');
-  if (!id || isNaN(parseInt(id))) return;
-  try {
-    const d = await fetch('/agora/swing/audit', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({journal_id: parseInt(id)}),
-    }).then(r => r.json());
-    alert(d.audit ? JSON.stringify(d.audit, null, 2).slice(0, 800) : JSON.stringify(d));
-  } catch(ex) { alert('Audit error: ' + ex.message); }
-}
-
 // ── Strategy Health ───────────────────────────────────────────────────────────
 async function fetchStratHealth() {
   const tbody   = document.getElementById('strat-health-tbody');
@@ -2466,66 +2452,80 @@ async function fetchStratHealth() {
   }
 }
 
-// ── Swing Setups ──────────────────────────────────────────────────────────────
-async function fetchSwing() {
-  const openTbody    = document.getElementById('swing-open-tbody');
-  const journalTbody = document.getElementById('swing-journal-tbody');
-  const countEl      = document.getElementById('swing-open-count');
-  const perfBadge    = document.getElementById('swing-perf-badge');
+// ── Long Options (sole directional path) ───────────────────────────────────────
+async function fetchLong() {
+  const openTbody = document.getElementById('long-open-tbody');
+  const calTbody  = document.getElementById('long-cal-tbody');
+  const countEl   = document.getElementById('long-open-count');
+  const calBadge  = document.getElementById('long-cal-badge');
+  // Bayesian-shrunk win-rate → sizing multiplier (mirrors backend _perf_mult).
+  const sizeMult = (wr, n) => {
+    if (n < 3) return 1.0;
+    const shrunk = (wr * n + 8 * 0.5) / (n + 8);
+    return Math.max(0.6, Math.min(1.4, shrunk / 0.5));
+  };
   try {
-    const r = await fetch('/agora/swing/decisions');
+    const r = await fetch('/agora/long/status');
     if (!r.ok) {
       openTbody.innerHTML = '<tr><td colspan="7" style="color:var(--text2);text-align:center;padding:8px;font-size:10px">Session not running</td></tr>';
       return;
     }
     const d = await r.json();
 
-    // Performance badge
-    const p = d.performance || {};
-    if (p.wins !== undefined) {
-      const wr = p.win_rate_pct != null ? `${p.win_rate_pct}% WR` : '—';
-      const pnl = p.total_pnl_dollars != null ? ` | $${p.total_pnl_dollars >= 0 ? '+' : ''}${p.total_pnl_dollars.toFixed(0)} P&L` : '';
-      perfBadge.textContent = `${wr}${pnl} (${p.wins}W/${p.losses}L)`;
-      perfBadge.style.color = (p.total_pnl_dollars || 0) >= 0 ? 'var(--green)' : 'var(--red)';
-    }
-
-    // Open positions
-    const open = d.open_positions || [];
+    // Open + recent merged into one chronological view
+    const open = d.open || [];
     countEl.textContent = open.length;
-    if (open.length === 0) {
-      openTbody.innerHTML = '<tr><td colspan="7" style="color:var(--text2);text-align:center;padding:8px;font-size:10px">No open swing positions</td></tr>';
-    } else {
-      openTbody.innerHTML = open.map(pos => {
-        const typeColor = pos.option_type === 'call' ? 'var(--green)' : 'var(--red)';
-        const dte = pos.target_expiry_dte != null ? `${pos.target_expiry_dte}d` : '—';
-        return `<tr>
-          <td style="font-weight:600">${pos.ticker}</td>
-          <td style="color:${typeColor}">${(pos.option_type || '').toUpperCase()}</td>
-          <td>${pos.strike != null ? pos.strike.toFixed(0) : '—'}</td>
-          <td>${dte}</td>
-          <td>${pos.fill_price != null ? '$' + pos.fill_price.toFixed(2) : '—'}</td>
-          <td style="color:var(--green)">${pos.price_target != null ? '$' + pos.price_target.toFixed(2) : '—'}</td>
-          <td style="color:var(--red)">${pos.stop_price != null ? '$' + pos.stop_price.toFixed(2) : '—'}</td>
-        </tr>`;
-      }).join('');
-    }
+    const rows = [];
+    open.forEach(p => {
+      const tc = p.strategy === 'long_call' ? 'var(--green)' : 'var(--red)';
+      const pnlC = (p.unrealized_pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)';
+      rows.push(`<tr>
+        <td style="font-weight:600">${p.ticker}</td>
+        <td style="color:${tc}">${p.strategy === 'long_call' ? 'CALL' : 'PUT'}</td>
+        <td>${p.contracts ?? '—'}</td>
+        <td>${p.entry_price != null ? '$' + p.entry_price.toFixed(2) : '—'}</td>
+        <td style="color:${pnlC}">${p.unrealized_pnl != null ? '$' + p.unrealized_pnl.toFixed(0) : '—'}</td>
+        <td style="color:var(--blue)">OPEN</td>
+        <td style="color:var(--text2);font-size:10px">live</td>
+      </tr>`);
+    });
+    (d.recent || []).slice(0, 12).forEach(e => {
+      const dirC = e.direction === 'bullish' ? 'var(--green)' : e.direction === 'bearish' ? 'var(--red)' : 'var(--text2)';
+      const oC = e.outcome === 'proceed' ? 'var(--green)' : 'var(--text2)';
+      const when = e.ts ? e.ts.slice(11, 16) : '—';
+      rows.push(`<tr style="opacity:.72">
+        <td>${e.ticker}</td>
+        <td style="color:var(--text2)">${(e.strategy || '').replace('long_', '').toUpperCase()}</td>
+        <td>${e.contracts ?? '—'}</td>
+        <td style="color:var(--text2)">${e.strike != null ? e.strike.toFixed(0) : '—'}</td>
+        <td style="color:var(--text2)">${e.dte != null ? e.dte + 'd' : '—'}</td>
+        <td style="color:${dirC}">${(e.direction || '?').slice(0,4)}/${e.conviction ?? '?'}</td>
+        <td style="color:${oC};font-size:10px" title="${e.block_reason || ''}">${e.outcome || '—'} ${when}</td>
+      </tr>`);
+    });
+    openTbody.innerHTML = rows.length
+      ? rows.join('')
+      : '<tr><td colspan="7" style="color:var(--text2);text-align:center;padding:8px;font-size:10px">No long positions or decisions yet</td></tr>';
 
-    // Recent journal passes (no-go + go decisions)
-    const recent = d.recent_no_go || [];
-    if (recent.length === 0) {
-      journalTbody.innerHTML = '<tr><td colspan="6" style="color:var(--text2);text-align:center;padding:8px;font-size:10px">No swing decisions yet this session</td></tr>';
+    // Signal calibration — the learning loop made visible (worst win-rate first)
+    const cal = d.signal_calibration || [];
+    calBadge.textContent = cal.length ? `${cal.length} signals tracked` : '';
+    if (cal.length === 0) {
+      calTbody.innerHTML = '<tr><td colspan="6" style="color:var(--text2);text-align:center;padding:8px;font-size:10px">No signal data yet (needs ≥3 closes/signal)</td></tr>';
     } else {
-      journalTbody.innerHTML = recent.map(e => {
-        const dirColor = e.direction === 'bullish' ? 'var(--green)' : e.direction === 'bearish' ? 'var(--red)' : 'var(--text2)';
-        const conf = e.confidence != null ? `${(e.confidence * 100).toFixed(0)}%` : '—';
-        const thesis = (e.key_thesis || '').slice(0, 50) + (e.key_thesis && e.key_thesis.length > 50 ? '…' : '');
+      calTbody.innerHTML = cal.map(s => {
+        const wr = (s.win_rate || 0) * 100;
+        const wrC = wr >= 55 ? 'var(--green)' : wr >= 45 ? 'var(--yellow)' : 'var(--red)';
+        const dirC = s.direction === 'bullish' ? 'var(--green)' : 'var(--red)';
+        const mult = sizeMult(s.win_rate || 0, s.trades || 0);
+        const mC = mult > 1.05 ? 'var(--green)' : mult < 0.95 ? 'var(--red)' : 'var(--text2)';
         return `<tr>
-          <td style="font-weight:600">${e.ticker}</td>
-          <td>${e.raw_score != null ? e.raw_score.toFixed(0) : '—'}</td>
-          <td style="color:${dirColor}">${e.direction || '—'}</td>
-          <td>${conf}</td>
-          <td style="color:var(--text2)">No</td>
-          <td style="font-size:10px;color:var(--text2)" title="${e.key_thesis || ''}">${thesis}</td>
+          <td style="font-weight:600">${s.signal}</td>
+          <td style="color:${dirC}">${(s.direction || '?').slice(0,4)}</td>
+          <td style="color:${wrC};font-weight:600">${wr.toFixed(0)}%</td>
+          <td style="color:var(--text2)">${s.trades}</td>
+          <td style="color:${(s.avg_pnl||0)>=0?'var(--green)':'var(--red)'}">$${(s.avg_pnl||0).toFixed(0)}</td>
+          <td style="color:${mC};font-weight:600">${mult.toFixed(2)}×</td>
         </tr>`;
       }).join('');
     }
@@ -2645,7 +2645,7 @@ async function fetchToday() {
 
   await Promise.all([
     fetchHealth(), fetchOrders(), fetchPositions(), fetchAttribution(), fetchSignals(),
-    fetchMarket(), fetchReadiness(), fetchCsuite(), fetchToday(), fetchSwing(),
+    fetchMarket(), fetchReadiness(), fetchCsuite(), fetchToday(), fetchLong(),
   ]);
 
   // TWS live data — fetch once on load then every 30s (makes a real IBKR connection)
@@ -2661,7 +2661,7 @@ async function fetchToday() {
   setInterval(fetchCsuite,      60_000);
   setInterval(fetchTwsLive,     30_000); // TWS live: 30s — real connection, not cached
   setInterval(fetchToday,       30_000); // today summary: realized P&L + closed positions
-  setInterval(fetchSwing,       60_000); // swing decisions: refresh every 60s
+  setInterval(fetchLong,        60_000); // long-options status: refresh every 60s
   setInterval(fetchStratHealth, 300_000); // strategy health: refresh every 5 min (matches patrol)
 })();
 
