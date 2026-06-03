@@ -600,7 +600,12 @@ class LongOptionsAgent:
         """
         bull  = 0
         bear  = 0
-        qual  = 0.0          # continuous quality accumulator
+        # Track quality PER DIRECTION so an opposing-side signal can't inflate the
+        # winning side's size (e.g. bullish flow + bearish momentum previously summed
+        # into one `qual`, over-sizing a conflicted bullish trade). Sizing uses only
+        # the winning side's quality.
+        qual_bull = 0.0
+        qual_bear = 0.0
         stack: dict[str, str] = {}
 
         # ── Flow signals (highest weight) ─────────────────────────────────────
@@ -613,11 +618,11 @@ class LongOptionsAgent:
             q_flow = 2.0 if sweep_count > 0 else 1.0
             if flow_dir == "bullish":
                 bull += weight
-                qual += q_flow
+                qual_bull += q_flow
                 stack["flow"] = f"bullish+{weight}{'(sweep)' if sweep_count > 0 else ''}"
             elif flow_dir == "bearish":
                 bear += weight
-                qual += q_flow
+                qual_bear += q_flow
                 stack["flow"] = f"bearish+{weight}{'(sweep)' if sweep_count > 0 else ''}"
             else:
                 stack["flow"] = "neutral"
@@ -628,11 +633,11 @@ class LongOptionsAgent:
         sma50_ok  = momentum.get("above_sma50", False)
         if rsi > 55 and sma20_ok and sma50_ok:
             bull += 1
-            qual += 0.8
+            qual_bull += 0.8
             stack["momentum"] = f"bullish(RSI={rsi:.0f})"
         elif rsi < 45 and not sma20_ok and not sma50_ok:
             bear += 1
-            qual += 0.8
+            qual_bear += 0.8
             stack["momentum"] = f"bearish(RSI={rsi:.0f})"
         else:
             stack["momentum"] = f"neutral(RSI={rsi:.0f})"
@@ -641,11 +646,11 @@ class LongOptionsAgent:
         ret_10d = momentum.get("ret_10d", 0.0)
         if ret_10d > 0.03:
             bull += 1
-            qual += 1.0
+            qual_bull += 1.0
             stack["rel_strength"] = f"outperform+1(ret10d={ret_10d:.1%})"
         elif ret_10d < -0.03:
             bear += 1
-            qual += 1.0
+            qual_bear += 1.0
             stack["rel_strength"] = f"underperform+1(ret10d={ret_10d:.1%})"
         else:
             stack["rel_strength"] = f"neutral(ret10d={ret_10d:.1%})"
@@ -654,11 +659,11 @@ class LongOptionsAgent:
         if momentum.get("vol_surge", False):
             if bull > bear:
                 bull += 1
-                qual += 0.7
+                qual_bull += 0.7
                 stack["vol_surge"] = "surge+1(bull)"
             elif bear > bull:
                 bear += 1
-                qual += 0.7
+                qual_bear += 0.7
                 stack["vol_surge"] = "surge+1(bear)"
             else:
                 stack["vol_surge"] = "surge(no_dominant)"
@@ -668,11 +673,11 @@ class LongOptionsAgent:
         # ── News flag (advisory, weakest weight) ──────────────────────────────
         if news_flag == "bullish":
             bull += 1
-            qual += 0.3
+            qual_bull += 0.3
             stack["news"] = "bullish+1(uw_news)"
         elif news_flag == "bearish":
             bear += 1
-            qual += 0.3
+            qual_bear += 0.3
             stack["news"] = "bearish+1(uw_news)"
         else:
             stack["news"] = "none"
@@ -681,11 +686,11 @@ class LongOptionsAgent:
         if gex_regime == "negative":
             if bull > bear:
                 bull += 1
-                qual += 0.5
+                qual_bull += 0.5
                 stack["gex"] = "negative(amplify_bull)"
             elif bear > bull:
                 bear += 1
-                qual += 0.5
+                qual_bear += 0.5
                 stack["gex"] = "negative(amplify_bear)"
             else:
                 stack["gex"] = "negative(no_dominant)"
@@ -707,11 +712,11 @@ class LongOptionsAgent:
             stack["macro"] = f"stale(age>{4}h)→neutral"
         elif stance == "risk_on":
             bull += 1
-            qual += 0.6
+            qual_bull += 0.6
             stack["macro"] = "risk_on+1"
         elif stance == "risk_off":
             bear += 1
-            qual += 0.6
+            qual_bear += 0.6
             stack["macro"] = "risk_off+1"
         else:
             stack["macro"] = stance
@@ -720,14 +725,14 @@ class LongOptionsAgent:
         if bull >= min_conviction and bull > bear:
             if rsi > rsi_overbought:
                 stack["rsi_filter"] = f"BLOCK_CALL(RSI={rsi:.0f}>{rsi_overbought})"
-                return None, None, stack, bull, flow_dir, qual
-            return "bullish", StrategyType.LONG_CALL, stack, bull, flow_dir, qual
+                return None, None, stack, bull, flow_dir, qual_bull
+            return "bullish", StrategyType.LONG_CALL, stack, bull, flow_dir, qual_bull
         if bear >= min_conviction and bear > bull:
             if rsi < rsi_oversold:
                 stack["rsi_filter"] = f"BLOCK_PUT(RSI={rsi:.0f}<{rsi_oversold})"
-                return None, None, stack, bear, flow_dir, qual
-            return "bearish", StrategyType.LONG_PUT, stack, bear, flow_dir, qual
-        return None, None, stack, max(bull, bear), flow_dir, qual
+                return None, None, stack, bear, flow_dir, qual_bear
+            return "bearish", StrategyType.LONG_PUT, stack, bear, flow_dir, qual_bear
+        return None, None, stack, max(bull, bear), flow_dir, max(qual_bull, qual_bear)
 
     # ── DTE selection — 4-factor professional formula ─────────────────────────
 

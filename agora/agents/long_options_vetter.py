@@ -202,8 +202,14 @@ class LongOptionsVetterAgent:
             match = re.search(r'\{.*\}', raw_text, re.DOTALL)
             data  = json.loads(match.group()) if match else {}
 
+        # Validate the verdict against the allowed enum — an unknown/hallucinated value
+        # (e.g. "hold") would otherwise be neither skip nor reduce and silently proceed.
+        _raw_verdict = str(data.get("verdict", "proceed")).lower().strip()
+        if _raw_verdict not in ("skip", "reduce", "proceed"):
+            logger.warning("LongOptionsVetter: unknown verdict %r — defaulting to proceed", _raw_verdict)
+            _raw_verdict = "proceed"
         verdict = VetterVerdict(
-            verdict            = data.get("verdict", "proceed"),
+            verdict            = _raw_verdict,
             confidence         = int(data.get("confidence", 70)),
             adjusted_contracts = data.get("adjusted_contracts"),
             key_risk           = data.get("key_risk", ""),
