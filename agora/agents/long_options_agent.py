@@ -1018,25 +1018,31 @@ class LongOptionsAgent:
             ask = float(r.get("ask",  0) or 0)
             if bid > 0 and ask > 0:
                 return round((bid + ask) / 2, 4)
-            return float(r.get("lastPrice", 0) or 0)
+            # No live two-sided quote -> not executable. Don't price off a stale
+            # lastPrice (which let quote-less strikes pass the premium gate).
+            return 0.0
         except Exception:
             return 0.0
 
     @staticmethod
     def _bid_ask_pct(chain_df: Any, strike: float) -> float:
+        # Returns the bid-ask spread as a fraction of mid. A missing strike or a
+        # one-sided/empty quote returns a huge spread so the liquidity gate REJECTS it
+        # (previously returned 0.0, which passed `spread > max` and let quote-less
+        # strikes through — a real execution-quality hazard for an options buyer).
         try:
             rows = chain_df[chain_df["strike"] == strike]
             if rows.empty:
-                return 0.0
+                return 999.0
             r   = rows.iloc[0]
             bid = float(r.get("bid", 0) or 0)
             ask = float(r.get("ask", 0) or 0)
+            if bid <= 0 or ask <= 0:
+                return 999.0
             mid = (bid + ask) / 2
-            if mid <= 0:
-                return 0.0
             return (ask - bid) / mid
         except Exception:
-            return 0.0
+            return 999.0
 
     @staticmethod
     def _get_open_interest(chain_df: Any, strike: float) -> int:
