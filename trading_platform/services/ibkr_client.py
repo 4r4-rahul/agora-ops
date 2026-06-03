@@ -613,8 +613,11 @@ async def close_position(
 
         deadline = asyncio.get_event_loop().time() + timeout
         while asyncio.get_event_loop().time() < deadline:
-            await asyncio.sleep(1)
-            ib.sleep(0)
+            await asyncio.sleep(1)   # yields to the loop; ib_insync processes fills here.
+            # NB: do NOT call ib.sleep() — it is ib_insync's *synchronous* wait and runs
+            # loop.run_until_complete() internally. Inside this already-running loop (we are
+            # invoked via _run_in_new_loop) that raises "This event loop is already running"
+            # and aborts the close — silently stranding a position that should have exited.
             status = trade.orderStatus.status
             if status == "Filled":
                 break
