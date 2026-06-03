@@ -189,21 +189,36 @@ class StrategySelectorAgent:
         raw_output: dict = {}
 
         try:
-            response = await self._client.messages.parse(
-                model=_MODEL,
-                max_tokens=1024,
-                system=_CACHED_SYSTEM,
-                messages=[{"role": "user", "content": _compress(payload)}],
-                output_format=_SelectorOutput,
-                timeout=anthropic.Timeout(connect=30.0, read=45.0, write=30.0, pool=30.0),
-            )
+            # messages.parse occasionally emits malformed structured output (e.g. a stray
+            # trailing comma -> '{"decision": "override", }') and the validation rejects it.
+            # This is an intermittent model glitch, so retry once before giving up.
+            response = None
+            _parse_err: Exception | None = None
+            for _attempt in range(2):
+                try:
+                    response = await self._client.messages.parse(
+                        model=_MODEL,
+                        max_tokens=1024,
+                        system=_CACHED_SYSTEM,
+                        messages=[{"role": "user", "content": _compress(payload)}],
+                        output_format=_SelectorOutput,
+                        timeout=anthropic.Timeout(connect=30.0, read=45.0, write=30.0, pool=30.0),
+                    )
+                    if response.parsed_output is not None:
+                        _parse_err = None
+                        break
+                    _parse_err = ValueError("messages.parse returned no structured output")
+                except Exception as _e:  # malformed JSON / validation / transient
+                    _parse_err = _e
+                    logger.debug("StrategySelector parse retry for %s (attempt %d): %s",
+                                 ticker, _attempt + 1, _e)
+            if _parse_err is not None or response is None:
+                raise _parse_err or ValueError("messages.parse failed")
             latency_ms = int((time.monotonic() - t0) * 1000)
             in_tok  = response.usage.input_tokens  if response.usage else 0
             out_tok = response.usage.output_tokens if response.usage else 0
 
             parsed = response.parsed_output
-            if parsed is None:
-                raise ValueError("messages.parse returned no structured output")
             raw_output = parsed.model_dump()
             selection  = _parse_selection(raw_output)
 
