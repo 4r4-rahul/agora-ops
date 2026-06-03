@@ -645,7 +645,11 @@ class AgoraSession:
 
         # ── LongOptionsAgent — directional swing (independent 15-min cycle) ───
         self._long_options_agent = None
-        self._long_peak_pnl: dict[str, float] = {}   # position_id → peak P&L fraction
+        # position_id → peak P&L fraction (trailing-stop high-water mark). Persisted to
+        # disk so a restart does not reset the trail (which would convert locked winners
+        # back into losers). Rehydrated here on startup.
+        self._long_peak_path = self._settings.db_path.parent / "long_peak_pnl.json"
+        self._long_peak_pnl: dict[str, float] = self._load_long_peaks()
         if self._settings.long_options_enabled:
             from agora.agents.long_options_agent import LongOptionsAgent
             self._long_options_agent = LongOptionsAgent(self._settings)
@@ -1611,13 +1615,14 @@ class AgoraSession:
                         pos.ticker, strat, age_days, max_hold,
                     )
                     try:
-                        await asyncio.wait_for(close_trade(pos, self._settings), timeout=30.0)
-                        self._position_mgr.close_position(pos.position_id, reason="time_stop")
+                        await asyncio.wait_for(close_trade(pos, self._settings, self._session_id), timeout=30.0)
+                        self._position_mgr.mark_position_closed(
+                            pos.position_id, realized_pnl=pos.unrealized_pnl, source="time_stop")
                         from agora.agents.long_options_agent import LongOptionsAgent as _LOA
                         _LOA.update_signal_stats(str(self._settings.db_path), pos.position_id, pos.unrealized_pnl)
                         self._long_peak_pnl.pop(pos.position_id, None)
                     except Exception as close_exc:
-                        logger.warning("LongOptions time-stop close error [%s]: %s", pos.ticker, close_exc)
+                        logger.error("LongOptions time-stop close FAILED [%s]: %s", pos.ticker, close_exc, exc_info=True)
 
             # ── B. Trailing stop + flat stop sweep ────────────────────────────────
             open_positions = self._position_mgr.get_open_positions()
@@ -1636,6 +1641,7 @@ class AgoraSession:
                 if pnl_pct > peak:
                     self._long_peak_pnl[pid] = pnl_pct
                     peak = pnl_pct
+                    self._save_long_peaks()   # persist high-water mark across restarts
 
                 closed = False
 
@@ -1665,14 +1671,15 @@ class AgoraSession:
                         pos.ticker, pnl_pct * 100,
                     )
                     try:
-                        await asyncio.wait_for(close_trade(pos, self._settings), timeout=30.0)
-                        self._position_mgr.close_position(pid, reason="profit_target")
+                        await asyncio.wait_for(close_trade(pos, self._settings, self._session_id), timeout=30.0)
+                        self._position_mgr.mark_position_closed(
+                            pid, realized_pnl=pos.unrealized_pnl, source="profit_target")
                         from agora.agents.long_options_agent import LongOptionsAgent as _LOA
                         _LOA.update_signal_stats(str(self._settings.db_path), pid, pos.unrealized_pnl)
                         self._long_peak_pnl.pop(pid, None)
                         closed = True
                     except Exception as e:
-                        logger.warning("LongOptions profit-close error [%s]: %s", pos.ticker, e)
+                        logger.error("LongOptions profit-close FAILED [%s]: %s", pos.ticker, e, exc_info=True)
 
                 # Trailing stop (activates after peak ≥ trail_trigger)
                 if not closed and peak >= trail_trigger:
@@ -1683,14 +1690,15 @@ class AgoraSession:
                             pos.ticker, pnl_pct * 100, peak * 100, trail_stop * 100,
                         )
                         try:
-                            await asyncio.wait_for(close_trade(pos, self._settings), timeout=30.0)
-                            self._position_mgr.close_position(pid, reason="trailing_stop")
+                            await asyncio.wait_for(close_trade(pos, self._settings, self._session_id), timeout=30.0)
+                            self._position_mgr.mark_position_closed(
+                                pid, realized_pnl=pos.unrealized_pnl, source="trailing_stop")
                             from agora.agents.long_options_agent import LongOptionsAgent as _LOA
                             _LOA.update_signal_stats(str(self._settings.db_path), pid, pos.unrealized_pnl)
                             self._long_peak_pnl.pop(pid, None)
                             closed = True
                         except Exception as e:
-                            logger.warning("LongOptions trail-close error [%s]: %s", pos.ticker, e)
+                            logger.error("LongOptions trail-close FAILED [%s]: %s", pos.ticker, e, exc_info=True)
 
                 # Flat stop loss (pre-trail, position has not yet gone +30%)
                 if not closed and pnl_pct <= -stop_tgt:
@@ -1699,13 +1707,14 @@ class AgoraSession:
                         pos.ticker, pnl_pct * 100, stop_tgt * 100,
                     )
                     try:
-                        await asyncio.wait_for(close_trade(pos, self._settings), timeout=30.0)
-                        self._position_mgr.close_position(pid, reason="stop_loss")
+                        await asyncio.wait_for(close_trade(pos, self._settings, self._session_id), timeout=30.0)
+                        self._position_mgr.mark_position_closed(
+                            pid, realized_pnl=pos.unrealized_pnl, source="stop_loss")
                         from agora.agents.long_options_agent import LongOptionsAgent as _LOA
                         _LOA.update_signal_stats(str(self._settings.db_path), pid, pos.unrealized_pnl)
                         self._long_peak_pnl.pop(pid, None)
                     except Exception as e:
-                        logger.warning("LongOptions stop-close error [%s]: %s", pos.ticker, e)
+                        logger.error("LongOptions stop-close FAILED [%s]: %s", pos.ticker, e, exc_info=True)
 
             # ── C. Intraday timing gate — no entries in price discovery or EOD window ──
             # Skip entries 9:30–9:45 ET (price discovery) and after 3:10 ET (EOD risk).
@@ -2141,10 +2150,10 @@ class AgoraSession:
                         )
                         try:
                             await asyncio.wait_for(
-                                _close_trade(pos, self._settings), timeout=30.0
+                                _close_trade(pos, self._settings, self._session_id), timeout=30.0
                             )
-                            self._position_mgr.close_position(
-                                pos.position_id, reason="news_halt"
+                            self._position_mgr.mark_position_closed(
+                                pos.position_id, realized_pnl=pos.unrealized_pnl, source="news_halt"
                             )
                             _alerted_halts.add(pos.ticker)
                         except Exception as ce:
@@ -3751,6 +3760,22 @@ class AgoraSession:
                 )
         except Exception as exc:
             logger.error("Post-earnings trade build failed for %s: %s", result.ticker, exc)
+
+    def _load_long_peaks(self) -> dict:
+        try:
+            import json
+            if self._long_peak_path.exists():
+                return {k: float(v) for k, v in json.loads(self._long_peak_path.read_text()).items()}
+        except Exception as exc:
+            logger.debug("long_peak load failed: %s", exc)
+        return {}
+
+    def _save_long_peaks(self) -> None:
+        try:
+            import json
+            self._long_peak_path.write_text(json.dumps(self._long_peak_pnl))
+        except Exception as exc:
+            logger.debug("long_peak save failed: %s", exc)
 
     async def _long_options_risk_gates(self, rec: Any, ticker: str, spot: float) -> bool:
         """Run the shared heavy gates on a long-options entry so it faces the SAME

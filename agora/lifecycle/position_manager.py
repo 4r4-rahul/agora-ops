@@ -390,6 +390,15 @@ class PositionManager:
     async def _check_position_targets(self, position: OpenPosition) -> None:
         today = date.today()
 
+        # Long options are managed exclusively by the dedicated _long_options_loop
+        # (5-day time stop, dynamic profit target, trailing + flat stops). They must NOT
+        # run through the spread-calibrated logic below: the 21-DTE rule would force-close
+        # them on entry day (they're bought at 21-60 DTE) and the profit-engine / 2x-credit
+        # stop math is wrong for naked long premium.
+        _strat = str(getattr(position.strategy, "value", position.strategy))
+        if _strat in ("long_call", "long_put"):
+            return
+
         # 21-DTE close
         dte = (position.expiry_date - today).days
         if dte <= self._settings.target_dte_close:
