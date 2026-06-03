@@ -19,7 +19,6 @@ def run_all(db_path: str) -> None:
     for fn in [
         _m001_expand_agent_lessons_check,
         _m002_uw_alerts_table,
-        _m003_naked_journal,
         _m004_long_journal,
         _m005_signal_stats,
     ]:
@@ -113,52 +112,6 @@ def _m002_uw_alerts_table(db_path: str) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS ix_uw_alerts_topic    ON uw_alerts(topic_type)")
         conn.execute("CREATE INDEX IF NOT EXISTS ix_uw_alerts_flagged  ON uw_alerts(flagged, realtime_sent)")
         logger.info("m002 applied: uw_alerts table created")
-
-
-def _m003_naked_journal(db_path: str) -> None:
-    """
-    Create naked_journal table for NakedOptionsAgent.
-    Tracks every naked put/call decision: entry signals, strike selection,
-    DTE reasoning, and outcome linkage for calibration.
-    """
-    with sqlite3.connect(db_path, timeout=15) as conn:
-        conn.execute("PRAGMA journal_mode=WAL")
-        row = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='naked_journal'"
-        ).fetchone()
-        if row is not None:
-            return
-
-        logger.info("Applying m003: creating naked_journal table")
-        conn.execute("""
-            CREATE TABLE naked_journal (
-                journal_id       INTEGER PRIMARY KEY AUTOINCREMENT,
-                position_id      TEXT,
-                ticker           TEXT    NOT NULL,
-                strategy         TEXT    NOT NULL,     -- naked_put | naked_call
-                direction        TEXT    NOT NULL,     -- bullish | bearish
-                decided_at_utc   TEXT    NOT NULL,
-                spot             REAL,
-                strike           REAL,
-                expiry           TEXT,
-                dte              INTEGER,
-                delta_approx     REAL,
-                premium_per_sh   REAL,
-                ivr              REAL,
-                vix              REAL,
-                regime           TEXT,
-                flow_direction   TEXT,
-                dte_reason       TEXT,
-                outcome          TEXT,                 -- filled | skipped | blocked | error
-                block_reason     TEXT,
-                max_loss_dollars REAL,
-                max_gain_dollars REAL,
-                contracts        INTEGER DEFAULT 1
-            )
-        """)
-        conn.execute("CREATE INDEX IF NOT EXISTS ix_naked_ticker   ON naked_journal(ticker)")
-        conn.execute("CREATE INDEX IF NOT EXISTS ix_naked_strategy ON naked_journal(strategy, decided_at_utc)")
-        logger.info("m003 applied: naked_journal table created")
 
 
 def _m004_long_journal(db_path: str) -> None:

@@ -178,6 +178,22 @@ class LongOptionsVetterAgent:
             dte_reason    = getattr(decision, "dte_reason", ""),
         )
 
+        # ── CEO-approved lessons (gated learning loop) ────────────────────────
+        # Lessons synthesized from long-options outcomes and approved by the CEO are
+        # injected as decision context so the vetter applies what the book has learned.
+        # §17: only human-approved lessons are ever used.
+        try:
+            from agora.ops.lessons_store import load_approved_lessons
+            lessons = load_approved_lessons(str(self._settings.db_path), "long_options")
+        except Exception:
+            lessons = []
+        if lessons:
+            prompt += (
+                "\n\nLESSONS LEARNED (CEO-approved, from this book's own closed trades — "
+                "weigh these heavily):\n"
+                + "\n".join(f"  - {l}" for l in lessons)
+            )
+
         t0 = time.monotonic()
         response = await self._client.messages.create(
             model       = _MODEL,

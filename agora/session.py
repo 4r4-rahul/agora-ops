@@ -630,19 +630,6 @@ class AgoraSession:
                 self._settings.exit_intelligence_interval_hours,
             )
 
-        # ── NakedOptionsAgent — specialist scan (independent 30-min cycle) ───────
-        self._naked_options_agent = None
-        if self._settings.naked_options_enabled:
-            from agora.agents.naked_options_agent import NakedOptionsAgent
-            self._naked_options_agent = NakedOptionsAgent(self._settings)
-            logger.info(
-                "NakedOptionsAgent enabled: delta=%.2f min_prem=$%.0f interval=%dm max_pos=%d",
-                self._settings.naked_options_target_delta,
-                self._settings.naked_options_min_premium,
-                self._settings.naked_options_scan_interval_minutes,
-                self._settings.naked_options_max_positions,
-            )
-
         # ── LongOptionsAgent — directional swing (independent 15-min cycle) ───
         self._long_options_agent = None
         # position_id → peak P&L fraction (trailing-stop high-water mark). Persisted to
@@ -813,7 +800,6 @@ class AgoraSession:
             self._price_monitor_loop(),
             *(([self._scan_engine.start()]) if self._scan_engine else []),
             *(([self._exit_intelligence_loop()]) if self._exit_agent else []),
-            *(([self._naked_options_loop()]) if self._naked_options_agent else []),
             *(([self._long_options_loop()]) if self._long_options_agent else []),
         )
 
@@ -1337,227 +1323,6 @@ class AgoraSession:
                 except Exception as exc:
                     logger.warning("ExitAgent loop error for %s: %s", pos.ticker, exc)
 
-    async def _naked_options_loop(self) -> None:
-        """
-        NakedOptionsAgent independent scan cycle.
-
-        Runs every naked_options_scan_interval_minutes during market hours.
-        Fully separate from the spread pipeline — different gates, different sizing,
-        different journal table. Paper-mode only until execution quality confirmed.
-
-        Gates applied (everything else bypassed):
-          1. Market hours (9:30–15:30 ET, weekdays only)
-          2. Max naked positions cap
-          3. Earnings blackout (same _get_next_earnings helper as spread pipeline)
-          4. Duplicate ticker (already holding naked or spread position in same ticker)
-        """
-        from datetime import time as _time
-        from trading_platform.services.market_data.yfinance_provider import _YF_OPTIONS_LOCK
-        import yfinance as yf
-        from datetime import date as _date
-
-        interval_secs = self._settings.naked_options_scan_interval_minutes * 60
-        agent = self._naked_options_agent
-
-        # Stagger startup by 90s so the main pipeline has time to load macro
-        await asyncio.sleep(90)
-
-        while self._running:
-            now_et = datetime.now(tz=ET)
-            if now_et.weekday() >= 5 or not (_time(9, 30) <= now_et.time() <= _time(15, 30)):
-                await asyncio.sleep(60)
-                continue
-
-            # Cap check — count open naked positions
-            open_positions = self._position_mgr.get_open_positions()
-            naked_count = sum(
-                1 for p in open_positions
-                if str(getattr(p.strategy, "value", p.strategy)) in ("naked_put", "naked_call")
-            )
-            if naked_count >= self._settings.naked_options_max_positions:
-                logger.debug(
-                    "NakedOptions: cap reached (%d/%d) — sleeping %ds",
-                    naked_count, self._settings.naked_options_max_positions, interval_secs,
-                )
-                await asyncio.sleep(interval_secs)
-                continue
-
-            universe = list(dict.fromkeys(
-                self._settings.etf_universe
-                + (self._universe_disc.get_dynamic_tickers()
-                   if hasattr(self, "_universe_disc") else [])
-            ))
-
-            logger.info("NakedOptions scan: %d tickers | naked_pos=%d/%d",
-                        len(universe), naked_count, self._settings.naked_options_max_positions)
-
-            for ticker in universe:
-                if not self._running:
-                    break
-
-                # Re-check cap each iteration (fills can happen mid-loop)
-                open_positions = self._position_mgr.get_open_positions()
-                naked_count = sum(
-                    1 for p in open_positions
-                    if str(getattr(p.strategy, "value", p.strategy)) in ("naked_put", "naked_call")
-                )
-                if naked_count >= self._settings.naked_options_max_positions:
-                    break
-
-                # Duplicate ticker gate (any strategy)
-                if any(p.ticker == ticker for p in open_positions):
-                    logger.debug("NakedOptions skip %s — already holding position", ticker)
-                    continue
-
-                # Earnings blackout gate
-                try:
-                    earnings_date = await self._get_next_earnings(ticker)
-                    if earnings_date:
-                        days_to_earnings = (earnings_date - _date.today()).days
-                        if 0 <= days_to_earnings <= self._settings.earnings_blackout_days:
-                            logger.debug(
-                                "NakedOptions skip %s — earnings in %dd (blackout)",
-                                ticker, days_to_earnings,
-                            )
-                            continue
-                except Exception:
-                    earnings_date = None
-
-                # Fetch options chain (same pattern as spread pipeline)
-                try:
-                    def _fetch_naked_chain(t: str) -> dict:
-                        chain_dict: dict = {}
-                        _DTE_BRACKETS = [(14, 30), (31, 45), (46, 60)]
-                        for _attempt in range(2):
-                            try:
-                                with _YF_OPTIONS_LOCK:
-                                    tk = yf.Ticker(t)
-                                    exps = tk.options or []
-                                    if not exps and _attempt == 0:
-                                        import time as _tm; _tm.sleep(0.5)
-                                        continue
-                                    today_d = _date.today()
-                                    filled: set[int] = set()
-                                    for exp in exps:
-                                        try:
-                                            exp_date = _date.fromisoformat(exp)
-                                        except ValueError:
-                                            continue
-                                        dte = (exp_date - today_d).days
-                                        for i, (lo, hi) in enumerate(_DTE_BRACKETS):
-                                            if i not in filled and lo <= dte <= hi:
-                                                try:
-                                                    c = tk.option_chain(exp)
-                                                    chain_dict[exp] = {"calls": c.calls, "puts": c.puts}
-                                                    filled.add(i)
-                                                except Exception:
-                                                    pass
-                                                break
-                                        if len(filled) == len(_DTE_BRACKETS):
-                                            break
-                                break
-                            except Exception:
-                                if _attempt == 0:
-                                    import time as _tm; _tm.sleep(1.0)
-                        return chain_dict
-
-                    chain_dict = await asyncio.wait_for(
-                        asyncio.to_thread(_fetch_naked_chain, ticker), timeout=30.0
-                    )
-                except (asyncio.TimeoutError, Exception) as exc:
-                    logger.debug("NakedOptions chain fetch error [%s]: %s", ticker, exc)
-                    continue
-
-                if not chain_dict:
-                    continue
-
-                # Spot price
-                try:
-                    spot = await asyncio.wait_for(
-                        asyncio.to_thread(
-                            lambda t=ticker: float(
-                                yf.Ticker(t).fast_info.get("lastPrice", 0) or
-                                yf.Ticker(t).fast_info.get("previousClose", 0)
-                            )
-                        ),
-                        timeout=10.0,
-                    )
-                except Exception:
-                    spot = 0.0
-
-                if spot <= 0:
-                    continue
-
-                # Flow signals (optional, best-effort)
-                try:
-                    flow_signals = await asyncio.wait_for(
-                        get_flow_signals(ticker), timeout=5.0
-                    )
-                except Exception:
-                    flow_signals = None
-
-                # Evaluate
-                decision = agent.evaluate(
-                    ticker=ticker,
-                    spot=spot,
-                    options_chain=chain_dict,
-                    macro_context=self._macro_context,
-                    flow_signals=flow_signals,
-                    session_id=self._session_id,
-                    open_positions=open_positions,
-                )
-
-                # Journal every decision (filled or skipped)
-                agent.journal(decision, str(self._settings.db_path), spot=spot)
-
-                if decision.recommendation is None:
-                    if decision.outcome != "skipped" or decision.block_reason:
-                        logger.debug(
-                            "NakedOptions [%s] skip: %s", ticker, decision.block_reason
-                        )
-                    continue
-
-                # Submit via same IBKR bridge as spread pipeline
-                rec = decision.recommendation
-                logger.info(
-                    "NakedOptions SUBMITTING [%s] %s strike=%.0f exp=%s prem=$%.2f",
-                    ticker, decision.strategy, decision.strike,
-                    rec.legs[0].expiration, decision.premium,
-                )
-                try:
-                    order = await submit_trade(rec, self._settings, self._session_id)
-                    order_status = order.get("status", "")
-                    logger.info(
-                        "NakedOptions order [%s]: status=%s order_id=%s",
-                        ticker, order_status, order.get("order_id"),
-                    )
-                    if order_status == "Filled":
-                        fills = order.get("fills", [])
-                        fill_price = float(fills[0]["price"]) if fills else decision.premium
-                        position_id = self._record_position(
-                            rec,
-                            ibkr_order_id=order.get("order_id", -1),
-                            regime=self._macro_context.macro_stance if self._macro_context else "",
-                            earnings_date=earnings_date,
-                            is_pre_earnings=False,
-                            spot=spot,
-                            fill_price=fill_price,
-                        )
-                        agent.journal(decision, str(self._settings.db_path), position_id or "", spot=spot)
-                        self._exec_quality.record_fill(ticker, fill_price, decision.premium, decision.strategy)
-                    elif order_status in ("Cancelled", "ApiCancelled", "Inactive"):
-                        self._exec_quality.record_reject(
-                            ticker, str(order.get("error_code", "")),
-                            order.get("reason", ""), decision.strategy,
-                        )
-                except Exception as submit_exc:
-                    logger.warning("NakedOptions submit error [%s]: %s", ticker, submit_exc)
-
-                # Brief pause between submissions to avoid IBKR rate limit
-                await asyncio.sleep(2)
-
-            await asyncio.sleep(interval_secs)
-
     async def _long_options_loop(self) -> None:
         """
         LongOptionsAgent independent scan cycle — professional-grade directional swing.
@@ -1593,7 +1358,7 @@ class AgoraSession:
         trail_floor   = self._settings.long_options_trailing_stop_floor
         agent         = self._long_options_agent
 
-        # Stagger: 210s after spread pipeline (which staggers 90s after naked)
+        # Stagger: 210s after the spread pipeline to spread out IBKR load
         await asyncio.sleep(210)
 
         while self._running:

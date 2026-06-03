@@ -55,12 +55,16 @@ Focus on:
 
 5. STRATEGY PATTERNS — Which strategy_type + regime combinations have the best outcomes?
 
+6. LONG-OPTIONS SIGNAL CALIBRATION — From long_options_signal_stats (per-signal win
+   rate / P&L), which signal+direction combinations are reliably profitable vs which are
+   noise? Lessons here are applied by the long-options vetter once approved.
+
 OUTPUT: exactly this JSON, no markdown, no prose:
 {
   "summary": "2-3 sentence executive summary of this week's findings",
   "lessons": [
     {
-      "agent_name": "swing_judge" | "advocate" | "defender" | "analyst" | "strategy" | "exit" | "system",
+      "agent_name": "swing_judge" | "advocate" | "defender" | "analyst" | "strategy" | "exit" | "long_options" | "system",
       "lesson_text": "specific, measurable, actionable lesson",
       "confidence_in_lesson": <float 0.5-0.95>,
       "pattern_observed": "brief data evidence (win rates, counts, etc.)"
@@ -162,6 +166,7 @@ class PerformanceAnalystAgent:
         defender = self._fetch_defender()
         analyst  = self._fetch_analyst()
         strategy = self._fetch_strategy()
+        long_sig = self._fetch_long_signal_stats()
 
         total = len(swing) + len(advocate) + len(defender) + len(analyst) + len(strategy)
 
@@ -177,6 +182,7 @@ class PerformanceAnalystAgent:
             "defender_verdicts": defender,
             "analyst_theses": analyst,
             "strategy_selections": strategy,
+            "long_options_signal_stats": long_sig,
             "feature_usage": {
                 "claude_method_count": len(with_features),
                 "fallback_method_count": len(without_features),
@@ -261,6 +267,25 @@ class PerformanceAnalystAgent:
             return [dict(zip(cols, r)) for r in rows]
         except Exception as exc:
             logger.debug("fetch_analyst: %s", exc)
+            return []
+
+    def _fetch_long_signal_stats(self) -> list[dict]:
+        """Per-signal win-rate / P&L for the long-options book (signal_stats table)."""
+        try:
+            with sqlite3.connect(self._db_path) as conn:
+                rows = conn.execute(
+                    """SELECT signal_name, direction, total_trades, wins, losses,
+                              win_rate, avg_pnl, total_pnl
+                       FROM signal_stats
+                       WHERE total_trades >= 3
+                       ORDER BY total_trades DESC LIMIT ?""",
+                    (_SAMPLE,),
+                ).fetchall()
+            cols = ["signal_name", "direction", "total_trades", "wins", "losses",
+                    "win_rate", "avg_pnl", "total_pnl"]
+            return [dict(zip(cols, r)) for r in rows]
+        except Exception as exc:
+            logger.debug("fetch_long_signal_stats (table may not exist yet): %s", exc)
             return []
 
     def _fetch_strategy(self) -> list[dict]:

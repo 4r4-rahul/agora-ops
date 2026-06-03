@@ -143,6 +143,58 @@ class LongOptionsAgent:
 
     def __init__(self, settings: AgoraSettings | None = None) -> None:
         self._settings = settings or get_settings()
+        self._db_path  = str(getattr(self._settings, "db_path", "trade_journal.db"))
+
+    # ── Signal calibration (deterministic learning loop) ───────────────────────
+    # signal_stats is written on every position close (update_signal_stats). Here we
+    # read it back so the live scorer self-adjusts: a signal that has historically lost
+    # contributes LESS to sizing quality; a proven winner contributes more. This is the
+    # auto-applying half of the hybrid learning policy — pure math on realized P&L, no
+    # LLM, no human gate. The LLM vetter (gated) sees the same win-rates in its prompt.
+
+    def _load_signal_perf(self) -> dict[tuple[str, str], tuple[float, int]]:
+        """
+        Return {(signal_name, direction): (win_rate, total_trades)} from signal_stats.
+        Empty dict on any error → scorer falls back to neutral (no calibration).
+        """
+        try:
+            import sqlite3
+            with sqlite3.connect(self._db_path, timeout=5) as conn:
+                rows = conn.execute(
+                    "SELECT signal_name, direction, win_rate, total_trades FROM signal_stats"
+                ).fetchall()
+            return {(r[0], r[1]): (float(r[2] or 0.0), int(r[3] or 0)) for r in rows}
+        except Exception as exc:
+            logger.debug("_load_signal_perf: %s", exc)
+            return {}
+
+    @staticmethod
+    def _perf_mult(
+        signal_name: str,
+        direction:   str,
+        perf:        dict[tuple[str, str], tuple[float, int]] | None,
+    ) -> float:
+        """
+        Quality multiplier for one signal based on its historical win rate.
+
+        Bayesian-shrunk toward a 0.5 coin-flip baseline by a pseudo-count k so a
+        small sample cannot swing sizing — a signal needs a real track record before
+        it moves the needle. Bounded to [0.6, 1.4] so no single signal's history can
+        dominate or zero out the live read. Returns 1.0 (neutral) when no data.
+        """
+        if not perf:
+            return 1.0
+        rec = perf.get((signal_name, direction))
+        if not rec:
+            return 1.0
+        win_rate, n = rec
+        if n < 3:
+            return 1.0                      # too few closes to trust
+        baseline = 0.5
+        k        = 8.0                      # pseudo-count: trades needed to overcome prior
+        wins     = win_rate * n
+        shrunk   = (wins + k * baseline) / (n + k)
+        return max(0.6, min(1.4, shrunk / baseline))
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -323,9 +375,12 @@ class LongOptionsAgent:
             _flag = getattr(news_context, "ticker_flags", {}).get(ticker.upper())
             if _flag is not None:
                 _news_flag = getattr(_flag, "direction", None)
+        # Deterministic learning: load per-signal historical win-rates so the scorer
+        # weights proven signals up and chronic losers down (auto-applying channel).
+        signal_perf = self._load_signal_perf()
         direction, strategy, signal_stack, conviction, flow_dir, quality = self._score_direction(
             macro_context, flow_signals, momentum, gex_regime, rsi_ob, rsi_os, min_conv,
-            news_flag=_news_flag,
+            news_flag=_news_flag, signal_perf=signal_perf,
         )
         if _is_drift and direction is not None:
             signal_stack["pre_earnings_drift"] = f"floor→1(dtc={days_to_catalyst}d,rs={_ret_10d:.1%})"
@@ -606,12 +661,20 @@ class LongOptionsAgent:
         rsi_oversold:   int = 28,
         min_conviction: int = 2,
         news_flag:      str | None = None,
+        signal_perf:    dict | None = None,
     ) -> tuple[str | None, StrategyType | None, dict, int, str, float]:
         """
         Returns (direction, strategy, signal_stack, net_score, flow_dir, quality_score).
 
         quality_score is a continuous weighted measure of signal reliability — distinct
         from the binary conviction count. Used for sizing: high quality → more contracts.
+
+        signal_perf (optional) maps (signal_name, direction) → (win_rate, n) from the
+        signal_stats calibration table. Each signal's quality contribution is scaled by
+        its historical win-rate multiplier (_perf_mult), so the deterministic scorer
+        self-improves on every close. Conviction (the integer entry gate) is left
+        untouched — only sizing quality adapts here; entry-level adaptation flows through
+        the gated LLM vetter, which is shown the same win-rates.
 
         Signal quality weights (based on reliability hierarchy):
           flow sweep:       2.0  — institutional intent, hardest to fake
@@ -633,6 +696,19 @@ class LongOptionsAgent:
         qual_bear = 0.0
         stack: dict[str, str] = {}
 
+        # Per-signal win-rate calibration (deterministic learning loop).
+        def _pm(name: str, d: str) -> float:
+            return LongOptionsAgent._perf_mult(name, d, signal_perf)
+
+        def _wtag(name: str, d: str) -> str:
+            """Annotate the stack with the signal's track record when it's material."""
+            if not signal_perf:
+                return ""
+            rec = signal_perf.get((name, d))
+            if not rec or rec[1] < 3:
+                return ""
+            return f"[{rec[0]*100:.0f}%/{rec[1]}]"
+
         # ── Flow signals (highest weight) ─────────────────────────────────────
         flow_dir = "neutral"
         if flow_signals:
@@ -643,12 +719,12 @@ class LongOptionsAgent:
             q_flow = 2.0 if sweep_count > 0 else 1.0
             if flow_dir == "bullish":
                 bull += weight
-                qual_bull += q_flow
-                stack["flow"] = f"bullish+{weight}{'(sweep)' if sweep_count > 0 else ''}"
+                qual_bull += q_flow * _pm("flow", "bullish")
+                stack["flow"] = f"bullish+{weight}{'(sweep)' if sweep_count > 0 else ''}{_wtag('flow','bullish')}"
             elif flow_dir == "bearish":
                 bear += weight
-                qual_bear += q_flow
-                stack["flow"] = f"bearish+{weight}{'(sweep)' if sweep_count > 0 else ''}"
+                qual_bear += q_flow * _pm("flow", "bearish")
+                stack["flow"] = f"bearish+{weight}{'(sweep)' if sweep_count > 0 else ''}{_wtag('flow','bearish')}"
             else:
                 stack["flow"] = "neutral"
 
@@ -658,12 +734,12 @@ class LongOptionsAgent:
         sma50_ok  = momentum.get("above_sma50", False)
         if rsi > 55 and sma20_ok and sma50_ok:
             bull += 1
-            qual_bull += 0.8
-            stack["momentum"] = f"bullish(RSI={rsi:.0f})"
+            qual_bull += 0.8 * _pm("momentum", "bullish")
+            stack["momentum"] = f"bullish(RSI={rsi:.0f}){_wtag('momentum','bullish')}"
         elif rsi < 45 and not sma20_ok and not sma50_ok:
             bear += 1
-            qual_bear += 0.8
-            stack["momentum"] = f"bearish(RSI={rsi:.0f})"
+            qual_bear += 0.8 * _pm("momentum", "bearish")
+            stack["momentum"] = f"bearish(RSI={rsi:.0f}){_wtag('momentum','bearish')}"
         else:
             stack["momentum"] = f"neutral(RSI={rsi:.0f})"
 
@@ -671,12 +747,12 @@ class LongOptionsAgent:
         ret_10d = momentum.get("ret_10d", 0.0)
         if ret_10d > 0.03:
             bull += 1
-            qual_bull += 1.0
-            stack["rel_strength"] = f"outperform+1(ret10d={ret_10d:.1%})"
+            qual_bull += 1.0 * _pm("rel_strength", "bullish")
+            stack["rel_strength"] = f"outperform+1(ret10d={ret_10d:.1%}){_wtag('rel_strength','bullish')}"
         elif ret_10d < -0.03:
             bear += 1
-            qual_bear += 1.0
-            stack["rel_strength"] = f"underperform+1(ret10d={ret_10d:.1%})"
+            qual_bear += 1.0 * _pm("rel_strength", "bearish")
+            stack["rel_strength"] = f"underperform+1(ret10d={ret_10d:.1%}){_wtag('rel_strength','bearish')}"
         else:
             stack["rel_strength"] = f"neutral(ret10d={ret_10d:.1%})"
 
@@ -684,12 +760,12 @@ class LongOptionsAgent:
         if momentum.get("vol_surge", False):
             if bull > bear:
                 bull += 1
-                qual_bull += 0.7
-                stack["vol_surge"] = "surge+1(bull)"
+                qual_bull += 0.7 * _pm("vol_surge", "bullish")
+                stack["vol_surge"] = f"surge+1(bull){_wtag('vol_surge','bullish')}"
             elif bear > bull:
                 bear += 1
-                qual_bear += 0.7
-                stack["vol_surge"] = "surge+1(bear)"
+                qual_bear += 0.7 * _pm("vol_surge", "bearish")
+                stack["vol_surge"] = f"surge+1(bear){_wtag('vol_surge','bearish')}"
             else:
                 stack["vol_surge"] = "surge(no_dominant)"
         else:
@@ -698,12 +774,12 @@ class LongOptionsAgent:
         # ── News flag (advisory, weakest weight) ──────────────────────────────
         if news_flag == "bullish":
             bull += 1
-            qual_bull += 0.3
-            stack["news"] = "bullish+1(uw_news)"
+            qual_bull += 0.3 * _pm("news", "bullish")
+            stack["news"] = f"bullish+1(uw_news){_wtag('news','bullish')}"
         elif news_flag == "bearish":
             bear += 1
-            qual_bear += 0.3
-            stack["news"] = "bearish+1(uw_news)"
+            qual_bear += 0.3 * _pm("news", "bearish")
+            stack["news"] = f"bearish+1(uw_news){_wtag('news','bearish')}"
         else:
             stack["news"] = "none"
 
@@ -711,12 +787,12 @@ class LongOptionsAgent:
         if gex_regime == "negative":
             if bull > bear:
                 bull += 1
-                qual_bull += 0.5
-                stack["gex"] = "negative(amplify_bull)"
+                qual_bull += 0.5 * _pm("gex", "bullish")
+                stack["gex"] = f"negative(amplify_bull){_wtag('gex','bullish')}"
             elif bear > bull:
                 bear += 1
-                qual_bear += 0.5
-                stack["gex"] = "negative(amplify_bear)"
+                qual_bear += 0.5 * _pm("gex", "bearish")
+                stack["gex"] = f"negative(amplify_bear){_wtag('gex','bearish')}"
             else:
                 stack["gex"] = "negative(no_dominant)"
         else:
@@ -737,12 +813,12 @@ class LongOptionsAgent:
             stack["macro"] = f"stale(age>{4}h)→neutral"
         elif stance == "risk_on":
             bull += 1
-            qual_bull += 0.6
-            stack["macro"] = "risk_on+1"
+            qual_bull += 0.6 * _pm("macro", "bullish")
+            stack["macro"] = f"risk_on+1{_wtag('macro','bullish')}"
         elif stance == "risk_off":
             bear += 1
-            qual_bear += 0.6
-            stack["macro"] = "risk_off+1"
+            qual_bear += 0.6 * _pm("macro", "bearish")
+            stack["macro"] = f"risk_off+1{_wtag('macro','bearish')}"
         else:
             stack["macro"] = stance
 

@@ -89,7 +89,7 @@ class LessonsGenerator:
     async def generate_all(self) -> dict[str, int]:
         """Generate lessons for all agents. Returns {agent: lessons_written}."""
         results: dict[str, int] = {}
-        for agent in ("analyst", "strategy", "advocate", "exit", "swing_judge", "defender"):
+        for agent in ("analyst", "strategy", "advocate", "exit", "swing_judge", "defender", "long_options"):
             try:
                 n = await self._generate_for_agent(agent)
                 results[agent] = n
@@ -240,6 +240,22 @@ class LessonsGenerator:
                     cols = ["decision_id", "ticker", "decided_at_utc", "thesis_strength",
                             "confidence", "go_recommendation", "success_modes",
                             "most_likely_win_scenario", "shadow_mode"]
+                elif agent == "long_options":
+                    # Long options is deterministic — its "outcomes" live in signal_stats
+                    # (per-signal win rate / P&L, updated on every close). Feed the LLM the
+                    # signal-level track record so it can propose calibration lessons the
+                    # vetter will apply once approved (e.g. "momentum/bullish wins 30% of
+                    # 20 — demote it"). Only signals with a real sample (n>=3) are included.
+                    rows = conn.execute(
+                        """SELECT signal_name, direction, total_trades, wins, losses,
+                                  win_rate, avg_pnl, total_pnl, last_updated_utc
+                           FROM signal_stats
+                           WHERE total_trades >= 3
+                           ORDER BY total_trades DESC LIMIT ?""",
+                        (_SAMPLE_SIZE,),
+                    ).fetchall()
+                    cols = ["signal_name", "direction", "total_trades", "wins", "losses",
+                            "win_rate", "avg_pnl", "total_pnl", "last_updated_utc"]
                 else:
                     return []
 
@@ -258,6 +274,24 @@ class LessonsGenerator:
             return []
 
     def _build_payload(self, agent: str, rows: list[dict]) -> dict:
+        if agent == "long_options":
+            # Rows are per-signal aggregates (signal_stats), not per-trade outcomes.
+            n_trades = sum(int(r.get("total_trades") or 0) for r in rows)
+            n_wins   = sum(int(r.get("wins") or 0) for r in rows)
+            return {
+                "agent": "long_options",
+                "data_type": "per_signal_calibration",
+                "signals_tracked": len(rows),
+                "blended_win_rate": round(n_wins / n_trades, 3) if n_trades else None,
+                "signal_performance": rows,
+                "task": (
+                    "These are per-signal win-rate / P&L aggregates for the long-options "
+                    "book. Propose calibration lessons the vetter should apply: which "
+                    "signals or signal+direction combinations are underperforming (demote/"
+                    "veto) and which are reliable (trust). Be specific and falsifiable."
+                ),
+            }
+
         wins = sum(1 for r in rows if (
             r.get("thesis_played_out") == 1
             or (r.get("realized_pnl") or 0) > 0

@@ -112,7 +112,7 @@ class ExecutionQualityAgent:
             (fill_price, slippage, ticker, date.today().isoformat()),
         )
         if cur.rowcount == 0:
-            # No prior record_attempt to update — the long-options / naked-options paths
+            # No prior record_attempt to update — the long-options path can
             # record fills without a preceding attempt row, so the DB-based fill-rate
             # metric (COO audit) counted them as 0. Insert the fill directly so it counts.
             self._db.execute(

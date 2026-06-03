@@ -337,43 +337,6 @@ class AgoraSettings(BaseSettings):
                     "Disable to revert to single-call no-tool mode.",
     )
 
-    # ── Naked Options Specialist ──────────────────────────────────
-    naked_options_enabled: bool = Field(
-        default=False,
-        description="Enable NakedOptionsAgent dedicated scan loop. Paper mode only until "
-                    "execution quality confirmed. No risk-rule gates apply — earnings blackout "
-                    "and duplicate-ticker check are the only hard stops.",
-    )
-    naked_options_target_delta: float = Field(
-        default=0.16,
-        description="Target delta for short strike (16Δ = ~1 SD OTM, ~84% PoP). "
-                    "Raise to 0.30 for more premium in thin-IV environments.",
-        ge=0.05, le=0.50,
-    )
-    naked_options_min_premium: float = Field(
-        default=30.0,
-        description="Minimum premium per contract (dollars) to enter. Below this the "
-                    "theta reward doesn't justify commission + margin cost.",
-        ge=5.0,
-    )
-    naked_options_scan_interval_minutes: int = Field(
-        default=30,
-        description="Minutes between naked options scan cycles. Runs independently of "
-                    "the main spread pipeline.",
-        ge=5, le=120,
-    )
-    naked_options_max_positions: int = Field(
-        default=5,
-        description="Max concurrent naked option positions (separate from spread limit).",
-        ge=1, le=1000,
-    )
-    naked_options_profit_target_pct: float = Field(
-        default=0.50,
-        description="Close when premium decays to this fraction of original credit. "
-                    "50% is tastytrade-validated for 21-45 DTE naked options.",
-        ge=0.25, le=0.90,
-    )
-
     # ── Long Options Swing Specialist ──────────────────────────────
     long_options_enabled: bool = Field(
         default=False,
@@ -418,13 +381,13 @@ class AgoraSettings(BaseSettings):
     )
     long_options_scan_interval_minutes: int = Field(
         default=15,
-        description="Minutes between long options scan cycles. Faster than naked (15 vs 30) "
+        description="Minutes between long options scan cycles — fast enough "
                     "to capture momentum signals before they decay.",
         ge=5, le=60,
     )
     long_options_max_positions: int = Field(
         default=5,
-        description="Max concurrent long option positions (separate from spread and naked limits).",
+        description="Max concurrent long option positions (separate from the spread limit).",
         ge=1, le=1000,
     )
     long_options_min_conviction: int = Field(
