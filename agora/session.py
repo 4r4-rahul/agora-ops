@@ -2756,18 +2756,22 @@ class AgoraSession:
                                         ticker, resolution["reason"],
                                         f"{snap.iv_rank:.0f}" if snap.iv_rank else "n/a")
                         return
-                # Override gate for vol-premium play
-                conviction.pillar = StrategyPillar.VOL_PREMIUM
-                conviction.size_multiplier = 0.75
-                conviction.gate = "standard"
-                conviction.reasoning = (
-                    f"Vol premium | IVR={snap.iv_rank:.0f} (≥{ivr_threshold:.0f}) | "
-                    f"conviction={conviction.total_score:.0f} | macro vol_selling_ok=True"
-                )
-                logger.info(
-                    "Vol premium bypass for %s: IVR=%.0f conviction=%.0f | macro allows selling",
-                    ticker, snap.iv_rank, conviction.total_score,
-                )
+                # Override gate for vol-premium play — ONLY when vol-selling was approved
+                # (vol_selling_ok guarantees iv_rank is not None). If we instead arrived
+                # here via the sector-momentum bypass (vol_selling_ok is False), keep that
+                # SECTOR_MOMENTUM pillar and do NOT clobber it — and never format a None IVR.
+                if vol_selling_ok:
+                    conviction.pillar = StrategyPillar.VOL_PREMIUM
+                    conviction.size_multiplier = 0.75
+                    conviction.gate = "standard"
+                    conviction.reasoning = (
+                        f"Vol premium | IVR={snap.iv_rank:.0f} (≥{ivr_threshold:.0f}) | "
+                        f"conviction={conviction.total_score:.0f} | macro vol_selling_ok=True"
+                    )
+                    logger.info(
+                        "Vol premium bypass for %s: IVR=%.0f conviction=%.0f | macro allows selling",
+                        ticker, snap.iv_rank, conviction.total_score,
+                    )
             else:
                 conviction.size_multiplier = resolution["size_multiplier"]
                 conviction.gate = resolution["gate"]
