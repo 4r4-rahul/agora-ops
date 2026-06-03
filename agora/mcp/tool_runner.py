@@ -96,8 +96,22 @@ async def run_with_tools(
         msgs.append({"role": "assistant", "content": response.content})
         msgs.append({"role": "user", "content": tool_results})
 
-    logger.warning("run_with_tools exhausted %d turns without end_turn", max_turns)
-    return response  # Return last response
+    # Exhausted the tool budget while the model still wanted to call tools. The last
+    # response is a tool_use turn with no final text — useless to callers that need a
+    # parseable answer. Force one more call WITH TOOLS DISABLED so the model must
+    # commit to its text response instead of requesting more tools.
+    logger.warning("run_with_tools exhausted %d turns; forcing final no-tool answer", max_turns)
+    try:
+        final = await client.messages.create(
+            model=model,
+            system=system,
+            messages=msgs,
+            **create_kwargs,   # note: no `tools=` → model cannot call tools, must answer
+        )
+        return final
+    except Exception as exc:
+        logger.warning("run_with_tools final no-tool call failed: %s — returning last response", exc)
+        return response
 
 
 async def _call(fn: Callable, kwargs: dict) -> Any:

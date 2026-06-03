@@ -2091,7 +2091,7 @@ class AgoraSession:
                             order.get("reason", ""), decision.strategy,
                         )
                 except Exception as submit_exc:
-                    logger.warning("LongOptions submit error [%s]: %s", ticker, submit_exc)
+                    logger.warning("LongOptions submit error [%s]: %r", ticker, submit_exc)
 
                 await asyncio.sleep(2)
 
@@ -4247,7 +4247,13 @@ class AgoraSession:
         spot: float = 0.0,
         fill_price: float = 0.0,
         target_close_date_override: "date | None" = None,
+        extra_metadata: dict | None = None,
     ) -> str:
+        # extra_metadata (e.g. long-options profit_target_pct/signal_quality/conviction) is
+        # accepted so callers don't crash AFTER a fill — which previously left the position
+        # live at the broker but unrecorded (an orphan). Exit logic uses the global
+        # per-strategy config, so the per-position copy is not persisted here yet.
+        _ = extra_metadata
         from datetime import date, timedelta
         from .core.models import OpenPosition, PositionStatus
         expiry = rec.legs[0].expiration if rec.legs else (date.today() + timedelta(days=45))
