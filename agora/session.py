@@ -3243,16 +3243,13 @@ class AgoraSession:
                     getattr(_advocate_verdict, "verdict", "?"),
                 )
             else:
-                _adv_coro = self._advocate.review(
-                    ticker=ticker,
-                    recommendation=recommendation,
-                    thesis=thesis,
-                    positions=open_positions,
-                    macro_context=self._macro_context,
-                    decision_id=chain_id,
-                )
-                _def_coro = (
-                    self._defender.defend(
+                # Run the Advocate first. The Defender's ONLY role downstream is to
+                # moderate an Advocate BLOCK to CAUTION — so it is consulted ONLY when the
+                # advocate actually blocks. On a PASS (the majority of trades) the defender
+                # verdict was computed and then never read: pure waste (~$2.4/day, ~150
+                # calls). Sequencing it behind a block changes no outcome.
+                try:
+                    _advocate_verdict = await self._advocate.review(
                         ticker=ticker,
                         recommendation=recommendation,
                         thesis=thesis,
@@ -3260,15 +3257,25 @@ class AgoraSession:
                         macro_context=self._macro_context,
                         decision_id=chain_id,
                     )
-                    if self._defender else None
-                )
-                if _def_coro is not None:
-                    _debate_results = await asyncio.gather(_adv_coro, _def_coro, return_exceptions=True)
-                    _advocate_verdict = _debate_results[0] if not isinstance(_debate_results[0], Exception) else None
-                    _defender_verdict = _debate_results[1] if not isinstance(_debate_results[1], Exception) else None
-                else:
-                    _advocate_verdict = await _adv_coro
-                    _defender_verdict = None
+                except Exception:
+                    _advocate_verdict = None
+                _defender_verdict = None
+                if (
+                    self._defender is not None
+                    and _advocate_verdict is not None
+                    and getattr(_advocate_verdict, "is_block", False)
+                ):
+                    try:
+                        _defender_verdict = await self._defender.defend(
+                            ticker=ticker,
+                            recommendation=recommendation,
+                            thesis=thesis,
+                            positions=open_positions,
+                            macro_context=self._macro_context,
+                            decision_id=chain_id,
+                        )
+                    except Exception:
+                        _defender_verdict = None
                 # Cache verdict with fingerprint snapshot — but never cache an
                 # error (None advocate verdict): caching it would propagate the
                 # failure across the whole cooldown window. Leaving it uncached
