@@ -623,11 +623,8 @@ class AgoraSession:
 
         # ── LongOptionsAgent — directional swing (independent 15-min cycle) ───
         self._long_options_agent = None
-        # position_id → peak P&L fraction (trailing-stop high-water mark). Persisted to
-        # disk so a restart does not reset the trail (which would convert locked winners
-        # back into losers). Rehydrated here on startup.
-        self._long_peak_path = self._settings.db_path.parent / "long_peak_pnl.json"
-        self._long_peak_pnl: dict[str, float] = self._load_long_peaks()
+        # NB: long-options trailing-stop peak state now lives in PositionManager (the
+        # single exit owner), not here.
         if self._settings.long_options_enabled:
             from agora.agents.long_options_agent import LongOptionsAgent
             self._long_options_agent = LongOptionsAgent(self._settings)
@@ -1343,16 +1340,12 @@ class AgoraSession:
         """
         from datetime import time as _time, date as _date, timedelta
         from trading_platform.services.market_data.yfinance_provider import _YF_OPTIONS_LOCK
-        from agora.execution.ibkr_bridge import close_trade
         import yfinance as yf
 
+        # Entry-only loop. All exits (time/profit/trail/stop + LLM thesis check) are owned
+        # by PositionManager — the single exit owner for every strategy.
         interval_secs = self._settings.long_options_scan_interval_minutes * 60
-        max_hold      = self._settings.long_options_max_hold_days
-        # profit_tgt is the fallback; dynamic per-position target stored in pos.metadata
-        profit_tgt    = self._settings.long_options_profit_target_pct
-        stop_tgt      = self._settings.long_options_stop_loss_pct
-        trail_trigger = self._settings.long_options_trailing_stop_trigger
-        trail_floor   = self._settings.long_options_trailing_stop_floor
+        max_hold      = self._settings.long_options_max_hold_days   # used to set time-stop date at entry
         agent         = self._long_options_agent
 
         # Stagger: 210s after the spread pipeline to spread out IBKR load
@@ -1363,156 +1356,6 @@ class AgoraSession:
             if now_et.weekday() >= 5 or not (_time(9, 30) <= now_et.time() <= _time(15, 30)):
                 await asyncio.sleep(60)
                 continue
-
-            # ── A. Time-stop sweep ────────────────────────────────────────────────
-            open_positions = self._position_mgr.get_open_positions()
-            for pos in open_positions:
-                strat = str(getattr(pos.strategy, "value", pos.strategy))
-                if strat not in ("long_call", "long_put"):
-                    continue
-                age_days = (_date.today() - pos.entry_date).days
-                if age_days >= max_hold:
-                    logger.info(
-                        "LongOptions time-stop [%s] %s — held %dd ≥ %dd limit",
-                        pos.ticker, strat, age_days, max_hold,
-                    )
-                    try:
-                        await asyncio.wait_for(close_trade(pos, self._settings, self._session_id), timeout=30.0)
-                        self._position_mgr.mark_position_closed(
-                            pos.position_id, realized_pnl=pos.unrealized_pnl, source="time_stop")
-                        from agora.agents.long_options_agent import LongOptionsAgent as _LOA
-                        _LOA.update_signal_stats(str(self._settings.db_path), pos.position_id, pos.unrealized_pnl)
-                        self._long_peak_pnl.pop(pos.position_id, None)
-                    except Exception as close_exc:
-                        logger.error("LongOptions time-stop close FAILED [%s]: %s", pos.ticker, close_exc, exc_info=True)
-
-            # ── B. Trailing stop + flat stop sweep ────────────────────────────────
-            open_positions = self._position_mgr.get_open_positions()
-            for pos in open_positions:
-                strat = str(getattr(pos.strategy, "value", pos.strategy))
-                if strat not in ("long_call", "long_put"):
-                    continue
-                if pos.entry_price <= 0:
-                    continue
-
-                pnl_pct = pos.unrealized_pnl / (pos.entry_price * pos.contracts * 100)
-                pid     = pos.position_id
-
-                # Update peak P&L tracker
-                peak = self._long_peak_pnl.get(pid, 0.0)
-                if pnl_pct > peak:
-                    self._long_peak_pnl[pid] = pnl_pct
-                    peak = pnl_pct
-                    self._save_long_peaks()   # persist high-water mark across restarts
-
-                closed = False
-
-                # Use dynamic per-position profit target if stored at entry; else config default.
-                # Dynamic target: conviction 2→40%, 3→50%, 4→75%, 5+→100%.
-                _pos_pt = float(
-                    (getattr(pos, "metadata", None) or {}).get("profit_target_pct", profit_tgt)
-                )
-                pos_profit_tgt = _pos_pt if 0.10 <= _pos_pt <= 2.0 else profit_tgt
-
-                # Urgency taper: within 3 days of target_close, halve the profit threshold
-                # and tighten the trail floor. Time value is evaporating — lock in any gain.
-                days_to_close = (pos.target_close_date - _date.today()).days if pos.target_close_date else 999
-                urgent = days_to_close <= 3
-                effective_profit_tgt  = pos_profit_tgt * 0.5 if urgent else pos_profit_tgt
-                effective_trail_floor = trail_floor * 0.5 if urgent else trail_floor
-                if urgent and pnl_pct > 0:
-                    logger.debug(
-                        "LongOptions [%s] urgency mode: %dd to close, PT=%.0f%% floor=%.0f%%",
-                        pos.ticker, days_to_close, effective_profit_tgt * 100, effective_trail_floor * 100,
-                    )
-
-                # Hard profit target (fires before trail is active)
-                if pnl_pct >= effective_profit_tgt and peak < trail_trigger:
-                    logger.info(
-                        "LongOptions profit-target [%s] +%.0f%% — closing",
-                        pos.ticker, pnl_pct * 100,
-                    )
-                    try:
-                        await asyncio.wait_for(close_trade(pos, self._settings, self._session_id), timeout=30.0)
-                        self._position_mgr.mark_position_closed(
-                            pid, realized_pnl=pos.unrealized_pnl, source="profit_target")
-                        from agora.agents.long_options_agent import LongOptionsAgent as _LOA
-                        _LOA.update_signal_stats(str(self._settings.db_path), pid, pos.unrealized_pnl)
-                        self._long_peak_pnl.pop(pid, None)
-                        closed = True
-                    except Exception as e:
-                        logger.error("LongOptions profit-close FAILED [%s]: %s", pos.ticker, e, exc_info=True)
-
-                # Trailing stop (activates after peak ≥ trail_trigger)
-                if not closed and peak >= trail_trigger:
-                    trail_stop = peak - effective_trail_floor
-                    if pnl_pct <= trail_stop:
-                        logger.info(
-                            "LongOptions trail-stop [%s] pnl=+%.0f%% peak=+%.0f%% trail=+%.0f%% — closing",
-                            pos.ticker, pnl_pct * 100, peak * 100, trail_stop * 100,
-                        )
-                        try:
-                            await asyncio.wait_for(close_trade(pos, self._settings, self._session_id), timeout=30.0)
-                            self._position_mgr.mark_position_closed(
-                                pid, realized_pnl=pos.unrealized_pnl, source="trailing_stop")
-                            from agora.agents.long_options_agent import LongOptionsAgent as _LOA
-                            _LOA.update_signal_stats(str(self._settings.db_path), pid, pos.unrealized_pnl)
-                            self._long_peak_pnl.pop(pid, None)
-                            closed = True
-                        except Exception as e:
-                            logger.error("LongOptions trail-close FAILED [%s]: %s", pos.ticker, e, exc_info=True)
-
-                # Flat stop loss (pre-trail, position has not yet gone +30%)
-                if not closed and pnl_pct <= -stop_tgt:
-                    logger.info(
-                        "LongOptions stop-loss [%s] %.0f%% ≤ -%.0f%% — closing",
-                        pos.ticker, pnl_pct * 100, stop_tgt * 100,
-                    )
-                    try:
-                        await asyncio.wait_for(close_trade(pos, self._settings, self._session_id), timeout=30.0)
-                        self._position_mgr.mark_position_closed(
-                            pid, realized_pnl=pos.unrealized_pnl, source="stop_loss")
-                        from agora.agents.long_options_agent import LongOptionsAgent as _LOA
-                        _LOA.update_signal_stats(str(self._settings.db_path), pid, pos.unrealized_pnl)
-                        self._long_peak_pnl.pop(pid, None)
-                    except Exception as e:
-                        logger.error("LongOptions stop-close FAILED [%s]: %s", pos.ticker, e, exc_info=True)
-
-            # ── B2. LLM thesis-revalidation exit (single owner gains exit intelligence) ──
-            # The dedicated loop is the SOLE exit owner; here it runs ExitIntelligenceAgent
-            # itself — throttled (exit_intelligence_interval_hours) and fed the long_journal
-            # thesis — so long options get the same LLM thesis/kill-condition check that
-            # spreads get, closing EARLY when the directional thesis breaks, layered on top
-            # of the deterministic floors above. act=False so this loop owns the close (and
-            # the signal-stats learning update); shadow_mode logs the verdict without closing.
-            if self._exit_agent is not None:
-                _interval = self._settings.exit_intelligence_interval_hours
-                for pos in self._position_mgr.get_open_positions():
-                    strat = str(getattr(pos.strategy, "value", pos.strategy))
-                    if strat not in ("long_call", "long_put"):
-                        continue
-                    if not self._exit_agent.should_evaluate(pos.position_id, _interval):
-                        continue
-                    try:
-                        _thesis = self._long_thesis_for(pos.position_id)
-                        rec = await self._exit_agent.evaluate(
-                            pos, self._macro_context, thesis_override=_thesis, act=False)
-                        if rec is not None and rec.should_close and not self._exit_agent.shadow_mode:
-                            logger.info(
-                                "LongOptions thesis-exit [%s] %s | kill=%s | %s",
-                                pos.ticker, rec.thesis_validity, rec.kill_condition_status,
-                                (rec.recommendation_reasoning or "")[:80],
-                            )
-                            await asyncio.wait_for(
-                                close_trade(pos, self._settings, self._session_id), timeout=30.0)
-                            self._position_mgr.mark_position_closed(
-                                pos.position_id, realized_pnl=pos.unrealized_pnl, source="thesis_exit")
-                            from agora.agents.long_options_agent import LongOptionsAgent as _LOA
-                            _LOA.update_signal_stats(
-                                str(self._settings.db_path), pos.position_id, pos.unrealized_pnl)
-                            self._long_peak_pnl.pop(pos.position_id, None)
-                    except Exception as e:
-                        logger.error("LongOptions thesis-exit FAILED [%s]: %s", pos.ticker, e, exc_info=True)
 
             # ── C. Intraday timing gate — no entries in price discovery or EOD window ──
             # Skip entries 9:30–9:45 ET (price discovery) and after 3:10 ET (EOD risk).
@@ -1897,8 +1740,6 @@ class AgoraSession:
                                 "conviction":        decision.conviction,
                             },
                         )
-                        if position_id:
-                            self._long_peak_pnl[position_id] = 0.0
                         agent.journal(decision, str(self._settings.db_path), position_id or "")
                         self._exec_quality.record_fill(ticker, fill_price, decision.premium, decision.strategy)
                         _submitted_this_cycle.add(ticker)
@@ -3200,21 +3041,6 @@ class AgoraSession:
             logger.debug("_long_thesis_for failed [%s]: %s", position_id, exc)
             return {}
 
-    def _load_long_peaks(self) -> dict:
-        try:
-            import json
-            if self._long_peak_path.exists():
-                return {k: float(v) for k, v in json.loads(self._long_peak_path.read_text()).items()}
-        except Exception as exc:
-            logger.debug("long_peak load failed: %s", exc)
-        return {}
-
-    def _save_long_peaks(self) -> None:
-        try:
-            import json
-            self._long_peak_path.write_text(json.dumps(self._long_peak_pnl))
-        except Exception as exc:
-            logger.debug("long_peak save failed: %s", exc)
 
     async def _long_options_risk_gates(
         self, rec: Any, ticker: str, spot: float, earnings_date: Any = None,

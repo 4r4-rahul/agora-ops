@@ -71,6 +71,11 @@ class PositionManager:
         self._db = self._init_db()
         self._running = False
         self._profit_engine = IntelligentProfitEngine()
+        # Long-options trailing-stop high-water marks (position_id → peak P&L fraction).
+        # Persisted so a restart does not reset the trail and convert a locked winner
+        # back into a runner. This is exit state, so it lives with the exit owner.
+        self._long_peak_path = self._settings.db_path.parent / "long_peak_pnl.json"
+        self._long_peak_pnl: dict[str, float] = self._load_long_peaks()
 
     def set_macro_context(self, ctx: Any) -> None:
         """Called by session after every macro synthesis — keeps engine regime-aware."""
@@ -390,13 +395,14 @@ class PositionManager:
     async def _check_position_targets(self, position: OpenPosition) -> None:
         today = date.today()
 
-        # Long options are managed exclusively by the dedicated _long_options_loop
-        # (5-day time stop, dynamic profit target, trailing + flat stops). They must NOT
-        # run through the spread-calibrated logic below: the 21-DTE rule would force-close
-        # them on entry day (they're bought at 21-60 DTE) and the profit-engine / 2x-credit
-        # stop math is wrong for naked long premium.
+        # Long options use their OWN exit rules (5-day time stop, conviction-dynamic
+        # profit target, trailing + flat stops) — NOT the spread-calibrated logic below
+        # (the 21-DTE rule would force-close them on entry day, and the profit-engine /
+        # 2x-credit stop math is wrong for long premium). PositionManager is the single
+        # exit owner for ALL strategies; it just branches on the rule set here.
         _strat = str(getattr(position.strategy, "value", position.strategy))
         if _strat in ("long_call", "long_put"):
+            await self._check_long_options_targets(position)
             return
 
         # 21-DTE close
@@ -445,6 +451,102 @@ class PositionManager:
 
         # Mark as TESTED if underlying through short strike
         await self._check_tested_status(position)
+
+    # ── Long-options exit rules (single owner; distinct from spread logic) ─────
+
+    def _load_long_peaks(self) -> dict:
+        try:
+            if self._long_peak_path.exists():
+                return {k: float(v) for k, v in json.loads(self._long_peak_path.read_text()).items()}
+        except Exception as exc:
+            logger.debug("long_peak load failed: %s", exc)
+        return {}
+
+    def _save_long_peaks(self) -> None:
+        try:
+            self._long_peak_path.write_text(json.dumps(self._long_peak_pnl))
+        except Exception as exc:
+            logger.debug("long_peak save failed: %s", exc)
+
+    async def _close_long(self, position: OpenPosition, reason: str, source: str) -> None:
+        """Close a long-options position via the canonical path, then fire the
+        signal-stats learning update and clear its trailing peak."""
+        await self._close_position(position, reason, source=source)
+        try:
+            from agora.agents.long_options_agent import LongOptionsAgent as _LOA
+            _LOA.update_signal_stats(
+                str(self._settings.db_path), position.position_id, position.unrealized_pnl)
+        except Exception as exc:
+            logger.debug("update_signal_stats failed [%s]: %s", position.ticker, exc)
+        self._long_peak_pnl.pop(position.position_id, None)
+        self._save_long_peaks()
+
+    async def _check_long_options_targets(self, position: OpenPosition) -> None:
+        """
+        Long-call / long-put exit rules. Priority: time stop → profit target →
+        trailing stop → flat stop. Mirrors the directional-swing playbook; the
+        deterministic floors here are layered with the LLM thesis check (added in a
+        later step). update_signal_stats is fired on every close (learning loop).
+        """
+        s = self._settings
+        max_hold      = s.long_options_max_hold_days
+        profit_tgt    = s.long_options_profit_target_pct
+        stop_tgt      = s.long_options_stop_loss_pct
+        trail_trigger = s.long_options_trailing_stop_trigger
+        trail_floor   = s.long_options_trailing_stop_floor
+        today         = date.today()
+        pid           = position.position_id
+
+        # A. Hard 5-day time stop — close regardless of P&L.
+        age_days = (today - position.entry_date).days
+        if age_days >= max_hold:
+            logger.info("LongOptions time-stop [%s] held %dd ≥ %dd", position.ticker, age_days, max_hold)
+            await self._close_long(position, f"5-day time stop (held {age_days}d)", "time_stop")
+            return
+
+        if position.entry_price <= 0 or position.contracts <= 0:
+            return
+
+        pnl_pct = position.unrealized_pnl / (position.entry_price * position.contracts * 100)
+
+        # Update trailing high-water mark (persisted across restarts).
+        peak = self._long_peak_pnl.get(pid, 0.0)
+        if pnl_pct > peak:
+            self._long_peak_pnl[pid] = pnl_pct
+            peak = pnl_pct
+            self._save_long_peaks()
+
+        # Conviction-dynamic profit target if persisted at entry; else config default.
+        _pos_pt = float((getattr(position, "metadata", None) or {}).get("profit_target_pct", profit_tgt))
+        pos_profit_tgt = _pos_pt if 0.10 <= _pos_pt <= 2.0 else profit_tgt
+
+        # Urgency taper: within 3 days of target close, halve target + trail floor.
+        days_to_close = (position.target_close_date - today).days if position.target_close_date else 999
+        urgent = days_to_close <= 3
+        eff_profit_tgt  = pos_profit_tgt * 0.5 if urgent else pos_profit_tgt
+        eff_trail_floor = trail_floor * 0.5 if urgent else trail_floor
+
+        # B. Hard profit target (before trail activates).
+        if pnl_pct >= eff_profit_tgt and peak < trail_trigger:
+            logger.info("LongOptions profit-target [%s] +%.0f%% — closing", position.ticker, pnl_pct * 100)
+            await self._close_long(position, f"profit target +{pnl_pct*100:.0f}%", "profit_target")
+            return
+
+        # C. Trailing stop (active once peak ≥ trigger).
+        if peak >= trail_trigger:
+            trail_stop = peak - eff_trail_floor
+            if pnl_pct <= trail_stop:
+                logger.info("LongOptions trail-stop [%s] pnl=+%.0f%% peak=+%.0f%% — closing",
+                            position.ticker, pnl_pct * 100, peak * 100)
+                await self._close_long(position, f"trailing stop (peak +{peak*100:.0f}%)", "trailing_stop")
+                return
+
+        # D. Flat stop loss (pre-trail).
+        if pnl_pct <= -stop_tgt:
+            logger.info("LongOptions stop-loss [%s] %.0f%% ≤ -%.0f%% — closing",
+                        position.ticker, pnl_pct * 100, stop_tgt * 100)
+            await self._close_long(position, f"stop loss {pnl_pct*100:.0f}%", "stop_loss")
+            return
 
     @staticmethod
     def _fetch_spot_sync(ticker: str) -> float:
@@ -503,7 +605,8 @@ class PositionManager:
                 logger.warning("Roll failed for %s: %s", position.ticker, exc)
         return False
 
-    async def _close_position(self, position: OpenPosition, reason: str) -> None:
+    async def _close_position(self, position: OpenPosition, reason: str,
+                              source: str = "lifecycle") -> None:
         if self._on_close:
             try:
                 await self._on_close(position, reason)
@@ -517,7 +620,7 @@ class PositionManager:
                 PositionStatus.CLOSED.value,
                 date.today().isoformat(),
                 round(position.current_price, 4),
-                "lifecycle",
+                source,
                 round(position.unrealized_pnl, 2),
                 datetime.now(tz=timezone.utc).isoformat(),
                 position.position_id,
