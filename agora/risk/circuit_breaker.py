@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
@@ -197,6 +198,25 @@ class CircuitBreakerAgent:
         from datetime import date
         positions = self._position_mgr.get_open_positions() if self._position_mgr else []
 
+        # ── Bad-mark guard (protects BOTH loss checks below) ──────────────────
+        # A long-options book cannot lose more than the capital deployed (max loss =
+        # premium paid), so total unrealized is bounded by the account. At startup or
+        # on a quote gap, position marks can be stale / zero / NaN, producing a
+        # physically-impossible figure (observed: -$23k on a $10k account at the open,
+        # swinging $12k in 60s) that falsely tripped the kill switch on every restart.
+        # When the aggregate mark is implausible the whole snapshot is unreliable, so
+        # skip this cycle entirely — neither loss check fires and the prior-close proxy
+        # is not poisoned. Real losses, bounded by the account, still trip normally.
+        _total_unrealized = sum(p.unrealized_pnl for p in positions)
+        _sane_bound = max(getattr(self._settings, "account_size", 10_000.0) * 1.5, 5_000.0)
+        if not math.isfinite(_total_unrealized) or abs(_total_unrealized) > _sane_bound:
+            logger.warning(
+                "CircuitBreaker: implausible total_unrealized $%.0f (bound ±$%.0f) — "
+                "stale/NaN marks (likely market-open or restart), skipping this cycle",
+                _total_unrealized, _sane_bound,
+            )
+            return
+
         # 1. Individual position loss limit
         for pos in positions:
             if pos.position_id in self._alerted_positions:
@@ -215,7 +235,7 @@ class CircuitBreakerAgent:
         # 2. Daily portfolio loss — mark-to-market change since session open + realized today.
         # We track a baseline (set once per calendar day on first check) so that losses
         # carried over from prior sessions do not re-trip the switch on restart.
-        total_unrealized = sum(p.unrealized_pnl for p in positions)
+        total_unrealized = _total_unrealized   # validated sane by the bad-mark guard above
         realized_today   = self._get_todays_realized_pnl()
         today_str        = date.today().isoformat()
         limit            = self._settings.daily_loss_limit_dollars
