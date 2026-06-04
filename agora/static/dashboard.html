@@ -846,6 +846,30 @@ tr.pos-detail-row td { padding: 0; background: var(--bg1); }
       </div>
     </div>
 
+    <!-- ── LLM Cost row ── -->
+    <div id="row-llmcost" style="margin-top:10px">
+      <div class="panel">
+        <div class="panel-header">💸 LLM Cost (today)
+          <span id="llmcost-total-badge" style="margin-left:8px;font-size:11px;font-weight:600"></span>
+          <span id="llmcost-trend" style="margin-left:10px;font-size:10px;color:var(--text2)"></span>
+          <button onclick="fetchCosts()"
+            style="margin-left:auto;padding:1px 7px;font-size:10px;font-family:var(--font);
+                   background:rgba(88,166,255,.12);border:1px solid rgba(88,166,255,.3);
+                   color:var(--blue);border-radius:4px;cursor:pointer">↻</button>
+        </div>
+        <div class="tbl-wrap" style="max-height:200px">
+          <table>
+            <thead><tr>
+              <th>Agent</th><th>Model</th><th>Calls</th><th>Cache rd</th><th>Cost $</th>
+            </tr></thead>
+            <tbody id="llmcost-tbody">
+              <tr><td colspan="5" style="color:var(--text2);text-align:center;padding:8px;font-size:10px">No LLM spend yet today</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
   </div><!-- /main -->
 
   <!-- ── Right panel ── -->
@@ -2594,6 +2618,41 @@ async function fetchExits() {
   }
 }
 
+// ── LLM Cost ──────────────────────────────────────────────────────────────────
+async function fetchCosts() {
+  const tbody = document.getElementById('llmcost-tbody');
+  const badge = document.getElementById('llmcost-total-badge');
+  const trendEl = document.getElementById('llmcost-trend');
+  try {
+    const r = await fetch('/agora/costs');
+    if (!r.ok) return;
+    const d = await r.json();
+    const total = d.total_usd || 0, cap = d.cap_usd || 0;
+    const c = d.over_cap ? 'var(--red)' : (d.pct_cap||0) >= 75 ? 'var(--yellow)' : 'var(--green)';
+    badge.innerHTML = `<span style="color:${c}">$${total.toFixed(2)}</span> / $${cap} cap (${(d.pct_cap||0).toFixed(0)}%)`;
+    const tr = (d.trend || []).map(t => `${(t.date||'').slice(5)}:$${(t.usd||0).toFixed(0)}`).join('  ');
+    trendEl.textContent = tr ? '7d: ' + tr : '';
+    const rows = d.by_agent || [];
+    if (!rows.length) {
+      tbody.innerHTML = '<tr><td colspan="5" style="color:var(--text2);text-align:center;padding:8px;font-size:10px">No LLM spend yet today</td></tr>';
+      return;
+    }
+    tbody.innerHTML = rows.map(a => {
+      const model = (a.model||'').replace('claude-','').replace('-20251001','');
+      const mC = model.includes('opus') ? 'var(--red)' : model.includes('sonnet') ? 'var(--yellow)' : 'var(--green)';
+      return `<tr>
+        <td style="font-weight:600">${a.agent}</td>
+        <td style="color:${mC};font-size:10px">${model}</td>
+        <td>${a.calls}</td>
+        <td style="color:var(--text2)">${((a.cache_read_tokens||0)/1000).toFixed(0)}k</td>
+        <td style="font-weight:600">$${(a.cost_usd||0).toFixed(2)}</td>
+      </tr>`;
+    }).join('');
+  } catch(ex) {
+    tbody.innerHTML = `<tr><td colspan="5" style="color:var(--red);padding:8px;font-size:10px">Error: ${ex.message}</td></tr>`;
+  }
+}
+
 // ── Today at a Glance ─────────────────────────────────────────────────────────
 async function fetchToday() {
   try {
@@ -2705,7 +2764,7 @@ async function fetchToday() {
 
   await Promise.all([
     fetchHealth(), fetchOrders(), fetchPositions(), fetchAttribution(), fetchSignals(),
-    fetchMarket(), fetchReadiness(), fetchCsuite(), fetchToday(), fetchLong(), fetchExits(),
+    fetchMarket(), fetchReadiness(), fetchCsuite(), fetchToday(), fetchLong(), fetchExits(), fetchCosts(),
   ]);
 
   // TWS live data — fetch once on load then every 30s (makes a real IBKR connection)
@@ -2723,6 +2782,7 @@ async function fetchToday() {
   setInterval(fetchToday,       30_000); // today summary: realized P&L + closed positions
   setInterval(fetchLong,        60_000); // long-options status: refresh every 60s
   setInterval(fetchExits,      300_000); // exit-quality attribution: refresh every 5m
+  setInterval(fetchCosts,      300_000); // LLM cost breakdown: refresh every 5m
   setInterval(fetchStratHealth, 300_000); // strategy health: refresh every 5 min (matches patrol)
 })();
 

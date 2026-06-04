@@ -1076,7 +1076,21 @@ async def get_llm_costs(date: str | None = None) -> JSONResponse:
         return JSONResponse({"error": "session not ready"}, status_code=503)
     try:
         db_path = str(session._settings.db_path)
-        return JSONResponse(_llm_daily_cost(db_path, for_date=date))
+        summary = _llm_daily_cost(db_path, for_date=date)
+        # 7-day daily totals for a trend sparkline on the dashboard.
+        try:
+            import sqlite3
+            with sqlite3.connect(db_path, timeout=5) as conn:
+                rows = conn.execute(
+                    """SELECT date, ROUND(SUM(cost_usd),2), COUNT(*)
+                       FROM llm_cost_log
+                       WHERE date >= date('now','-6 days')
+                       GROUP BY date ORDER BY date""",
+                ).fetchall()
+            summary["trend"] = [{"date": r[0], "usd": r[1] or 0.0, "calls": r[2]} for r in rows]
+        except Exception:
+            summary["trend"] = []
+        return JSONResponse(summary)
     except Exception as exc:
         logger.error("LLM cost lookup error: %s", exc)
         return JSONResponse({"error": str(exc)}, status_code=500)
