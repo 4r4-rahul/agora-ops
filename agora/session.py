@@ -913,46 +913,13 @@ class AgoraSession:
                 elif hour == 16 and minute == 5:
                     self._intraday_sector.reset_session()   # clear sector signals for next day
                     await self._afterhours_report()
-
-                # Every cycle during market hours: check if pre-earnings positions need closing
-                if 9 <= hour < 16:
-                    await self._check_pre_earnings_closes()
+                # Pre-earnings IV-crush close is now owned by PositionManager (single exit owner).
             except Exception as exc:
                 logger.error("Session loop error: %s", exc)
 
             await asyncio.sleep(60)
 
-    # ── Pre-earnings IV crush close ────────────────────────────────
-
-    async def _check_pre_earnings_closes(self) -> None:
-        """
-        Close pre-earnings positions on T-1 (the trading day before earnings).
-
-        Why T-1 and not T-0: earnings are usually reported after-hours. If we hold
-        into the announcement, IV collapses from ~80% to ~30% regardless of direction
-        (IV crush). A debit spread that's directionally correct still loses value if
-        IV drops faster than intrinsic value gains. Close T-1 to capture IV expansion
-        while it's still elevated, before the crush.
-        """
-        from datetime import date, timedelta
-        today = date.today()
-        positions = self._position_mgr.get_open_positions()
-
-        for pos in positions:
-            if not pos.is_pre_earnings or pos.earnings_date is None:
-                continue
-            days_to_earnings = (pos.earnings_date - today).days
-            if days_to_earnings <= 1:
-                reason = (
-                    f"Pre-earnings IV crush protection: earnings on {pos.earnings_date} "
-                    f"(T-{days_to_earnings}). Closing to capture IV expansion before crush."
-                )
-                logger.info("IV crush close: %s | %s", pos.ticker, reason)
-                # Remove from dedup tracker
-                self._pre_earnings_tickers.pop(pos.ticker, None)
-                await self._execute_close(pos, reason)
-
-    # ── Earnings proximity alert ───────────────────────────────────
+    # ── Earnings proximity ─────────────────────────────────────────
 
     async def _get_next_earnings(self, ticker: str) -> "date | None":
         """

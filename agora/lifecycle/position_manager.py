@@ -81,6 +81,10 @@ class PositionManager:
         # back into a runner. This is exit state, so it lives with the exit owner.
         self._long_peak_path = self._settings.db_path.parent / "long_peak_pnl.json"
         self._long_peak_pnl: dict[str, float] = self._load_long_peaks()
+        # position_id → conviction-dynamic profit target (cached; derived from long_journal
+        # conviction at first check). Fixes the prior gap where the dynamic target was
+        # computed at entry but never applied at exit (OpenPosition carries no metadata).
+        self._long_profit_tgt: dict[str, float] = {}
 
     def set_macro_context(self, ctx: Any) -> None:
         """Called by session after every macro synthesis — keeps engine regime-aware."""
@@ -416,6 +420,20 @@ class PositionManager:
             await self._check_long_options_targets(position)
             return
 
+        # Pre-earnings IV-crush protection (T-1). Earnings report after-hours and IV
+        # collapses ~80%→~30% on the print regardless of direction; close the day before
+        # to capture elevated IV. Highest priority — fires before the 21-DTE rule.
+        if getattr(position, "is_pre_earnings", False) and position.earnings_date is not None:
+            days_to_earnings = (position.earnings_date - today).days
+            if days_to_earnings <= 1:
+                await self._close_position(
+                    position,
+                    f"Pre-earnings IV-crush close (earnings {position.earnings_date}, "
+                    f"T-{days_to_earnings})",
+                    source="pre_earnings",
+                )
+                return
+
         # 21-DTE close
         dte = (position.expiry_date - today).days
         if dte <= self._settings.target_dte_close:
@@ -570,6 +588,28 @@ class PositionManager:
         self._long_peak_pnl.pop(position.position_id, None)
         self._save_long_peaks()
 
+    def _long_profit_target_for(self, position_id: str) -> float:
+        """Conviction-dynamic profit target for a long position (40/50/75/100% by
+        conviction), read once from long_journal and cached. Falls back to the config
+        default if the journal row is missing."""
+        if position_id in self._long_profit_tgt:
+            return self._long_profit_tgt[position_id]
+        tgt = self._settings.long_options_profit_target_pct
+        try:
+            with sqlite3.connect(str(self._settings.db_path), timeout=5) as conn:
+                row = conn.execute(
+                    "SELECT conviction_score FROM long_journal WHERE position_id=? "
+                    "AND outcome='proceed' ORDER BY journal_id DESC LIMIT 1",
+                    (position_id,),
+                ).fetchone()
+            if row and row[0] is not None:
+                from agora.agents.long_options_agent import LongOptionsAgent as _LOA
+                tgt = _LOA._conviction_profit_target(int(row[0]))
+        except Exception as exc:
+            logger.debug("_long_profit_target_for [%s]: %s", position_id, exc)
+        self._long_profit_tgt[position_id] = tgt
+        return tgt
+
     async def _check_long_options_targets(self, position: OpenPosition) -> None:
         """
         Long-call / long-put exit rules. Priority: time stop → profit target →
@@ -579,7 +619,6 @@ class PositionManager:
         """
         s = self._settings
         max_hold      = s.long_options_max_hold_days
-        profit_tgt    = s.long_options_profit_target_pct
         stop_tgt      = s.long_options_stop_loss_pct
         trail_trigger = s.long_options_trailing_stop_trigger
         trail_floor   = s.long_options_trailing_stop_floor
@@ -605,9 +644,8 @@ class PositionManager:
             peak = pnl_pct
             self._save_long_peaks()
 
-        # Conviction-dynamic profit target if persisted at entry; else config default.
-        _pos_pt = float((getattr(position, "metadata", None) or {}).get("profit_target_pct", profit_tgt))
-        pos_profit_tgt = _pos_pt if 0.10 <= _pos_pt <= 2.0 else profit_tgt
+        # Conviction-dynamic profit target (derived from long_journal conviction, cached).
+        pos_profit_tgt = self._long_profit_target_for(pid)
 
         # Urgency taper: within 3 days of target close, halve target + trail floor.
         days_to_close = (position.target_close_date - today).days if position.target_close_date else 999
