@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.agora.trading.watchdog</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/rahul/Workspace/options_trading_agent_agentic/agora/ops/watchdog.sh</string>
+    </array>
+
+    <!-- Run every 5 minutes. The script self-gates to weekdays 08:25-15:05 CDT,
+         so it only restarts the engine during trading hours and never fights the
+         scheduled 4:30pm stop. -->
+    <key>StartInterval</key>
+    <integer>300</integer>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/rahul/Workspace/options_trading_agent_agentic</string>
+
+    <key>StandardOutPath</key>
+    <string>/Users/rahul/Workspace/options_trading_agent_agentic/agora/logs/launchd-watchdog.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/rahul/Workspace/options_trading_agent_agentic/agora/logs/launchd-watchdog.log</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>

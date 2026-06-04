@@ -43,5 +43,15 @@ set -a; source "$REPO/.env"; set +a
   --workers 1 \
   >> "$DATED_LOG" 2>&1 &
 
-echo $! > "$PID_FILE"
-echo "[start.sh] AGORA started — PID $(cat $PID_FILE) — $(date)" >> "$DATED_LOG"
+AGORA_PID=$!
+echo "$AGORA_PID" > "$PID_FILE"
+
+# ── Keep the Mac awake while the engine runs ──────────────────────────────────
+# A laptop on idle/battery sleeps and suspends this process mid-session (observed:
+# died at 09:55 ET = idle sleep). caffeinate -is holds a no-idle / no-system-sleep
+# assertion; -w ties it to the engine PID so it auto-releases when the engine exits
+# (incl. the scheduled 4:30pm stop) — no orphaned assertion. NOTE: system sleep can
+# only be blocked on AC power; keep the Mac plugged in during trading hours.
+caffeinate -is -w "$AGORA_PID" >> "$DATED_LOG" 2>&1 &
+
+echo "[start.sh] AGORA started — PID $AGORA_PID (caffeinated) — $(date)" >> "$DATED_LOG"
