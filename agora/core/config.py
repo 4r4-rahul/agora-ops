@@ -140,32 +140,39 @@ class AgoraSettings(BaseSettings):
     etf_universe: list[str] = Field(
         default=[
             # Broad market ETFs
-            "SPY", "QQQ", "IWM", "GLD", "TLT", "SLV", "COPX", "PPLT",
+            "SPY", "QQQ", "IWM", "DIA", "EEM", "GLD", "TLT", "SLV", "COPX", "PPLT",
+            # Sector ETFs (diversification — added 2026-06-04; liquid baskets replace the
+            # small-cap single-name bleed, e.g. SMH instead of HIMX/AMKR)
+            "SMH", "XLK", "XLF", "XLE", "XLV", "XBI",
             # Mega-cap tech
             "AAPL", "MSFT", "NVDA", "META", "AMZN", "GOOGL", "TSLA", "AVGO", "AMD",
-            # Semiconductors
-            "TSM", "MU", "INTC", "TXN", "LRCX", "ASML", "SMTC", "AMKR",
-            "HIMX", "TSEM", "VECO",
+            "NFLX", "CRM",
+            # Semiconductors (liquid only — pruned proven small-cap losers HIMX/AMKR)
+            "TSM", "MU", "INTC", "TXN", "LRCX", "ASML", "SMTC", "TSEM", "VECO",
             # Defense / space
             "PLTR", "KTOS", "AVAV", "RKLB",
-            # Energy / power
-            "VST", "CEG", "NEE", "FCEL", "BE", "AMSC", "FLNC", "CCJ",
+            # Energy / power (pruned proven losers FCEL/FLNC; added liquid XOM)
+            "XOM", "VST", "CEG", "NEE", "BE", "AMSC", "CCJ",
             # Finance / brokers
-            "SCHW", "HOOD", "CBOE",
+            "JPM", "SCHW", "HOOD", "CBOE",
             # Large-cap diversified
             "COST", "WMT", "KO", "CAT", "ORCL", "MSI", "JBL", "SANM",
             # Biotech / healthcare
             "LLY", "JNJ", "ABT", "BSX", "BIIB", "MDT",
             # Cloud / software
             "SNOW", "ZS", "UPST",
-            # Optical / photonics
-            "LITE", "COHR", "AAOI", "AXTI", "AOSL",
-            # Other watchlist
+            # Liquid high-beta / momentum (added — liquid options despite volatility)
+            "COIN", "MARA", "SMCI",
+            # Optical / photonics (pruned proven loser AOSL; kept AAOI/AXTI per owner)
+            "LITE", "COHR", "AAOI", "AXTI",
+            # Other watchlist (kept OKLO per owner)
             "FLEX", "MSTR", "WDC", "IREN", "NOK", "OKLO", "GEV",
             "MP", "POWL", "KEYS", "ONTO", "SERV", "VICR",
             "BJ", "F", "CIFR", "ASTS",
         ],
-        description="Options universe for vol premium credit spreads and event plays",
+        description="Options universe for vol premium credit spreads and event plays. "
+                    "Liquidity-tilted + sector-diversified (2026-06-04) after edge-by-liquidity "
+                    "analysis showed positive edge in liquid names, negative in the small-cap tail.",
     )
     single_name_min_market_cap: float = Field(
         default=300_000_000.0,
