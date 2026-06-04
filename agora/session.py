@@ -100,6 +100,15 @@ class AgoraSession:
         self._settings = settings or get_settings()
         self._session_id = f"AGORA-{datetime.now(tz=ET).strftime('%Y%m%d-%H%M')}"
 
+        # Install the yfinance throttle+cache gate FIRST — before any agent/loop fetches —
+        # so all 139 raw yf.Ticker call sites get global rate-limiting + shared caching on
+        # the heavy ops (history, option_chain). Kills the free-tier saturation.
+        try:
+            from agora.ops.yf_gate import install as _install_yf_gate
+            _install_yf_gate()
+        except Exception as _yfg_exc:
+            logger.warning("yf_gate install failed (continuing without): %s", _yfg_exc)
+
         # DB migrations — idempotent, runs before any agent opens the DB
         try:
             from agora.ops.db_migrations import run_all as _run_db_migrations

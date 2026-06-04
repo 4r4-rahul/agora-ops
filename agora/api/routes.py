@@ -1799,6 +1799,17 @@ async def get_exit_quality(days: int = 30) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+@router.get("/yf-cache")
+async def get_yf_cache_stats() -> JSONResponse:
+    """GET /agora/yf-cache — yfinance gate cache hit-rates + rate-limit retry counts.
+    Confirms the throttle+cache is relieving free-tier saturation."""
+    try:
+        from agora.ops.yf_gate import stats
+        return JSONResponse(stats())
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 @router.get("/fact-divergence")
 async def get_fact_divergence(days: int = 7) -> JSONResponse:
     """
