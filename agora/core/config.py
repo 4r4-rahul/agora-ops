@@ -173,7 +173,7 @@ class AgoraSettings(BaseSettings):
             # Liquid high-beta / momentum (added — liquid options despite volatility)
             "COIN", "MARA", "SMCI",
             # Optical / photonics (AI optics; pruned proven loser AOSL; kept AAOI/AXTI per owner)
-            "LITE", "COHR", "FN", "CIEN", "AAOI", "AXTI",
+            "LITE", "COHR", "FN", "CIEN", "GLW", "IPGP", "MKSI", "AAOI", "AXTI",
             # Other watchlist (kept OKLO per owner; WDC moved to memory/storage group)
             "FLEX", "MSTR", "IREN", "NOK", "OKLO", "GEV",
             "MP", "POWL", "KEYS", "ONTO", "SERV", "VICR",
