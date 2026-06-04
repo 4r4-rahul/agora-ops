@@ -76,6 +76,9 @@ MAX_CONTRACTS    = 3
 R_FREE           = 0.05
 VRP              = 0.15        # variance-risk-premium markup: IV ≈ HV20 × 1.15
 COMMISSION       = 0.65        # per contract per leg
+IV_CRUSH         = 0.0         # fractional IV decay over the hold (mean-reversion stress test):
+                              # sigma_t = sigma_entry × (1 - IV_CRUSH × min(age/10, 1)).
+                              # Set >0 to model IV reverting down after an oversold-fear entry.
 
 # Beta map (from _select_dte._BETA_MAP) for DTE beta-compression
 _BETA = {"TSLA": 2.1, "NVDA": 1.9, "AMD": 1.8, "MSTR": 3.5, "PLTR": 2.0,
@@ -330,7 +333,8 @@ def simulate_ticker(ticker: str, bars: list[dict]) -> tuple[list[Trade], list[di
             if dte_rem <= 0:
                 val = max(0.0, Sd - K) if opt == "call" else max(0.0, K - Sd)
             else:
-                val = bs_price(Sd, K, dte_rem / 365.0, R_FREE, sigma, opt)
+                sig_t = sigma * (1 - IV_CRUSH * min(age / 10.0, 1.0))
+                val = bs_price(Sd, K, dte_rem / 365.0, R_FREE, sig_t, opt)
             exit_val = val * (1 - slip)            # sell at bid
             cur_pct = exit_val / pay - 1.0
             peak = max(peak, cur_pct)
