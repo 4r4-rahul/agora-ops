@@ -1809,8 +1809,9 @@ class AgoraSession:
 
                 rec = decision.recommendation
                 # Shared heavy gates — long options now faces the same review as the main
-                # (spread) pipeline: timing / kill-switch / compliance / risk council / advocate.
-                if not await self._long_options_risk_gates(rec, ticker, spot):
+                # (spread) pipeline: timing / kill-switch / macro-cal / compliance / risk
+                # council / correlation / devils-advocate / LLM advocate.
+                if not await self._long_options_risk_gates(rec, ticker, spot, earnings_date):
                     continue
 
                 # Submit
@@ -2210,11 +2211,6 @@ class AgoraSession:
         scan_reason: str = "legacy",
     ) -> None:
         """Full signal stack for one ticker → trade recommendation → risk gate → order."""
-        # Master switch: the spread pipeline is disabled per Edge-Research evidence
-        # (unvalidated strategy, 0 held positions, ~$14/day LLM spend). Long options runs
-        # via its own independent loop and is unaffected. Reversible via the flag.
-        if not self._settings.spread_pipeline_enabled:
-            return
         _sector_direction_override: str | None = None   # set by sector momentum bypass
         try:
             # Error 201 session block: paper account can't do combo orders for this ticker.
@@ -3135,11 +3131,14 @@ class AgoraSession:
         except Exception as exc:
             logger.debug("long_peak save failed: %s", exc)
 
-    async def _long_options_risk_gates(self, rec: Any, ticker: str, spot: float) -> bool:
+    async def _long_options_risk_gates(
+        self, rec: Any, ticker: str, spot: float, earnings_date: Any = None,
+    ) -> bool:
         """Run the shared heavy gates on a long-options entry so it faces the SAME
         review as the main (spread) pipeline — previously it bypassed all of these:
-        entry-timing -> kill switch -> compliance -> risk council -> LLM advocate
-        (fail-closed). Returns True only when the trade clears every gate."""
+        entry-timing -> kill switch -> macro calendar -> compliance -> risk council
+        -> correlation -> devils advocate -> LLM advocate (fail-closed).
+        Returns True only when the trade clears every gate."""
         permitted, _why = self._entry_timing.is_entry_permitted()
         if not permitted:
             logger.info("LongOptions BLOCKED by timing gate [%s]: %s", ticker, _why)
@@ -3165,6 +3164,45 @@ class AgoraSession:
         if not rr.get("approved", False):
             logger.info("LongOptions BLOCKED by risk council [%s]: %s", ticker, rr.get("reason"))
             return False
+
+        # Correlation gate — parity with spreads. Blocks stacking near-duplicate
+        # same-direction directional bets (e.g. 5 correlated semis calls = one giant
+        # beta bet wearing five tickers); high/medium correlation reduces size instead.
+        try:
+            _corr = self._correlation_monitor.check(
+                new_ticker=ticker,
+                existing_positions=positions,
+                direction=getattr(rec, "direction", "neutral"),
+            )
+            if _corr.risk_level == "block":
+                logger.info("LongOptions BLOCKED by correlation [%s]: %s", ticker, _corr.block_reason)
+                return False
+            if _corr.conviction_adj < 0:
+                _pre = rec.contracts
+                _factor = 0.5 if _corr.risk_level == "high" else 0.75
+                rec.contracts = max(1, int(_pre * _factor))
+                logger.info(
+                    "LongOptions correlation %s [%s]: contracts %d → %d | %s",
+                    _corr.risk_level, ticker, _pre, rec.contracts, _corr.block_reason,
+                )
+        except Exception as _cex:
+            logger.debug("LongOptions correlation check failed [%s]: %s", ticker, _cex)
+
+        # DevilsAdvocate — 5-check deterministic pre-trade checklist (no LLM, no network).
+        # For long options the earnings-spans-expiry and macro-opposition checks are the
+        # material ones; vol-selling self-excludes (not a credit strategy) and the
+        # conviction floor (25) is already cleared by the min conviction-2 score (40).
+        _da_ok, _da_reason, _ = _devils_advocate(
+            recommendation=rec,
+            positions=positions,
+            macro_context=self._macro_context,
+            earnings_date=earnings_date,
+            is_pre_earnings=False,
+        )
+        if not _da_ok:
+            logger.info("LongOptions BLOCKED by DevilsAdvocate [%s]: %s", ticker, _da_reason)
+            return False
+
         # LLM advocate — adversarial review; fail closed when unavailable in live mode.
         if self._advocate is not None:
             # Give the advocate real direction/horizon context (was thesis=None, which

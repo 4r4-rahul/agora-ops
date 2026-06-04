@@ -728,36 +728,33 @@ class LongOptionsAgent:
             else:
                 stack["flow"] = "neutral"
 
-        # ── RSI MEAN-REVERSION — EVIDENCE-BASED (Edge Research Engine) ─────────
-        # Backtest 2023-2026 (12 mega-caps, n>300, lookahead-free, IV-crush-stressed,
-        # in-sample→out-of-sample validated): trend-following momentum was NEGATIVELY
-        # predictive (IC -0.035 @5d, -0.037 @10d) and lost -5.3%/trade out-of-sample.
-        # RSI MEAN-REVERSION is the real edge: buying oversold (RSI<40) CALLS returned
-        # ~+14%/trade OOS at a realistic 15% IV crush (PF 1.48), +23% with no crush.
-        # CRITICAL: this edge is narrow — adding rel-strength/momentum signals back
-        # turned it NEGATIVE OOS. So RSI<40 is the dominant standalone driver (worth the
-        # full conviction gate), and rel-strength is neutralized below. The call (dip-buy)
-        # side carries the edge; overbought puts are marginal (fight the drift) → kept weak.
+        # ── Momentum (RSI + SMA) ──────────────────────────────────────────────
         rsi       = momentum.get("rsi", 50.0)
         sma20_ok  = momentum.get("above_sma20", False)
         sma50_ok  = momentum.get("above_sma50", False)
-        if rsi < 40:
-            bull += 2
-            qual_bull += 1.6 * _pm("rsi_meanrev", "bullish")
-            stack["rsi_meanrev"] = f"oversold→BUY_CALL(RSI={rsi:.0f}){_wtag('rsi_meanrev','bullish')}"
-        elif rsi > 78:
+        if rsi > 55 and sma20_ok and sma50_ok:
+            bull += 1
+            qual_bull += 0.8 * _pm("momentum", "bullish")
+            stack["momentum"] = f"bullish(RSI={rsi:.0f}){_wtag('momentum','bullish')}"
+        elif rsi < 45 and not sma20_ok and not sma50_ok:
             bear += 1
-            qual_bear += 0.6 * _pm("rsi_meanrev", "bearish")
-            stack["rsi_meanrev"] = f"overbought→buy_put(RSI={rsi:.0f}){_wtag('rsi_meanrev','bearish')}"
+            qual_bear += 0.8 * _pm("momentum", "bearish")
+            stack["momentum"] = f"bearish(RSI={rsi:.0f}){_wtag('momentum','bearish')}"
         else:
-            stack["rsi_meanrev"] = f"neutral(RSI={rsi:.0f})"
+            stack["momentum"] = f"neutral(RSI={rsi:.0f})"
 
-        # ── Relative Strength — NEUTRALIZED (Edge Research Engine) ─────────────
-        # 10-day momentum had NEGATIVE IC (-0.017); re-adding it (even flipped to a fade)
-        # turned the OOS edge negative. Kept as advisory context only — ZERO conviction
-        # weight. Do not restore without an OOS-positive backtest.
+        # ── Relative Strength (10-day return alignment) ───────────────────────
         ret_10d = momentum.get("ret_10d", 0.0)
-        stack["rel_strength"] = f"advisory(ret10d={ret_10d:.1%})"
+        if ret_10d > 0.03:
+            bull += 1
+            qual_bull += 1.0 * _pm("rel_strength", "bullish")
+            stack["rel_strength"] = f"outperform+1(ret10d={ret_10d:.1%}){_wtag('rel_strength','bullish')}"
+        elif ret_10d < -0.03:
+            bear += 1
+            qual_bear += 1.0 * _pm("rel_strength", "bearish")
+            stack["rel_strength"] = f"underperform+1(ret10d={ret_10d:.1%}){_wtag('rel_strength','bearish')}"
+        else:
+            stack["rel_strength"] = f"neutral(ret10d={ret_10d:.1%})"
 
         # ── Volume surge (+1 to dominant direction when volume > 2× 20-day avg) ─
         if momentum.get("vol_surge", False):
