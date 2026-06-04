@@ -83,8 +83,6 @@ from agora.agents.strategy_selector import StrategySelectorAgent, StrategySelect
 from agora.agents.advocate_agent import AdvocateAgent
 from agora.agents.thesis_defender import ThesisDefenderAgent
 from agora.agents.exit_management import ExitIntelligenceAgent
-from agora.memory.semantic_store import SemanticTradeStore
-from agora.services.chart_renderer import render_chart_base64
 from agora.services.flow_detector import get_flow_signals
 
 logger = logging.getLogger(__name__)
@@ -597,13 +595,10 @@ class AgoraSession:
                 self._settings.thesis_defender_shadow_mode,
             )
 
-        # ── Semantic trade memory (ChromaDB) ──────────────────────────────────
-        self._semantic_store: SemanticTradeStore | None = None
-        try:
-            self._semantic_store = SemanticTradeStore(self._settings.chroma_db_path)
-            logger.info("SemanticTradeStore ready at %s", self._settings.chroma_db_path)
-        except Exception as _e:
-            logger.warning("SemanticTradeStore init failed (memory disabled): %s", _e)
+        # Semantic trade memory + chart-vision were swing-pipeline infra; dormant since
+        # swing was folded into long options. The modules remain for reuse (e.g. future
+        # vetter-vision) but are no longer spun up at startup. Re-instantiate here to re-enable.
+        self._semantic_store = None
 
         # ── ExitIntelligenceAgent (Phase 6 hourly position monitor) ───────────
         # Evaluates every open position hourly during market hours.
@@ -1253,7 +1248,7 @@ class AgoraSession:
         elapsed = (now_et - self._last_universe_scan_et).total_seconds()
         return elapsed >= self._scan_interval_seconds(now_et)
 
-    # ── Universe scan ──────────────────────────────────────────────
+    # ── Long options entry loop ────────────────────────────────────
 
     async def _long_options_loop(self) -> None:
         """
