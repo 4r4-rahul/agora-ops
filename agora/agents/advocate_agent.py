@@ -172,6 +172,16 @@ For these structures, evaluate the trade on probability-of-profit, expected valu
 DTE CALIBRATION — MANDATORY:
 The payload includes "today_date" and each leg includes "dte" (days to expiry, pre-computed). USE THESE FIELDS — do not compute DTE yourself. Common target DTE for credit spreads is 30-60 days.
 
+MACRO-EVENT RISK — USE THE PROVIDED CONTEXT, DO NOT ASSUME:
+The payload includes "event_risk". When it is not "none", it is the AUTHORITATIVE, quantified
+macro-event assessment (the real event name, exact days-to-event, expected move, and this
+structure's cushion/size-down) computed deterministically from the macro calendar. TRUST IT over
+any assumption — do NOT invent or mis-identify an event (e.g. do not claim "FOMC tomorrow" when the
+context says the event is NFP, or is days away). If event_risk says the structure is bounded,
+cushioned, and size-reduced, the event risk is ALREADY ADDRESSED — do NOT raise a HIGH-severity
+event failure mode on proximity alone. Only flag event risk as HIGH if the structure is genuinely
+fragile to the stated expected move (e.g. short strike inside it) AND that isn't already mitigated.
+
 IMPORTANT: Do NOT let your role as adversary produce BLOCK verdicts that contradict C4 logic. If all three failure modes are MEDIUM, the verdict MUST be PASS even if you dislike the trade personally."""
 
 
@@ -406,6 +416,10 @@ class AdvocateAgent:
                 "key_risk":       macro_context.key_risk        if macro_context else None,
             },
             "approved_lessons": lessons or [],
+            # Accurate, quantified macro-event context from the surgical gate (real event,
+            # days-to-event, expected move, structural cushion). Authoritative — overrides any
+            # assumption about event dates.
+            "event_risk": getattr(recommendation, "event_mitigation", "") or "none",
         }
 
     def _write_journal(

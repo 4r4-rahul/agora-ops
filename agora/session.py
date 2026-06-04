@@ -2906,6 +2906,69 @@ class AgoraSession:
             logger.error("Post-earnings trade build failed for %s: %s", result.ticker, exc)
 
 
+    def _event_risk_assessment(self, rec: Any, ticker: str, spot: float) -> tuple[str, str]:
+        """
+        Surgical macro-event (FOMC/CPI/NFP) handling. Returns (action, note) where
+        action ∈ {'allow','size_down','block'} and note is the QUANTIFIED context the
+        advocate reads (so it reasons on the real event/days/expected-move instead of an
+        assumed/mis-identified one — observed: advocate blocking on 'FOMC tomorrow' when
+        the real event was NFP and FOMC was 13 days out).
+
+        Asymmetric by risk shape:
+          • event DAY (calendar 'avoid') → hard block new multi-day risk.
+          • bounded-risk longs → size-down (keep 60%), no cushion gate.
+          • short-premium spreads → require nearest short strike ≥ 1.25× expected move;
+            else block as fragile. Survivors are size-reduced (keep 40%).
+        Mutates rec.contracts on size-down. No-op when flag off or no event within 2 days.
+        """
+        if not getattr(self._settings, "event_surgical_gate_enabled", True):
+            return ("allow", "")
+        try:
+            cal = get_macro_calendar()
+            days, event = cal.days_to_next_event()
+            risk = cal.get_risk_level()
+        except Exception as exc:
+            logger.debug("event assessment failed [%s]: %s", ticker, exc)
+            return ("allow", "")
+        if days is None or days > 2:
+            return ("allow", "")   # no macro event within the 2-day horizon
+
+        vix = float(getattr(self._macro_context, "vix", 18.0) or 18.0)
+        # VIX-implied 1-day move, scaled 1.5× because scheduled events move more than a
+        # typical session. Conservative first-pass; the attribution slice will refine it.
+        exp_move = (vix / 100.0) / (252 ** 0.5) * 1.5
+        strat = str(getattr(rec.strategy, "value", rec.strategy))
+        is_long = strat in ("long_call", "long_put")
+
+        if risk == "avoid" or days == 0:
+            return ("block", f"{event} is TODAY (calendar=avoid) — event-day block on new multi-day risk")
+
+        cushion_txt = ""
+        if not is_long:
+            short_strikes = [l.strike for l in (getattr(rec, "legs", None) or [])
+                             if str(getattr(l, "action", "")).lower() == "sell" and getattr(l, "strike", None)]
+            if short_strikes and spot > 0:
+                nearest = min(short_strikes, key=lambda k: abs(k - spot))
+                cushion = abs(nearest - spot) / spot
+                needed = 1.25 * exp_move
+                cushion_txt = f" Short-strike cushion {cushion*100:.1f}% vs needed {needed*100:.1f}%."
+                if cushion < needed:
+                    return ("block",
+                            f"{event} in {days}d: short strike too close "
+                            f"({cushion*100:.1f}% < {needed*100:.1f}% of a ~{exp_move*100:.1f}% expected move) — fragile")
+
+        _pre = rec.contracts
+        _factor = 0.6 if is_long else 0.4
+        rec.contracts = max(1, int(_pre * _factor))
+        if rec.contracts != _pre:
+            logger.info("Event gate [%s]: %s in %dd — size %d→%d (%s)",
+                        ticker, event, days, _pre, rec.contracts, "long" if is_long else "spread")
+        note = (f"EVENT RISK (quantified, accurate): {event} in {days}d, calendar risk={risk}. "
+                f"Expected 1-day move ~{exp_move*100:.1f}%.{cushion_txt} Structure assessed and "
+                f"size-reduced ({_pre}→{rec.contracts}); risk is bounded/cushioned. Do NOT block on "
+                f"event proximity alone — only on a distinct, high-severity, well-evidenced risk.")
+        return ("size_down", note)
+
     async def _entry_gate(
         self, rec: Any, ticker: str, spot: float, positions: list,
         earnings_date: Any = None, is_pre_earnings: bool = False, chain_id: str = "",
@@ -2936,6 +2999,14 @@ class AgoraSession:
         _can_trade, _cal_why = get_macro_calendar().should_trade()
         if not _can_trade:
             return _block(f"macro calendar: {_cal_why}", ["timing"])
+        # Surgical macro-event handling: hard-block event day, size-down adjacent, cushion-check
+        # spreads, and stamp accurate event context onto the rec for the advocate (replaces the
+        # advocate's blanket over-blocking on assumed/mis-identified events). Runs before risk
+        # council so the size-down is reflected in the greeks/contract checks.
+        _evt_action, _evt_note = self._event_risk_assessment(rec, ticker, spot)
+        rec.event_mitigation = _evt_note
+        if _evt_action == "block":
+            return _block(f"event: {_evt_note}", ["timing", "macro_cal"])
         comp = self._compliance.check_trade(rec, positions)
         if not comp.get("compliant", True):
             return _block(f"compliance: {comp.get('reason')}", ["timing", "macro_cal"])

@@ -127,6 +127,14 @@ class AgoraSettings(BaseSettings):
     disagreement_resolver_floor: float = Field(default=40.0, description="Hard no-trade floor in DisagreementResolver. Lower for paper-mode validation.")
     min_credit_per_share: float = Field(default=0.50, description="Minimum credit collected per share for credit spreads. $0.50 avoids IBKR leg rejections in live; lower in paper mode.")
     force_vol_selling_ok: bool = Field(default=False, description="Paper-mode override: bypass MacroContext.vol_selling_ok=False gate. Lets credit spreads through when IVR/VIX are just below threshold.")
+    event_surgical_gate_enabled: bool = Field(
+        default=True,
+        description="Surgical macro-event (FOMC/CPI/NFP) handling: instead of blanket-blocking "
+                    "near events, hard-block only the event DAY, size-down event-adjacent entries, "
+                    "require short-strike cushion >= 1.25x expected move for credit spreads, and feed "
+                    "the advocate ACCURATE quantified event context so it stops over-blocking on "
+                    "mis-identified/assumed events. Set false to revert to blanket behavior.",
+    )
 
     # ── Universe ───────────────────────────────────────────────────
     etf_universe: list[str] = Field(

@@ -200,6 +200,9 @@ class TradeRecommendation(BaseModel):
     conviction_score: float = 0.0
     size_multiplier: float = 1.0
     reasoning: str = ""
+    # Quantified macro-event (FOMC/CPI/NFP) context set by the surgical event gate and read
+    # by the advocate, so it reasons on real event/days/expected-move instead of assumptions.
+    event_mitigation: str = ""
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 
 
