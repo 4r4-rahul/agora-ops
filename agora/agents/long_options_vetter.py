@@ -25,6 +25,7 @@ Cost: ~$0.02–0.06/call depending on thinking depth. Only fires on proceed deci
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import sqlite3
@@ -38,6 +39,21 @@ import anthropic
 logger = logging.getLogger(__name__)
 
 _MODEL = "claude-opus-4-8"
+
+# Transient Anthropic errors worth retrying before falling back to UNVETTED. The vetter
+# fails open (vet() returns None → trade proceeds without LLM review), so a momentary
+# 429/timeout silently drops the quality gate. This matters most under the parallel long
+# loop, where concurrent Opus calls make rate-limit bursts more likely — retry-with-backoff
+# recovers the gate instead of skipping it. Non-transient errors (parse, etc.) are NOT
+# retried here; they propagate to vet()'s catch and fall back to unvetted as before.
+_RETRYABLE_ERRORS = tuple(
+    e for e in (
+        getattr(anthropic, "APITimeoutError", None),
+        getattr(anthropic, "APIConnectionError", None),
+        getattr(anthropic, "RateLimitError", None),
+        getattr(anthropic, "InternalServerError", None),
+    ) if e is not None
+)
 
 _SYSTEM = """You are a senior options trader at a prop desk. Your role is quality control on proposed long option swing trades before capital is committed.
 
@@ -195,14 +211,7 @@ class LongOptionsVetterAgent:
             )
 
         t0 = time.monotonic()
-        response = await self._client.messages.create(
-            model       = _MODEL,
-            max_tokens  = 512,
-            thinking    = {"type": "adaptive"},
-            system      = _SYSTEM,
-            messages    = [{"role": "user", "content": prompt}],
-            timeout     = anthropic.Timeout(connect=10.0, read=45.0, write=10.0, pool=10.0),
-        )
+        response = await self._create_with_retry(prompt, decision.ticker)
         latency_ms = (time.monotonic() - t0) * 1000
 
         raw_text = next(
@@ -245,6 +254,32 @@ class LongOptionsVetterAgent:
         )
 
         return verdict
+
+    async def _create_with_retry(self, prompt: str, ticker: str, attempts: int = 3,
+                                 base_backoff: float = 1.5):
+        """Call Opus, retrying transient Anthropic errors with exponential backoff.
+        Re-raises the last error after `attempts` tries (vet() then falls back to unvetted)."""
+        last_exc = None
+        for i in range(attempts):
+            try:
+                return await self._client.messages.create(
+                    model       = _MODEL,
+                    max_tokens  = 512,
+                    thinking    = {"type": "adaptive"},
+                    system      = _SYSTEM,
+                    messages    = [{"role": "user", "content": prompt}],
+                    timeout     = anthropic.Timeout(connect=10.0, read=45.0, write=10.0, pool=10.0),
+                )
+            except _RETRYABLE_ERRORS as exc:
+                last_exc = exc
+                if i < attempts - 1:
+                    wait = base_backoff * (2 ** i)
+                    logger.warning(
+                        "LongOptionsVetter transient API error [%s] attempt %d/%d: %s — "
+                        "retrying in %.1fs", ticker, i + 1, attempts, type(exc).__name__, wait,
+                    )
+                    await asyncio.sleep(wait)
+        raise last_exc
 
     def journal(
         self,

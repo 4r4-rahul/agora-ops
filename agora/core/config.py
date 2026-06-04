@@ -127,6 +127,21 @@ class AgoraSettings(BaseSettings):
     disagreement_resolver_floor: float = Field(default=40.0, description="Hard no-trade floor in DisagreementResolver. Lower for paper-mode validation.")
     min_credit_per_share: float = Field(default=0.50, description="Minimum credit collected per share for credit spreads. $0.50 avoids IBKR leg rejections in live; lower in paper mode.")
     force_vol_selling_ok: bool = Field(default=False, description="Paper-mode override: bypass MacroContext.vol_selling_ok=False gate. Lets credit spreads through when IVR/VIX are just below threshold.")
+    long_loop_parallel_enabled: bool = Field(
+        default=False,
+        description="Process the long-options universe scan with a bounded worker pool "
+                    "(concurrent coroutines) instead of sequentially. Default OFF — turn ON "
+                    "when a long-scan cycle measurably approaches the scan interval. The worker "
+                    "pool size below doubles as the LLM-burst cap (each worker makes <=1 "
+                    "vetter+advocate call at a time). Safeguards: atomic position-cap, per-worker "
+                    "isolation, yf_gate on data, vetter retry.",
+    )
+    long_loop_max_concurrency: int = Field(
+        default=4,
+        description="Bounded worker-pool size for the parallel long-options scan; also caps "
+                    "concurrent Opus-vetter/advocate calls (cost stays flat, bursts controlled).",
+        ge=1, le=12,
+    )
     event_surgical_gate_enabled: bool = Field(
         default=True,
         description="Surgical macro-event (FOMC/CPI/NFP) handling: instead of blanket-blocking "

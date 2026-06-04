@@ -1290,6 +1290,11 @@ class AgoraSession:
         max_hold      = self._settings.long_options_max_hold_days   # used to set time-stop date at entry
         agent         = self._long_options_agent
 
+        # Serializes the rare submit critical section so concurrent workers (parallel mode,
+        # long_loop_parallel_enabled) can never over-open past the position cap. Created here
+        # while the event loop is running. Harmless in sequential mode (uncontended).
+        self._long_submit_lock = asyncio.Lock()
+
         # Stagger: 210s after the spread pipeline to spread out IBKR load
         await asyncio.sleep(210)
 
@@ -1337,22 +1342,27 @@ class AgoraSession:
             # evaluate the same ticker (observed with FLNC at 13:13/13:14, MU 3× same session)
             _submitted_this_cycle: set[str] = set()
 
-            for ticker in universe:
+            async def _process_one(ticker: str) -> None:
+                # Per-ticker processor — body shared by the sequential and bounded-parallel
+                # dispatch below. Each `return` here ends THIS ticker only (was `continue`/
+                # `break` in the original sequential loop). Per-worker isolation: the dispatch
+                # wraps this in try/except so one ticker's failure never kills the cycle.
                 if not self._running:
-                    break
+                    return
 
-                # Re-check cap mid-loop
+                # Re-check cap (best-effort skip when already full — the binding, race-free
+                # cap check is re-done atomically under _long_submit_lock at submit time)
                 open_positions = self._position_mgr.get_open_positions()
                 long_count = sum(
                     1 for p in open_positions
                     if str(getattr(p.strategy, "value", p.strategy)) in ("long_call", "long_put")
                 )
                 if long_count >= self._settings.long_options_max_positions:
-                    break
+                    return
 
                 # Duplicate ticker gate
                 if any(p.ticker == ticker for p in open_positions):
-                    continue
+                    return
 
                 # Earnings blackout gate + days_to_catalyst computation
                 earnings_date     = None
@@ -1366,7 +1376,7 @@ class AgoraSession:
                                 "LongOptions skip %s — earnings in %dd (blackout)",
                                 ticker, days_to_earnings,
                             )
-                            continue
+                            return
                         if days_to_earnings > 0:
                             days_to_catalyst = days_to_earnings
                 except Exception:
@@ -1415,10 +1425,10 @@ class AgoraSession:
                     )
                 except Exception as exc:
                     logger.debug("LongOptions chain fetch error [%s]: %s", ticker, exc)
-                    continue
+                    return
 
                 if not chain_dict:
-                    continue
+                    return
 
                 # Spot price
                 try:
@@ -1434,7 +1444,7 @@ class AgoraSession:
                 except Exception:
                     spot = 0.0
                 if spot <= 0:
-                    continue
+                    return
 
                 # Momentum (RSI14 + SMA20/50 + 10d return) — also returns closes for IVR
                 momentum: dict = {}
@@ -1552,7 +1562,7 @@ class AgoraSession:
                             "LongOptions [%s] skip — net delta %.0f ≥ budget %.0f",
                             ticker, _net_delta, _delta_budget,
                         )
-                        continue
+                        return
                 except Exception:
                     pass
 
@@ -1592,7 +1602,7 @@ class AgoraSession:
                 if decision.recommendation is None:
                     if decision.block_reason:
                         logger.debug("LongOptions [%s] skip: %s", ticker, decision.block_reason)
-                    continue
+                    return
 
                 # ── Opus 4.8 quality vetter (shadow or live) ─────────────────
                 if self._long_vetter is not None:
@@ -1611,7 +1621,7 @@ class AgoraSession:
                                         "LongOptions vetter BLOCK [%s] conf=%d: %s",
                                         ticker, verdict.confidence, verdict.key_risk,
                                     )
-                                    continue
+                                    return
                                 elif verdict.verdict == "reduce" and verdict.adjusted_contracts:
                                     adj = max(1, verdict.adjusted_contracts)
                                     if adj < decision.contracts:
@@ -1634,66 +1644,107 @@ class AgoraSession:
                 # Per-cycle dedupe gate
                 if ticker in _submitted_this_cycle:
                     logger.debug("LongOptions [%s] skipped — already submitted this cycle", ticker)
-                    continue
+                    return
 
                 rec = decision.recommendation
                 # Shared heavy gates — long options now faces the same review as the main
                 # (spread) pipeline: timing / kill-switch / macro-cal / compliance / risk
                 # council / correlation / devils-advocate / LLM advocate.
                 if not await self._long_options_risk_gates(rec, ticker, spot, earnings_date):
-                    continue
+                    return
 
-                # Submit
-                logger.info(
-                    "LongOptions SUBMITTING [%s] %s strike=%.0f exp=%s prem=$%.2f "
-                    "contracts=%d conviction=%d ptIVR=%.0f",
-                    ticker, decision.strategy, decision.strike,
-                    rec.legs[0].expiration, decision.premium,
-                    decision.contracts, decision.conviction,
-                    decision.per_ticker_ivr,
-                )
-                # Record the attempt BEFORE submitting so the fill-rate metric has a
-                # proper denominator (long path previously called record_fill with no
-                # preceding record_attempt, corrupting the fill rate).
-                self._exec_quality.record_attempt(ticker, str(decision.strategy), decision.premium)
-                try:
-                    order = await submit_trade(rec, self._settings, self._session_id)
-                    order_status = order.get("status", "")
-                    logger.info(
-                        "LongOptions order [%s]: status=%s order_id=%s",
-                        ticker, order_status, order.get("order_id"),
+                # ── Submit — ATOMIC cap safeguard ────────────────────────────────
+                # Serialize the rare submit critical section under a lock and RE-CHECK the
+                # live cap inside it, so concurrent workers (parallel mode) can never each
+                # pass a stale cap check and over-open. Submits are infrequent (most tickers
+                # return earlier), so serializing them costs ~nothing and also de-races IBKR.
+                async with self._long_submit_lock:
+                    _open_now = self._position_mgr.get_open_positions()
+                    _live_longs = sum(
+                        1 for p in _open_now
+                        if str(getattr(p.strategy, "value", p.strategy)) in ("long_call", "long_put")
                     )
-                    if order_status == "Filled":
-                        fills      = order.get("fills", [])
-                        fill_price = float(fills[0]["price"]) if fills else decision.premium
-                        time_stop_date = _date.today() + timedelta(days=max_hold)
-                        position_id = self._record_position(
-                            rec,
-                            ibkr_order_id=order.get("order_id", -1),
-                            regime=self._macro_context.macro_stance if self._macro_context else "",
-                            earnings_date=earnings_date,
-                            is_pre_earnings=False,
-                            spot=spot,
-                            fill_price=fill_price,
-                            target_close_date_override=time_stop_date,
-                            extra_metadata={
-                                "profit_target_pct": decision.profit_target_pct,
-                                "signal_quality":    decision.signal_quality,
-                                "conviction":        decision.conviction,
-                            },
+                    if _live_longs >= self._settings.long_options_max_positions:
+                        logger.debug("LongOptions [%s] cap reached at submit (%d/%d) — skip",
+                                     ticker, _live_longs, self._settings.long_options_max_positions)
+                        return
+                    logger.info(
+                        "LongOptions SUBMITTING [%s] %s strike=%.0f exp=%s prem=$%.2f "
+                        "contracts=%d conviction=%d ptIVR=%.0f",
+                        ticker, decision.strategy, decision.strike,
+                        rec.legs[0].expiration, decision.premium,
+                        decision.contracts, decision.conviction,
+                        decision.per_ticker_ivr,
+                    )
+                    # Record the attempt BEFORE submitting so the fill-rate metric has a
+                    # proper denominator (long path previously called record_fill with no
+                    # preceding record_attempt, corrupting the fill rate).
+                    self._exec_quality.record_attempt(ticker, str(decision.strategy), decision.premium)
+                    try:
+                        order = await submit_trade(rec, self._settings, self._session_id)
+                        order_status = order.get("status", "")
+                        logger.info(
+                            "LongOptions order [%s]: status=%s order_id=%s",
+                            ticker, order_status, order.get("order_id"),
                         )
-                        agent.journal(decision, str(self._settings.db_path), position_id or "")
-                        self._exec_quality.record_fill(ticker, fill_price, decision.premium, decision.strategy)
-                        _submitted_this_cycle.add(ticker)
-                    elif order_status in ("Cancelled", "ApiCancelled", "Inactive"):
-                        self._exec_quality.record_reject(
-                            ticker, str(order.get("error_code", "")),
-                            order.get("reason", ""), decision.strategy,
-                        )
-                except Exception as submit_exc:
-                    logger.warning("LongOptions submit error [%s]: %r", ticker, submit_exc, exc_info=True)
+                        if order_status == "Filled":
+                            fills      = order.get("fills", [])
+                            fill_price = float(fills[0]["price"]) if fills else decision.premium
+                            time_stop_date = _date.today() + timedelta(days=max_hold)
+                            position_id = self._record_position(
+                                rec,
+                                ibkr_order_id=order.get("order_id", -1),
+                                regime=self._macro_context.macro_stance if self._macro_context else "",
+                                earnings_date=earnings_date,
+                                is_pre_earnings=False,
+                                spot=spot,
+                                fill_price=fill_price,
+                                target_close_date_override=time_stop_date,
+                                extra_metadata={
+                                    "profit_target_pct": decision.profit_target_pct,
+                                    "signal_quality":    decision.signal_quality,
+                                    "conviction":        decision.conviction,
+                                },
+                            )
+                            agent.journal(decision, str(self._settings.db_path), position_id or "")
+                            self._exec_quality.record_fill(ticker, fill_price, decision.premium, decision.strategy)
+                            _submitted_this_cycle.add(ticker)
+                        elif order_status in ("Cancelled", "ApiCancelled", "Inactive"):
+                            self._exec_quality.record_reject(
+                                ticker, str(order.get("error_code", "")),
+                                order.get("reason", ""), decision.strategy,
+                            )
+                    except Exception as submit_exc:
+                        logger.warning("LongOptions submit error [%s]: %r", ticker, submit_exc, exc_info=True)
 
-                await asyncio.sleep(2)
+            # ── Dispatch: bounded parallel (flag ON) or sequential (default OFF) ──
+            # Same _process_one body either way — parallel just overlaps the per-ticker
+            # data fetch + LLM latency. Data stays safe (yf_gate throttle+cache); the
+            # worker-pool size caps concurrent Opus/advocate calls (LLM-burst control);
+            # the position cap is enforced atomically inside _process_one (above).
+            if self._settings.long_loop_parallel_enabled:
+                _sem = asyncio.Semaphore(max(1, self._settings.long_loop_max_concurrency))
+
+                async def _guarded(_t: str) -> None:
+                    if not self._running:
+                        return
+                    async with _sem:
+                        try:
+                            await _process_one(_t)
+                        except Exception as _wexc:
+                            logger.error("LongOptions parallel worker [%s]: %r",
+                                         _t, _wexc, exc_info=True)
+
+                await asyncio.gather(*[_guarded(t) for t in universe])
+            else:
+                for ticker in universe:
+                    if not self._running:
+                        break
+                    try:
+                        await _process_one(ticker)
+                    except Exception as _wexc:
+                        logger.error("LongOptions worker [%s]: %r", ticker, _wexc, exc_info=True)
+                    await asyncio.sleep(2)   # inter-ticker pacing (sequential only)
 
             await asyncio.sleep(interval_secs)
 
