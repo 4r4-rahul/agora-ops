@@ -71,6 +71,11 @@ class PositionManager:
         self._db = self._init_db()
         self._running = False
         self._profit_engine = IntelligentProfitEngine()
+        # LLM exit intelligence (thesis re-validation) — injected by the session via
+        # set_exit_agent(). PositionManager is the single exit owner, so it runs this
+        # itself for EVERY strategy rather than a separate patrol loop. None → skipped.
+        self._exit_agent = None
+        self._macro_ctx = None
         # Long-options trailing-stop high-water marks (position_id → peak P&L fraction).
         # Persisted so a restart does not reset the trail and convert a locked winner
         # back into a runner. This is exit state, so it lives with the exit owner.
@@ -80,6 +85,12 @@ class PositionManager:
     def set_macro_context(self, ctx: Any) -> None:
         """Called by session after every macro synthesis — keeps engine regime-aware."""
         self._profit_engine.set_macro_context(ctx)
+        self._macro_ctx = ctx
+
+    def set_exit_agent(self, agent: Any) -> None:
+        """Inject the ExitIntelligenceAgent so PositionManager can run the LLM thesis
+        re-validation itself (single exit owner). Called once by the session at startup."""
+        self._exit_agent = agent
 
     def set_price_target_for_position(
         self, position_id: str, aligned_return_pct: float, entry_spot: float
@@ -449,6 +460,12 @@ class PositionManager:
                 )
             return
 
+        # ── LLM thesis re-validation (intelligence layer, single owner) ──────────────
+        # Spreads use the analyst_journal thesis (agent's default lookup). Closes early
+        # only on a genuine thesis break, after the deterministic floors above.
+        if await self._maybe_llm_exit(position, is_long=False):
+            return
+
         # Mark as TESTED if underlying through short strike
         await self._check_tested_status(position)
 
@@ -467,6 +484,78 @@ class PositionManager:
             self._long_peak_path.write_text(json.dumps(self._long_peak_pnl))
         except Exception as exc:
             logger.debug("long_peak save failed: %s", exc)
+
+    def _long_thesis_for(self, position_id: str) -> dict:
+        """Build an ExitIntelligenceAgent thesis dict from the long_journal entry, so the
+        agent can re-validate a long position with real context (its thesis lives in
+        long_journal, not analyst_journal). {} → agent evaluates on position state alone."""
+        try:
+            with sqlite3.connect(str(self._settings.db_path), timeout=5) as conn:
+                row = conn.execute(
+                    """SELECT direction, conviction_score, signal_stack, decided_at_utc,
+                              regime, flow_direction
+                       FROM long_journal WHERE position_id=? AND outcome='proceed'
+                       ORDER BY journal_id DESC LIMIT 1""",
+                    (position_id,),
+                ).fetchone()
+            if not row:
+                return {}
+            try:
+                stack = json.loads(row[2] or "{}")
+            except Exception:
+                stack = {}
+            return {
+                "direction":       row[0],
+                "magnitude_pct":   None,
+                "horizon_days":    self._settings.long_options_max_hold_days,
+                "confidence_pct":  row[1],
+                "strategy_family": "long_directional",
+                "kill_conditions": [
+                    "directional thesis broken — trend or institutional flow reversed",
+                    "underlying RSI hit an extreme against the position",
+                    "expected catalyst passed with no follow-through",
+                ],
+                "reasoning_trace": f"entry signals={stack} | regime={row[4]} | flow={row[5]}",
+                "thesis_date":     row[3],
+            }
+        except Exception as exc:
+            logger.debug("_long_thesis_for failed [%s]: %s", position_id, exc)
+            return {}
+
+    async def _maybe_llm_exit(self, position: OpenPosition, is_long: bool) -> bool:
+        """
+        Throttled LLM thesis re-validation — the intelligence layer of the single exit
+        owner, run for EVERY strategy after the deterministic checks. Returns True if it
+        closed the position.
+
+        Division of labor (avoids the over-aggressive churn seen when any CLOSE_NOW was
+        honored): the deterministic floors own profit-taking / stops / time; the LLM owns
+        THESIS BREAK only. So we act on its close ONLY when the thesis is genuinely
+        INVALIDATED or a kill condition TRIGGERED — not on a soft "WEAKENING" read.
+        """
+        agent = self._exit_agent
+        if agent is None:
+            return False
+        try:
+            interval = getattr(self._settings, "exit_intelligence_interval_hours", 1.0)
+            if not agent.should_evaluate(position.position_id, interval):
+                return False
+            thesis = self._long_thesis_for(position.position_id) if is_long else None
+            rec = await agent.evaluate(position, self._macro_ctx, thesis_override=thesis, act=False)
+            if rec is None or agent.shadow_mode:
+                return False
+            strong = rec.kill_triggered or rec.thesis_validity == "INVALIDATED"
+            if rec.should_close and strong:
+                reason = f"LLM thesis-exit: {rec.thesis_validity}/{rec.kill_condition_status} | " \
+                         f"{(rec.recommendation_reasoning or '')[:60]}"
+                if is_long:
+                    await self._close_long(position, reason, "thesis_exit")
+                else:
+                    await self._close_position(position, reason, source="thesis_exit")
+                return True
+        except Exception as exc:
+            logger.warning("LLM exit check failed [%s]: %s", position.ticker, exc)
+        return False
 
     async def _close_long(self, position: OpenPosition, reason: str, source: str) -> None:
         """Close a long-options position via the canonical path, then fire the
@@ -547,6 +636,10 @@ class PositionManager:
                         position.ticker, pnl_pct * 100, stop_tgt * 100)
             await self._close_long(position, f"stop loss {pnl_pct*100:.0f}%", "stop_loss")
             return
+
+        # E. LLM thesis re-validation (intelligence layer) — closes early only on a
+        # genuine thesis break, after the deterministic floors above had their say.
+        await self._maybe_llm_exit(position, is_long=True)
 
     @staticmethod
     def _fetch_spot_sync(ticker: str) -> float:

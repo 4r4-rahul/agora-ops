@@ -615,8 +615,11 @@ class AgoraSession:
                 shadow_mode=self._settings.exit_intelligence_shadow_mode,
                 on_close_callback=self._exit_agent_close_position,
             )
+            # Hand the agent to PositionManager — the single exit owner runs the LLM
+            # thesis check itself (for spreads AND longs), instead of a separate patrol.
+            self._position_mgr.set_exit_agent(self._exit_agent)
             logger.info(
-                "ExitIntelligenceAgent configured: shadow=%s interval=%.1fh",
+                "ExitIntelligenceAgent configured (owned by PositionManager): shadow=%s interval=%.1fh",
                 self._settings.exit_intelligence_shadow_mode,
                 self._settings.exit_intelligence_interval_hours,
             )
@@ -787,7 +790,8 @@ class AgoraSession:
             self._session_loop(),
             self._price_monitor_loop(),
             *(([self._scan_engine.start()]) if self._scan_engine else []),
-            *(([self._exit_intelligence_loop()]) if self._exit_agent else []),
+            # Exit intelligence is no longer a separate loop — PositionManager (the single
+            # exit owner) runs the ExitIntelligenceAgent itself for every position.
             *(([self._long_options_loop()]) if self._long_options_agent else []),
         )
 
@@ -1281,41 +1285,6 @@ class AgoraSession:
         return elapsed >= self._scan_interval_seconds(now_et)
 
     # ── Universe scan ──────────────────────────────────────────────
-
-    async def _exit_intelligence_loop(self) -> None:
-        """
-        ExitIntelligenceAgent hourly patrol — evaluates every open SPREAD position.
-        Only runs during market hours (10:00–15:30 ET). Skips positions that
-        were evaluated within exit_intelligence_interval_hours.
-
-        Long options are deliberately excluded here: their dedicated _long_options_loop
-        is the single exit owner and runs this same agent itself (with proper long_journal
-        thesis context). Evaluating them here too would mean two exit owners on one
-        position and a degraded check (no thesis in analyst_journal).
-        """
-        while self._running:
-            await asyncio.sleep(3600)   # initial wait — PositionManager has time to load
-            if self._exit_agent is None:
-                break
-            now_et = datetime.now(tz=ET)
-            if now_et.weekday() >= 5:
-                continue
-            if not (time(10, 0) <= now_et.time() <= time(15, 30)):
-                continue
-            positions = self._position_mgr.get_open_positions()
-            if not positions:
-                continue
-            interval = self._settings.exit_intelligence_interval_hours
-            for pos in positions:
-                try:
-                    _strat = str(getattr(pos.strategy, "value", pos.strategy))
-                    if _strat in ("long_call", "long_put"):
-                        continue   # owned by _long_options_loop
-                    if not self._exit_agent.should_evaluate(pos.position_id, interval):
-                        continue
-                    await self._exit_agent.evaluate(pos, self._macro_context)
-                except Exception as exc:
-                    logger.warning("ExitAgent loop error for %s: %s", pos.ticker, exc)
 
     async def _long_options_loop(self) -> None:
         """
@@ -2999,47 +2968,6 @@ class AgoraSession:
                 )
         except Exception as exc:
             logger.error("Post-earnings trade build failed for %s: %s", result.ticker, exc)
-
-    def _long_thesis_for(self, position_id: str) -> dict:
-        """
-        Build an ExitIntelligenceAgent thesis dict from the long_journal entry, so the
-        exit agent can re-validate long options with real context (their thesis lives in
-        long_journal, not analyst_journal). Returns {} if no entry — the agent then
-        evaluates on position state alone.
-        """
-        try:
-            import sqlite3, json as _json
-            with sqlite3.connect(str(self._settings.db_path), timeout=5) as conn:
-                row = conn.execute(
-                    """SELECT direction, conviction_score, signal_stack, decided_at_utc,
-                              regime, flow_direction
-                       FROM long_journal WHERE position_id=? AND outcome='proceed'
-                       ORDER BY journal_id DESC LIMIT 1""",
-                    (position_id,),
-                ).fetchone()
-            if not row:
-                return {}
-            try:
-                stack = _json.loads(row[2] or "{}")
-            except Exception:
-                stack = {}
-            return {
-                "direction":       row[0],
-                "magnitude_pct":   None,
-                "horizon_days":    self._settings.long_options_max_hold_days,
-                "confidence_pct":  row[1],
-                "strategy_family": "long_directional",
-                "kill_conditions": [
-                    "directional thesis broken — trend or institutional flow reversed",
-                    "underlying RSI hit an extreme against the position",
-                    "expected catalyst passed with no follow-through",
-                ],
-                "reasoning_trace": f"entry signals={stack} | regime={row[4]} | flow={row[5]}",
-                "thesis_date":     row[3],
-            }
-        except Exception as exc:
-            logger.debug("_long_thesis_for failed [%s]: %s", position_id, exc)
-            return {}
 
 
     async def _long_options_risk_gates(
