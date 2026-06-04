@@ -122,8 +122,11 @@ class MacroSynthesizer:
             # Explicit longer connect timeout — startup contention from 20+ agents opening
             # connections simultaneously can delay TCP handshake beyond the 5s default.
             _t0 = _time.monotonic()
+            # Foundational: the macro regime/stance gates every trade in the system, so
+            # this stays on the primary (Sonnet) model — NOT the cheaper brief tier.
+            _macro_model = self._settings.claude_model
             response = await self._client.messages.create(
-                model=self._settings.claude_brief_model,
+                model=_macro_model,
                 max_tokens=512,
                 system=_CACHED_SYSTEM,
                 messages=[{"role": "user", "content": _compress_text(state_summary)}],
@@ -133,7 +136,7 @@ class MacroSynthesizer:
             if hasattr(response, "usage"):
                 _log_msg(
                     str(self._settings.db_path), "MacroSynthesizer",
-                    self._settings.claude_brief_model,
+                    _macro_model,
                     response.usage,
                     purpose="macro_synthesis",
                 )

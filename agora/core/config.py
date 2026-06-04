@@ -32,8 +32,10 @@ class AgoraSettings(BaseSettings):
         description="Fast model for high-frequency classification tasks",
     )
     claude_brief_model: str = Field(
-        default="claude-sonnet-4-6",
-        description="Sonnet model for C-suite departmental briefs — cost-efficient vs Opus for high-frequency brief generation",
+        default="claude-haiku-4-5-20251001",
+        description="Haiku for oversight/summary work (C-suite briefs, sector/earnings/"
+                    "premarket/system-health summaries) — these don't make trade decisions, "
+                    "so the ~3x cheaper model is right-sized. Decision agents use claude_model.",
     )
 
     # ── Trading ────────────────────────────────────────────────────

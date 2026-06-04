@@ -442,8 +442,12 @@ class ExecutiveAgent:
     ) -> str:
         """
         Stream a Claude response.
-        Defaults to Sonnet (claude_brief_model) for cost efficiency on high-frequency C-suite briefs.
-        Pass model=self._settings.claude_model for Opus when synthesis quality matters.
+        Defaults to the brief tier (Haiku) for cost efficiency on high-frequency C-suite
+        oversight briefs. Pass model=self._settings.claude_model for Sonnet when needed.
+
+        No prompt caching here: the C-suite patrol runs each role >5 min apart, so the
+        ephemeral cache (5-min TTL) always expired before reuse — every call was a cache
+        WRITE (1.25x) with zero reads, i.e. caching made these strictly more expensive.
         """
         _model = model or self._settings.claude_brief_model
         try:
@@ -451,11 +455,7 @@ class ExecutiveAgent:
                 model=_model,
                 max_tokens=1024,
                 thinking={"type": "adaptive"},
-                system=[{
-                    "type": "text",
-                    "text": self._system_prompt,
-                    "cache_control": {"type": "ephemeral"},
-                }],
+                system=self._system_prompt,
                 messages=[{"role": "user", "content": prompt}],
                 output_config={"effort": effort},
             ) as stream:

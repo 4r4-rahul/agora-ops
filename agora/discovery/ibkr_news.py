@@ -315,11 +315,9 @@ class IBKRNewsAgent:
             response = await self._client.messages.create(
                 model="claude-haiku-4-5-20251001",
                 max_tokens=256,
-                system=[{
-                    "type": "text",
-                    "text": _SYSTEM_PROMPT,
-                    "cache_control": {"type": "ephemeral"},
-                }],
+                # No prompt caching: news arrives sparsely (>5-min gaps), so the ephemeral
+                # cache always expired before reuse — every call was a 1.25x write, 0 reads.
+                system=_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": _compress_text(body, max_chars=4000)}],
             )
             if hasattr(response, "usage") and hasattr(self._settings, "db_path"):
