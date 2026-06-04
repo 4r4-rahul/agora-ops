@@ -126,10 +126,12 @@ class StrategySelectorAgent:
     with the corrected strategy_type, while a 'no_structure' decision blocks submission.
     """
 
-    # Result cache TTL — reuse a selection for the same ticker/conviction/pillar
-    # within one scan cycle (30 min) to avoid burning LLM tokens on repeated
-    # evaluations that differ only in market microstructure noise.
-    _CACHE_TTL_SECS = 1800
+    # Result cache TTL — reuse a selection for the same ticker / conviction-band /
+    # pillar / direction. The chosen STRUCTURE for a given setup does not change within
+    # a couple of hours, so a 30-min TTL just re-bought the same answer ~13x/ticker/day.
+    # 2h aligns with the advocate/defender debate cooldown and is quality-neutral: the
+    # key already buckets conviction (nearest 5), so a real setup change still re-runs.
+    _CACHE_TTL_SECS = 7200
 
     def __init__(self, settings: Any, shadow_mode: bool = True) -> None:
         self._settings    = settings

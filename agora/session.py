@@ -3440,7 +3440,13 @@ class AgoraSession:
                 _time_ok  = (_now_ts - _c_ts) < self._ADVOCATE_COOLDOWN_SECS
                 _macro_ok = _c_macro == _cur_macro
                 _spot_ok  = abs(_cur_spot - _c_spot) / max(_c_spot, 1.0) < 0.03
-                _pos_ok   = _c_pos_cnt == _cur_pos_cnt
+                # Tolerant position-count match. The per-ticker debate verdict is driven by
+                # THIS ticker's setup + macro, not the exact portfolio size — concentration is
+                # already enforced deterministically upstream (risk council + correlation gate).
+                # An exact match meant any unrelated long open/close busted EVERY ticker's
+                # cached verdict, defeating the 3h cooldown (observed: 150-200 calls/day). A ±3
+                # band keeps the cache useful while still re-running on a materially changed book.
+                _pos_ok   = abs(_cur_pos_cnt - _c_pos_cnt) <= 3
                 _use_cache = _time_ok and _macro_ok and _spot_ok and _pos_ok
                 if _cached and not _use_cache:
                     reasons = []
