@@ -147,8 +147,17 @@ class AgoraSettings(BaseSettings):
             # Mega-cap tech
             "AAPL", "MSFT", "NVDA", "META", "AMZN", "GOOGL", "TSLA", "AVGO", "AMD",
             "NFLX", "CRM",
-            # Semiconductors (liquid only — pruned proven small-cap losers HIMX/AMKR)
+            # Semiconductors + equipment (liquid only — pruned small-cap losers HIMX/AMKR)
             "TSM", "MU", "INTC", "TXN", "LRCX", "ASML", "SMTC", "TSEM", "VECO",
+            "MRVL", "QCOM", "AMAT", "KLAC", "ARM",
+            # Memory / storage cycle (DRAM/NAND/flash + HDD — trade the memory pricing cycle)
+            "SNDK", "STX", "WDC",
+            # Networking (AI data-center connectivity)
+            "CSCO", "ANET",
+            # Cyber-security (mega-cap, liquid)
+            "PANW", "CRWD", "FTNT",
+            # Hardware / OEM / servers (AI infra buildout)
+            "DELL", "HPE", "HPQ",
             # Defense / space
             "PLTR", "KTOS", "AVAV", "RKLB",
             # Energy / power (pruned proven losers FCEL/FLNC; added liquid XOM)
@@ -163,10 +172,10 @@ class AgoraSettings(BaseSettings):
             "SNOW", "ZS", "UPST",
             # Liquid high-beta / momentum (added — liquid options despite volatility)
             "COIN", "MARA", "SMCI",
-            # Optical / photonics (pruned proven loser AOSL; kept AAOI/AXTI per owner)
-            "LITE", "COHR", "AAOI", "AXTI",
-            # Other watchlist (kept OKLO per owner)
-            "FLEX", "MSTR", "WDC", "IREN", "NOK", "OKLO", "GEV",
+            # Optical / photonics (AI optics; pruned proven loser AOSL; kept AAOI/AXTI per owner)
+            "LITE", "COHR", "FN", "CIEN", "AAOI", "AXTI",
+            # Other watchlist (kept OKLO per owner; WDC moved to memory/storage group)
+            "FLEX", "MSTR", "IREN", "NOK", "OKLO", "GEV",
             "MP", "POWL", "KEYS", "ONTO", "SERV", "VICR",
             "BJ", "F", "CIFR", "ASTS",
         ],
