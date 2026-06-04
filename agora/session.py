@@ -2906,6 +2906,73 @@ class AgoraSession:
             logger.error("Post-earnings trade build failed for %s: %s", result.ticker, exc)
 
 
+    async def _entry_gate(
+        self, rec: Any, ticker: str, spot: float, positions: list,
+        earnings_date: Any = None, is_pre_earnings: bool = False, chain_id: str = "",
+    ) -> tuple[bool, str]:
+        """
+        SINGLE shared pre-trade risk gate for BOTH strategies (spreads + long options).
+        Deterministic chain, one source of truth — no parity drift:
+          timing -> kill switch -> macro calendar -> compliance -> risk council
+          -> correlation (block / size-reduce) -> devils-advocate.
+        Returns (ok, reason); ok=False means blocked. Strategy-specific steps stay in each
+        pipeline and run BEFORE this gate where they mutate inputs it reads — spreads apply
+        VIX/macro position sizing (risk council reads contract count) and sector/valuation
+        conviction adjustment (devils reads conviction_score) first; the long pipeline runs
+        its Opus vetter before and the LLM advocate after. Gates are AND-conjoined, so the
+        set of blocked trades is identical regardless of which pipeline calls this.
+        """
+        def _block(reason: str, gates: list) -> tuple[bool, str]:
+            if chain_id:
+                _complete_chain(str(self._settings.db_path), chain_id, "risk_blocked",
+                                gates_passed=gates)
+            return (False, reason)
+
+        permitted, _why = self._entry_timing.is_entry_permitted()
+        if not permitted:
+            return _block(f"timing: {_why}", [])
+        if self._risk.is_kill_switch_active():
+            return _block("kill switch active", ["timing"])
+        _can_trade, _cal_why = get_macro_calendar().should_trade()
+        if not _can_trade:
+            return _block(f"macro calendar: {_cal_why}", ["timing"])
+        comp = self._compliance.check_trade(rec, positions)
+        if not comp.get("compliant", True):
+            return _block(f"compliance: {comp.get('reason')}", ["timing", "macro_cal"])
+        for _w in comp.get("warnings", []):
+            logger.warning("Compliance warning [%s]: %s", ticker, _w)
+        greeks = self._position_mgr.get_portfolio_greeks()
+        regime = self._macro_context.macro_stance if self._macro_context else "neutral"
+        rr = self._risk.approve_trade(rec, greeks, positions, spot, regime=regime)
+        if not rr.get("approved", False):
+            return _block(f"risk council: {rr.get('reason')}", ["timing", "macro_cal", "compliance"])
+        # Correlation — block near-duplicate same-direction bets, else size-reduce.
+        try:
+            _corr = self._correlation_monitor.check(
+                new_ticker=ticker, existing_positions=positions,
+                direction=getattr(rec, "direction", "neutral"),
+            )
+            if _corr.risk_level == "block":
+                return _block(f"correlation: {_corr.block_reason}",
+                              ["timing", "macro_cal", "compliance", "risk"])
+            if _corr.conviction_adj < 0:
+                _pre = rec.contracts
+                _factor = 0.5 if _corr.risk_level == "high" else 0.75
+                rec.contracts = max(1, int(_pre * _factor))
+                logger.info("Correlation %s [%s]: contracts %d → %d | %s",
+                            _corr.risk_level, ticker, _pre, rec.contracts, _corr.block_reason)
+        except Exception as _cex:
+            logger.debug("Correlation check failed [%s]: %s", ticker, _cex)
+        # DevilsAdvocate — 5-check deterministic checklist.
+        _da_ok, _da_reason, _ = _devils_advocate(
+            recommendation=rec, positions=positions, macro_context=self._macro_context,
+            earnings_date=earnings_date, is_pre_earnings=is_pre_earnings,
+        )
+        if not _da_ok:
+            return _block(f"devils-advocate: {_da_reason}",
+                          ["timing", "macro_cal", "compliance", "risk", "correlation"])
+        return (True, "")
+
     async def _long_options_risk_gates(
         self, rec: Any, ticker: str, spot: float, earnings_date: Any = None,
     ) -> bool:
@@ -2914,68 +2981,12 @@ class AgoraSession:
         entry-timing -> kill switch -> macro calendar -> compliance -> risk council
         -> correlation -> devils advocate -> LLM advocate (fail-closed).
         Returns True only when the trade clears every gate."""
-        permitted, _why = self._entry_timing.is_entry_permitted()
-        if not permitted:
-            logger.info("LongOptions BLOCKED by timing gate [%s]: %s", ticker, _why)
-            return False
-        if self._risk.is_kill_switch_active():
-            logger.info("LongOptions BLOCKED: kill switch active [%s]", ticker)
-            return False
-        # Macro-calendar gate (FOMC/NFP/CPI avoid-days) — parity with the spread pipeline.
-        _can_trade, _cal_why = get_macro_calendar().should_trade()
-        if not _can_trade:
-            logger.info("LongOptions BLOCKED by macro calendar [%s]: %s", ticker, _cal_why)
-            return False
+        # Shared deterministic chain (single source of truth — see _entry_gate).
         positions = self._position_mgr.get_open_positions()
-        comp = self._compliance.check_trade(rec, positions)
-        if not comp.get("compliant", True):
-            logger.info("LongOptions BLOCKED by compliance [%s]: %s", ticker, comp.get("reason"))
-            return False
-        for _w in comp.get("warnings", []):
-            logger.warning("LongOptions compliance warning [%s]: %s", ticker, _w)
-        greeks = self._position_mgr.get_portfolio_greeks()
-        regime = self._macro_context.macro_stance if self._macro_context else "neutral"
-        rr = self._risk.approve_trade(rec, greeks, positions, spot, regime=regime)
-        if not rr.get("approved", False):
-            logger.info("LongOptions BLOCKED by risk council [%s]: %s", ticker, rr.get("reason"))
-            return False
-
-        # Correlation gate — parity with spreads. Blocks stacking near-duplicate
-        # same-direction directional bets (e.g. 5 correlated semis calls = one giant
-        # beta bet wearing five tickers); high/medium correlation reduces size instead.
-        try:
-            _corr = self._correlation_monitor.check(
-                new_ticker=ticker,
-                existing_positions=positions,
-                direction=getattr(rec, "direction", "neutral"),
-            )
-            if _corr.risk_level == "block":
-                logger.info("LongOptions BLOCKED by correlation [%s]: %s", ticker, _corr.block_reason)
-                return False
-            if _corr.conviction_adj < 0:
-                _pre = rec.contracts
-                _factor = 0.5 if _corr.risk_level == "high" else 0.75
-                rec.contracts = max(1, int(_pre * _factor))
-                logger.info(
-                    "LongOptions correlation %s [%s]: contracts %d → %d | %s",
-                    _corr.risk_level, ticker, _pre, rec.contracts, _corr.block_reason,
-                )
-        except Exception as _cex:
-            logger.debug("LongOptions correlation check failed [%s]: %s", ticker, _cex)
-
-        # DevilsAdvocate — 5-check deterministic pre-trade checklist (no LLM, no network).
-        # For long options the earnings-spans-expiry and macro-opposition checks are the
-        # material ones; vol-selling self-excludes (not a credit strategy) and the
-        # conviction floor (25) is already cleared by the min conviction-2 score (40).
-        _da_ok, _da_reason, _ = _devils_advocate(
-            recommendation=rec,
-            positions=positions,
-            macro_context=self._macro_context,
-            earnings_date=earnings_date,
-            is_pre_earnings=False,
-        )
-        if not _da_ok:
-            logger.info("LongOptions BLOCKED by DevilsAdvocate [%s]: %s", ticker, _da_reason)
+        _ok, _why = await self._entry_gate(
+            rec, ticker, spot, positions, earnings_date=earnings_date, is_pre_earnings=False)
+        if not _ok:
+            logger.info("LongOptions BLOCKED by entry gate [%s]: %s", ticker, _why)
             return False
 
         # LLM advocate — adversarial review; fail closed when unavailable in live mode.
@@ -3022,95 +3033,52 @@ class AgoraSession:
         chain_id: str = "",
         thesis: Any = None,       # AnalystThesis | None — for AdvocateAgent context
     ) -> None:
-        """Entry timing → compliance → risk council → circuit breaker → advocate → IBKR."""
-        # 1. Hard gate: no new entries outside 10:00 AM – 3:30 PM ET
-        permitted, timing_reason = self._entry_timing.is_entry_permitted()
-        if not permitted:
-            logger.info("ENTRY BLOCKED by timing gate: %s | %s", ticker, timing_reason)
-            return
+        """Strategy-specific sizing/conviction → shared _entry_gate → LLM debate → IBKR."""
+        # ── Spread-specific pre-processing — MUST precede the shared gate because it
+        # mutates inputs the gate reads: position sizing (risk council reads contract
+        # count) and conviction adjustment (devils-advocate reads conviction_score).
 
-        # 1b. Macro calendar gate: block entries on FOMC/NFP/CPI avoid days
-        _cal = get_macro_calendar()
-        _can_trade, _cal_reason = _cal.should_trade()
-        if not _can_trade:
-            logger.info("ENTRY BLOCKED by macro calendar: %s | %s", ticker, _cal_reason)
-            return
-        _size_mult = _cal.position_size_multiplier()
+        # Macro-calendar position sizing (caution-day size reduction; the avoid-day BLOCK
+        # is enforced inside _entry_gate via should_trade()).
+        _size_mult = get_macro_calendar().position_size_multiplier()
         if _size_mult < 1.0:
             recommendation.contracts = max(1, int(recommendation.contracts * _size_mult))
-            logger.info(
-                "Macro calendar caution: %s size reduced to %.0f%% (%d contracts)",
-                ticker, _size_mult * 100, recommendation.contracts,
-            )
+            logger.info("Macro calendar caution: %s size → %.0f%% (%d contracts)",
+                        ticker, _size_mult * 100, recommendation.contracts)
 
-        # 2. VIX stress mode: apply circuit breaker size reduction
+        # VIX stress mode size reduction.
         if self._circuit_breaker.vix_stress_mode:
             recommendation.size_multiplier *= self._circuit_breaker.size_multiplier_override
-            recommendation.contracts = max(1, int(recommendation.contracts * self._circuit_breaker.size_multiplier_override))
-            logger.info("VIX stress mode: %s size reduced to %d contracts", ticker, recommendation.contracts)
+            recommendation.contracts = max(
+                1, int(recommendation.contracts * self._circuit_breaker.size_multiplier_override))
+            logger.info("VIX stress mode: %s size → %d contracts", ticker, recommendation.contracts)
 
-        positions = self._position_mgr.get_open_positions()
-
-        # 3. Compliance gate (wash sale advisory + strategy level + concentration)
-        compliance_result = self._compliance.check_trade(recommendation, positions)
-        if not compliance_result["compliant"]:
-            logger.info("BLOCKED by compliance: %s | %s", ticker, compliance_result["reason"])
-            if chain_id:
-                _complete_chain(str(self._settings.db_path), chain_id, "rejected",
-                                gates_passed=["timing", "macro_cal"])
-            return
-        for warning in compliance_result.get("warnings", []):
-            logger.warning("Compliance warning [%s]: %s", ticker, warning)
-
-        # 4. Risk council (includes StrategyHealth pause gate)
-        greeks = self._position_mgr.get_portfolio_greeks()
-        _current_regime = self._macro_context.macro_stance if self._macro_context else "neutral"
-        risk_result = self._risk.approve_trade(recommendation, greeks, positions, spot, regime=_current_regime)
-        if not risk_result["approved"]:
-            logger.info("BLOCKED by risk council: %s | %s", ticker, risk_result["reason"])
-            if chain_id:
-                _complete_chain(str(self._settings.db_path), chain_id, "risk_blocked",
-                                gates_passed=["timing", "macro_cal", "compliance"])
-            return
-
+        open_positions = self._position_mgr.get_open_positions()
         strategy_str = getattr(recommendation, "strategy", "unknown")
         if hasattr(strategy_str, "value"):
             strategy_str = strategy_str.value
         mid_price = abs(recommendation.entry_debit_credit / max(1, recommendation.contracts * 100))
 
-        # 4c. Execution cooldown gate — block re-submission of a ticker that recently failed to fill.
-        #     Illiquid spreads can time out on every scan cycle without this guard.
+        # Execution cooldown — block re-submission of a ticker that recently failed to fill.
         _cooldown_until = self._exec_cooldowns.get(ticker)
         if _cooldown_until and datetime.now(tz=timezone.utc) < _cooldown_until:
             _mins_left = (_cooldown_until - datetime.now(tz=timezone.utc)).seconds // 60
-            logger.debug(
-                "ENTRY SKIPPED by exec cooldown: %s — %d min remaining after prior timeout",
-                ticker, _mins_left,
-            )
+            logger.debug("ENTRY SKIPPED by exec cooldown: %s — %d min remaining", ticker, _mins_left)
             return
 
-        self._exec_quality.record_attempt(ticker, str(strategy_str), mid_price)
-
-        # 4b. Open combo order gate — IBKR paper limits riskless-combination orders (Error 201)
-        #     Each open position has a live GTC profit-target (counts against the limit).
-        open_positions = self._position_mgr.get_open_positions()
+        # Open-combo limit — IBKR paper caps riskless-combination orders (Error 201).
         if len(open_positions) >= self._settings.gtc_max_open_combo_orders:
-            logger.info(
-                "ENTRY BLOCKED by open-combo limit: %d/%d active GTC brackets | %s",
-                len(open_positions), self._settings.gtc_max_open_combo_orders, ticker,
-            )
+            logger.info("ENTRY BLOCKED by open-combo limit: %d/%d active | %s",
+                        len(open_positions), self._settings.gtc_max_open_combo_orders, ticker)
             if chain_id:
                 _complete_chain(str(self._settings.db_path), chain_id, "rejected",
-                                gates_passed=["timing", "macro_cal", "compliance", "risk"])
+                                gates_passed=["combo_limit"])
             return
 
-        # ── Sector rotation + fundamental valuation adjustments ──────────────────
-        # Applied after conviction scoring; modulates score before advocate gate.
-        # Both checks are fast (cached daily / 4h) and never block on their own —
-        # they adjust conviction_score so the advocate gate becomes the final arbiter.
+        # Sector rotation + valuation conviction adjustment (modulates conviction_score
+        # before the gate's devils-advocate conviction-floor check).
         _fin_adj_total = 0
         _fin_adj_reasons: list[str] = []
-
         try:
             _sector_sig = self._sector_monitor.get_signal(ticker)
             if _sector_sig.conviction_adj != 0:
@@ -3118,7 +3086,6 @@ class AgoraSession:
                 _fin_adj_reasons.append(f"sector_rs={_sector_sig.conviction_adj:+d} ({_sector_sig.reason_str})")
         except Exception as _sec_exc:
             logger.debug("Sector rotation check failed for %s: %s", ticker, _sec_exc)
-
         try:
             _val_result = self._valuation_gate.evaluate(ticker)
             if _val_result.conviction_adj != 0:
@@ -3126,69 +3093,26 @@ class AgoraSession:
                 _fin_adj_reasons.append(f"valuation={_val_result.conviction_adj:+d} ({_val_result.reason_str})")
         except Exception as _val_exc:
             logger.debug("Valuation check failed for %s: %s", ticker, _val_exc)
-
         if _fin_adj_total != 0:
             _pre_adj = recommendation.conviction_score
-            recommendation.conviction_score = float(
-                max(0.0, min(100.0, _pre_adj + _fin_adj_total))
-            )
-            logger.info(
-                "Finance intel adj for %s: %.0f → %.0f (Δ%+d) | %s",
-                ticker,
-                _pre_adj,
-                recommendation.conviction_score,
-                _fin_adj_total,
-                " | ".join(_fin_adj_reasons),
-            )
+            recommendation.conviction_score = float(max(0.0, min(100.0, _pre_adj + _fin_adj_total)))
+            logger.info("Finance intel adj for %s: %.0f → %.0f (Δ%+d) | %s",
+                        ticker, _pre_adj, recommendation.conviction_score, _fin_adj_total,
+                        " | ".join(_fin_adj_reasons))
 
-        # ── Correlation gate — block near-duplicate same-direction positions ───
-        # Runs after sector/valuation so the conviction score reflects all signals.
-        try:
-            _corr_result = self._correlation_monitor.check(
-                new_ticker=ticker,
-                existing_positions=open_positions,
-                direction=recommendation.direction,
-            )
-            if _corr_result.risk_level == "block":
-                logger.info(
-                    "ENTRY BLOCKED by correlation monitor: %s | %s",
-                    ticker, _corr_result.block_reason,
-                )
-                if chain_id:
-                    _complete_chain(
-                        str(self._settings.db_path), chain_id, "risk_blocked",
-                        gates_passed=["timing", "macro_cal", "compliance", "risk", "combo_limit"],
-                    )
-                return
-            elif _corr_result.conviction_adj < 0:
-                # High/medium correlation — reduce position size, don't block
-                _pre_contracts = recommendation.contracts
-                _size_factor = 0.5 if _corr_result.risk_level == "high" else 0.75
-                recommendation.contracts = max(1, int(_pre_contracts * _size_factor))
-                logger.info(
-                    "Correlation %s [%s]: contracts %d → %d (%.0f%%) | %s",
-                    _corr_result.risk_level, ticker,
-                    _pre_contracts, recommendation.contracts,
-                    _size_factor * 100,
-                    _corr_result.block_reason,
-                )
-        except Exception as _corr_exc:
-            logger.debug("Correlation check failed for %s: %s", ticker, _corr_exc)
-
-        # 4e. DevilsAdvocate — 5-check deterministic pre-IBKR checklist (no LLM, no network)
-        _da_ok, _da_reason, _da_results = _devils_advocate(
-            recommendation=recommendation,
-            positions=open_positions,
-            macro_context=self._macro_context,
-            earnings_date=earnings_date,
-            is_pre_earnings=is_pre_earnings,
+        # ── Shared deterministic entry gate (single source of truth; same as long opts) ──
+        # timing → kill → macro → compliance → risk → correlation → devils-advocate.
+        _gate_ok, _gate_why = await self._entry_gate(
+            recommendation, ticker, spot, open_positions,
+            earnings_date=earnings_date, is_pre_earnings=is_pre_earnings, chain_id=chain_id,
         )
-        if not _da_ok:
-            logger.info("BLOCKED by DevilsAdvocate: %s | %s", ticker, _da_reason)
-            if chain_id:
-                _complete_chain(str(self._settings.db_path), chain_id, "risk_blocked",
-                                gates_passed=["timing", "macro_cal", "compliance", "risk", "combo_limit"])
+        if not _gate_ok:
+            logger.info("ENTRY BLOCKED by gate: %s | %s", ticker, _gate_why)
             return
+
+        # Record the execution attempt now that the trade has cleared every deterministic
+        # gate — fill-rate denominator = trades that actually reach submission.
+        self._exec_quality.record_attempt(ticker, str(strategy_str), mid_price)
 
         # 4f. Debate gate: AdvocateAgent + ThesisDefenderAgent run in parallel.
         # Advocate generates 3 failure modes; defender generates 3 success modes.
