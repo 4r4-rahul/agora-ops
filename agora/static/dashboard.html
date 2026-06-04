@@ -823,6 +823,29 @@ tr.pos-detail-row td { padding: 0; background: var(--bg1); }
       </div>
     </div>
 
+    <!-- ── Exit Quality row (which exit types make money) ── -->
+    <div id="row-exits" style="margin-top:10px">
+      <div class="panel">
+        <div class="panel-header">🚪 Exit Quality (30d)
+          <span id="exit-totals-badge" style="margin-left:8px;font-size:10px;color:var(--text2)"></span>
+          <button onclick="fetchExits()"
+            style="margin-left:auto;padding:1px 7px;font-size:10px;font-family:var(--font);
+                   background:rgba(88,166,255,.12);border:1px solid rgba(88,166,255,.3);
+                   color:var(--blue);border-radius:4px;cursor:pointer">↻</button>
+        </div>
+        <div class="tbl-wrap" style="max-height:180px">
+          <table>
+            <thead><tr>
+              <th>Exit type</th><th>Trades</th><th>Win%</th><th>Total $</th><th>Avg $</th><th>Best</th><th>Worst</th>
+            </tr></thead>
+            <tbody id="exit-quality-tbody">
+              <tr><td colspan="7" style="color:var(--text2);text-align:center;padding:8px;font-size:10px">No closed trades in window yet</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
   </div><!-- /main -->
 
   <!-- ── Right panel ── -->
@@ -2534,6 +2557,43 @@ async function fetchLong() {
   }
 }
 
+// ── Exit Quality ────────────────────────────────────────────────────────────
+async function fetchExits() {
+  const tbody = document.getElementById('exit-quality-tbody');
+  const badge = document.getElementById('exit-totals-badge');
+  try {
+    const r = await fetch('/agora/exits');
+    if (!r.ok) { return; }
+    const d = await r.json();
+    const t = d.totals || {};
+    if (t.trades) {
+      const c = (t.total_pnl || 0) >= 0 ? 'var(--green)' : 'var(--red)';
+      badge.innerHTML = `${t.trades} closed | <span style="color:${c}">$${(t.total_pnl||0).toFixed(0)}</span> | ${((t.win_rate||0)*100).toFixed(0)}% win`;
+    }
+    const rows = d.by_exit_type || [];
+    if (!rows.length) {
+      tbody.innerHTML = '<tr><td colspan="7" style="color:var(--text2);text-align:center;padding:8px;font-size:10px">No closed trades in window yet</td></tr>';
+      return;
+    }
+    tbody.innerHTML = rows.map(e => {
+      const wr = (e.win_rate||0)*100;
+      const wrC = wr >= 55 ? 'var(--green)' : wr >= 45 ? 'var(--yellow)' : 'var(--red)';
+      const tC = (e.total_pnl||0) >= 0 ? 'var(--green)' : 'var(--red)';
+      return `<tr>
+        <td style="font-weight:600">${e.exit_type}</td>
+        <td>${e.trades}</td>
+        <td style="color:${wrC};font-weight:600">${wr.toFixed(0)}%</td>
+        <td style="color:${tC};font-weight:600">$${(e.total_pnl||0).toFixed(0)}</td>
+        <td style="color:${(e.avg_pnl||0)>=0?'var(--green)':'var(--red)'}">$${(e.avg_pnl||0).toFixed(0)}</td>
+        <td style="color:var(--green)">$${(e.best||0).toFixed(0)}</td>
+        <td style="color:var(--red)">$${(e.worst||0).toFixed(0)}</td>
+      </tr>`;
+    }).join('');
+  } catch(ex) {
+    tbody.innerHTML = `<tr><td colspan="7" style="color:var(--red);padding:8px;font-size:10px">Error: ${ex.message}</td></tr>`;
+  }
+}
+
 // ── Today at a Glance ─────────────────────────────────────────────────────────
 async function fetchToday() {
   try {
@@ -2645,7 +2705,7 @@ async function fetchToday() {
 
   await Promise.all([
     fetchHealth(), fetchOrders(), fetchPositions(), fetchAttribution(), fetchSignals(),
-    fetchMarket(), fetchReadiness(), fetchCsuite(), fetchToday(), fetchLong(),
+    fetchMarket(), fetchReadiness(), fetchCsuite(), fetchToday(), fetchLong(), fetchExits(),
   ]);
 
   // TWS live data — fetch once on load then every 30s (makes a real IBKR connection)
@@ -2662,6 +2722,7 @@ async function fetchToday() {
   setInterval(fetchTwsLive,     30_000); // TWS live: 30s — real connection, not cached
   setInterval(fetchToday,       30_000); // today summary: realized P&L + closed positions
   setInterval(fetchLong,        60_000); // long-options status: refresh every 60s
+  setInterval(fetchExits,      300_000); // exit-quality attribution: refresh every 5m
   setInterval(fetchStratHealth, 300_000); // strategy health: refresh every 5 min (matches patrol)
 })();
 

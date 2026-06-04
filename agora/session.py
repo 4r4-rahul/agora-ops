@@ -613,7 +613,7 @@ class AgoraSession:
             self._exit_agent = ExitIntelligenceAgent(
                 settings=self._settings,
                 shadow_mode=self._settings.exit_intelligence_shadow_mode,
-                on_close_callback=self._exit_agent_close_position,
+                on_close_callback=None,   # PositionManager owns all closes (agent runs act=False)
             )
             # Hand the agent to PositionManager — the single exit owner runs the LLM
             # thesis check itself (for spreads AND longs), instead of a separate patrol.
@@ -623,6 +623,8 @@ class AgoraSession:
                 self._settings.exit_intelligence_shadow_mode,
                 self._settings.exit_intelligence_interval_hours,
             )
+        # Partial scale-out executor — wired unconditionally (PositionManager owns it).
+        self._position_mgr.set_partial_close_handler(self._execute_partial_close)
 
         # ── LongOptionsAgent — directional swing (independent 15-min cycle) ───
         self._long_options_agent = None
@@ -1764,39 +1766,6 @@ class AgoraSession:
                 logger.debug("_news_watch_loop error: %s", exc)
 
             await asyncio.sleep(30)
-
-    async def _exit_agent_close_position(self, position_id: str, reason: str) -> None:
-        """
-        Callback invoked by ExitIntelligenceAgent when it recommends CLOSE_NOW in live mode.
-        Delegates to the same close_trade path used by PositionManager floors.
-        """
-        from agora.execution.ibkr_bridge import close_trade
-        pos = None
-        for p in self._position_mgr.get_open_positions():
-            if p.position_id == position_id:
-                pos = p
-                break
-        if pos is None:
-            logger.warning("ExitAgent close: position %s not found", position_id)
-            return
-        try:
-            order = await close_trade(pos, self._settings, self._session_id)
-            logger.info("ExitAgent close order: %s | status=%s", pos.ticker, order.get("status"))
-            # Broadcast CLOSE_NOW to dashboard WebSocket clients
-            try:
-                from agora.api.routes import _broadcast
-                pe = self._position_mgr.get_profit_engine_state(position_id)
-                await _broadcast({
-                    "type":       "profit_engine_alert",
-                    "ticker":     pos.ticker,
-                    "reason":     reason,
-                    "profit_pct": pe.get("profit_pct") if pe else None,
-                    "ts":         datetime.now(tz=timezone.utc).isoformat(),
-                })
-            except Exception:
-                pass
-        except Exception as exc:
-            logger.error("ExitAgent close_trade failed for %s: %s", pos.ticker, exc)
 
     async def _price_monitor_loop(self) -> None:
         """
@@ -3786,6 +3755,21 @@ class AgoraSession:
                 )
         except Exception as exc:
             logger.warning("Kill switch auto-reset check failed: %s", exc)
+
+    async def _execute_partial_close(self, position: Any, qty: int, reason: str) -> None:
+        """Close `qty` of position.contracts (scale-out); leave the remainder open.
+        Long-options only — P&L is the premium change (no spread direction flip).
+        PositionManager.apply_partial_close then resizes the open position + records the
+        closed slice for attribution."""
+        try:
+            slice_pos = position.model_copy(update={"contracts": int(qty)})
+            order = await close_trade(slice_pos, self._settings, self._session_id)
+            fills = order.get("fills", []) if order else []
+            close_price = float(fills[0]["price"]) if fills else position.current_price
+            realized = round((close_price - position.entry_price) * 100 * int(qty), 2)
+            self._position_mgr.apply_partial_close(position.position_id, int(qty), close_price, realized)
+        except Exception as exc:
+            logger.error("Partial close failed for %s: %s", position.ticker, exc, exc_info=True)
 
     async def _execute_close(self, position: Any, reason: str) -> None:
         logger.info("Closing %s | reason=%s", position.ticker, reason)

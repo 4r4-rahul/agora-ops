@@ -85,6 +85,15 @@ class PositionManager:
         # conviction at first check). Fixes the prior gap where the dynamic target was
         # computed at entry but never applied at exit (OpenPosition carries no metadata).
         self._long_profit_tgt: dict[str, float] = {}
+        # position_id → stop-loss multiplier, derived from entry IVR (cached). Hypothesis:
+        # when we overpaid for vol (high entry IVR) the option bleeds faster on vega/theta,
+        # so cut losers a touch sooner; when vol was cheap, give a touch more room. Bounded
+        # ±15% — intentionally small until the exit-quality report validates the direction.
+        self._long_stop_mult: dict[str, float] = {}
+        # Partial scale-out: session handler that closes a SUBSET of contracts, and the set
+        # of positions already scaled (one-time per position). Handler injected at startup.
+        self._on_partial_close = None
+        self._long_scaled: set[str] = set()
 
     def set_macro_context(self, ctx: Any) -> None:
         """Called by session after every macro synthesis — keeps engine regime-aware."""
@@ -95,6 +104,48 @@ class PositionManager:
         """Inject the ExitIntelligenceAgent so PositionManager can run the LLM thesis
         re-validation itself (single exit owner). Called once by the session at startup."""
         self._exit_agent = agent
+
+    def set_partial_close_handler(self, fn: Any) -> None:
+        """Inject the session's partial-close executor (closes a subset of contracts)."""
+        self._on_partial_close = fn
+
+    def apply_partial_close(self, position_id: str, qty: int, close_price: float,
+                            realized_pnl: float) -> None:
+        """Resize an open position after a scale-out: reduce contracts (scaling max
+        loss/gain proportionally) and record the closed slice as its own trade_record for
+        attribution. Daily-P&L (breaker) reads closed positions, so the locked gain is
+        credited only at full close — conservative and safe."""
+        try:
+            row = self._db.execute(
+                "SELECT contracts, max_loss_dollars, max_gain_dollars, ticker, strategy, "
+                "pillar, entry_price, entry_date, expiry_date, regime_at_entry, "
+                "conviction_at_entry FROM positions WHERE position_id=?",
+                (position_id,),
+            ).fetchone()
+            if not row:
+                return
+            old_ct = int(row[0])
+            new_ct = max(0, old_ct - qty)
+            if new_ct <= 0:
+                return
+            ratio = new_ct / old_ct
+            self._db.execute(
+                "UPDATE positions SET contracts=?, max_loss_dollars=?, max_gain_dollars=?, "
+                "last_reviewed=? WHERE position_id=?",
+                (new_ct, row[1] * ratio, row[2] * ratio,
+                 datetime.now(tz=timezone.utc).isoformat(), position_id),
+            )
+            self._db.execute(
+                "INSERT OR IGNORE INTO trade_records VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (f"{position_id}__scale", row[3], row[4], row[5], row[7],
+                 date.today().isoformat(), row[8], row[6], close_price, qty,
+                 realized_pnl, 0.0, 0.0, row[9] or None, row[10] or None, "", "scale_out_half"),
+            )
+            self._db.commit()
+            logger.info("PARTIAL SCALE-OUT %s: closed %d/%d @ $%.2f realized=$%.0f, %d remain",
+                        row[3], qty, old_ct, close_price, realized_pnl, new_ct)
+        except Exception as exc:
+            logger.error("apply_partial_close failed [%s]: %s", position_id, exc, exc_info=True)
 
     def set_price_target_for_position(
         self, position_id: str, aligned_return_pct: float, entry_spot: float
@@ -554,6 +605,11 @@ class PositionManager:
         agent = self._exit_agent
         if agent is None:
             return False
+        # Min-hold guard: never thesis-exit on the entry day. The thesis needs room to
+        # play out (longs are 5-day swings); same-day LLM churn cut winners before. The
+        # deterministic stops still protect downside on day 0.
+        if (date.today() - position.entry_date).days < 1:
+            return False
         try:
             interval = getattr(self._settings, "exit_intelligence_interval_hours", 1.0)
             if not agent.should_evaluate(position.position_id, interval):
@@ -586,6 +642,9 @@ class PositionManager:
         except Exception as exc:
             logger.debug("update_signal_stats failed [%s]: %s", position.ticker, exc)
         self._long_peak_pnl.pop(position.position_id, None)
+        self._long_scaled.discard(position.position_id)
+        self._long_profit_tgt.pop(position.position_id, None)
+        self._long_stop_mult.pop(position.position_id, None)
         self._save_long_peaks()
 
     def _long_profit_target_for(self, position_id: str) -> float:
@@ -609,6 +668,31 @@ class PositionManager:
             logger.debug("_long_profit_target_for [%s]: %s", position_id, exc)
         self._long_profit_tgt[position_id] = tgt
         return tgt
+
+    def _long_stop_for(self, position_id: str, base_stop: float) -> float:
+        """Entry-IVR-scaled stop (bounded ±15%). High IVR → tighter (overpaid for vol,
+        faster bleed); low IVR → looser. Cached. Falls back to base_stop. This is a
+        deliberately small effect pending validation from the exit-quality report."""
+        if position_id in self._long_stop_mult:
+            return base_stop * self._long_stop_mult[position_id]
+        mult = 1.0
+        try:
+            with sqlite3.connect(str(self._settings.db_path), timeout=5) as conn:
+                row = conn.execute(
+                    "SELECT ivr FROM long_journal WHERE position_id=? AND outcome='proceed' "
+                    "ORDER BY journal_id DESC LIMIT 1",
+                    (position_id,),
+                ).fetchone()
+            if row and row[0] is not None:
+                ivr = float(row[0])
+                if ivr >= 50:
+                    mult = 0.85
+                elif ivr <= 25:
+                    mult = 1.15
+        except Exception as exc:
+            logger.debug("_long_stop_for [%s]: %s", position_id, exc)
+        self._long_stop_mult[position_id] = mult
+        return base_stop * mult
 
     async def _check_long_options_targets(self, position: OpenPosition) -> None:
         """
@@ -647,11 +731,35 @@ class PositionManager:
         # Conviction-dynamic profit target (derived from long_journal conviction, cached).
         pos_profit_tgt = self._long_profit_target_for(pid)
 
-        # Urgency taper: within 3 days of target close, halve target + trail floor.
+        # Urgency taper: within 3 days of target close, halve the profit target.
         days_to_close = (position.target_close_date - today).days if position.target_close_date else 999
         urgent = days_to_close <= 3
         eff_profit_tgt  = pos_profit_tgt * 0.5 if urgent else pos_profit_tgt
-        eff_trail_floor = trail_floor * 0.5 if urgent else trail_floor
+
+        # DTE-aware trailing floor: tighten as EXPIRY nears (theta accelerates → lock gains
+        # rather than give them back to decay). Combined with the target-close urgency taper;
+        # the tighter of the two wins.
+        dte = (position.expiry_date - today).days
+        if dte <= 7:
+            dte_mult = 0.5
+        elif dte <= 14:
+            dte_mult = 0.75
+        else:
+            dte_mult = 1.0
+        eff_trail_floor = trail_floor * min(dte_mult, 0.5 if urgent else 1.0)
+
+        # A2. Scale-out: lock HALF of a high-conviction winner (target > 50%) once it
+        # reaches +50%, and let the rest run to its higher target under the trailing stop.
+        # One-time per position. Captures gains the all-or-nothing target would risk giving
+        # back, while keeping upside on the runner.
+        if (pos_profit_tgt > 0.50 and pnl_pct >= 0.50 and position.contracts >= 2
+                and pid not in self._long_scaled and self._on_partial_close is not None):
+            half = position.contracts // 2
+            logger.info("LongOptions scale-out [%s] +%.0f%% — locking %d/%d, running rest to %.0f%%",
+                        position.ticker, pnl_pct * 100, half, position.contracts, pos_profit_tgt * 100)
+            self._long_scaled.add(pid)   # set before await so a slow fill can't double-trigger
+            await self._on_partial_close(position, half, f"scale-out at +{pnl_pct*100:.0f}%")
+            return   # re-evaluate next cycle with the reduced size
 
         # B. Hard profit target (before trail activates).
         if pnl_pct >= eff_profit_tgt and peak < trail_trigger:
@@ -668,10 +776,11 @@ class PositionManager:
                 await self._close_long(position, f"trailing stop (peak +{peak*100:.0f}%)", "trailing_stop")
                 return
 
-        # D. Flat stop loss (pre-trail).
-        if pnl_pct <= -stop_tgt:
+        # D. Flat stop loss (pre-trail), entry-IVR-scaled.
+        eff_stop = self._long_stop_for(pid, stop_tgt)
+        if pnl_pct <= -eff_stop:
             logger.info("LongOptions stop-loss [%s] %.0f%% ≤ -%.0f%% — closing",
-                        position.ticker, pnl_pct * 100, stop_tgt * 100)
+                        position.ticker, pnl_pct * 100, eff_stop * 100)
             await self._close_long(position, f"stop loss {pnl_pct*100:.0f}%", "stop_loss")
             return
 

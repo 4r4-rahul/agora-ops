@@ -1739,6 +1739,49 @@ async def get_long_status(limit: int = 25) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+@router.get("/exits")
+async def get_exit_quality(days: int = 30) -> JSONResponse:
+    """
+    GET /agora/exits — exit-quality attribution.
+    Realized P&L + win-rate grouped by close_source (time_stop / profit_target /
+    trailing_stop / stop_loss / thesis_exit / pre_earnings / 21-DTE / scale_out / ...),
+    so you can see empirically which exit types make money and tune from data.
+    """
+    session = get_session()
+    if session is None:
+        return JSONResponse({"error": "session not running"}, status_code=503)
+    try:
+        import sqlite3
+        db = str(session._settings.db_path)
+        with sqlite3.connect(db, timeout=5) as conn:
+            rows = conn.execute(
+                """SELECT COALESCE(close_source,'unknown') src, COUNT(*) n,
+                          SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) wins,
+                          ROUND(SUM(realized_pnl),2) total, ROUND(AVG(realized_pnl),2) avg,
+                          ROUND(MIN(realized_pnl),2) worst, ROUND(MAX(realized_pnl),2) best
+                   FROM positions
+                   WHERE status='closed' AND close_date >= date('now', ?)
+                   GROUP BY close_source ORDER BY total DESC""",
+                (f"-{int(days)} days",),
+            ).fetchall()
+        by_exit = [{
+            "exit_type": r[0], "trades": r[1], "wins": r[2],
+            "win_rate": round(r[2] / r[1], 3) if r[1] else 0.0,
+            "total_pnl": r[3] or 0.0, "avg_pnl": r[4] or 0.0,
+            "worst": r[5] or 0.0, "best": r[6] or 0.0,
+        } for r in rows]
+        totals = {
+            "trades": sum(e["trades"] for e in by_exit),
+            "total_pnl": round(sum(e["total_pnl"] for e in by_exit), 2),
+            "win_rate": round(
+                sum(e["wins"] for e in by_exit) / max(1, sum(e["trades"] for e in by_exit)), 3),
+        }
+        return JSONResponse({"days": days, "totals": totals, "by_exit_type": by_exit})
+    except Exception as exc:
+        logger.error("exits endpoint error: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 @router.get("/calibration")
 async def get_calibration() -> JSONResponse:
     """
