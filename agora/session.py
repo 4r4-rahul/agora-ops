@@ -2210,6 +2210,11 @@ class AgoraSession:
         scan_reason: str = "legacy",
     ) -> None:
         """Full signal stack for one ticker → trade recommendation → risk gate → order."""
+        # Master switch: the spread pipeline is disabled per Edge-Research evidence
+        # (unvalidated strategy, 0 held positions, ~$14/day LLM spend). Long options runs
+        # via its own independent loop and is unaffected. Reversible via the flag.
+        if not self._settings.spread_pipeline_enabled:
+            return
         _sector_direction_override: str | None = None   # set by sector momentum bypass
         try:
             # Error 201 session block: paper account can't do combo orders for this ticker.

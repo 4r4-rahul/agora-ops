@@ -287,6 +287,17 @@ class AgoraSettings(BaseSettings):
         ge=0.25, le=24.0,
     )
 
+    # ── Spread (credit/debit) pipeline master switch ──────────────────────────
+    spread_pipeline_enabled: bool = Field(
+        default=True,
+        description="Master switch for the credit/debit SPREAD pipeline (the LLM "
+                    "thesis->structure->debate stack run per ticker in _evaluate_ticker). "
+                    "Set False to run long-options ONLY — _evaluate_ticker no-ops, so no "
+                    "spread trades and none of StockAnalyst/StrategySelector/ThesisDefender "
+                    "LLM spend. Fully reversible. Disabled per Edge-Research evidence: the "
+                    "spread strategy is unvalidated and produced 0 held positions.",
+    )
+
     # ── Scan engine ───────────────────────────────────────────────────────────
     use_async_scan_engine: bool = Field(
         default=False,
