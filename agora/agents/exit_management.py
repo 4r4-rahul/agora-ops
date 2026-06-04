@@ -174,15 +174,24 @@ class ExitIntelligenceAgent:
         self,
         position:      Any,          # OpenPosition
         macro_context: Any | None,
+        thesis_override: dict | None = None,
+        act:             bool = True,
     ) -> ExitRecommendation | None:
         """
         Evaluate one open position.
         Returns ExitRecommendation in both shadow and live modes.
-        In live mode + CLOSE_NOW: invokes on_close_callback.
+        In live mode + CLOSE_NOW: invokes on_close_callback (unless act=False).
         Never raises — failures return None.
+
+        thesis_override: supply the original thesis directly (e.g. long options, whose
+            thesis lives in long_journal not analyst_journal) instead of the DB lookup.
+        act: when False, the agent returns its recommendation WITHOUT invoking the close
+            callback — the caller owns execution (used by the long-options loop so it can
+            close via its own path and update the signal-stats learning loop).
         """
         position_id = position.position_id
-        original_thesis = self._fetch_original_thesis(position_id)
+        original_thesis = thesis_override if thesis_override is not None \
+            else self._fetch_original_thesis(position_id)
         lessons = _load_lessons(str(self._settings.db_path), "exit")
         payload = self._build_payload(position, original_thesis, macro_context, lessons)
         decision_id = self._fetch_chain_id(position_id)
@@ -231,8 +240,8 @@ class ExitIntelligenceAgent:
                 " [SHADOW]" if self._shadow_mode else "",
             )
 
-            # In live mode: act on CLOSE_NOW
-            if rec.should_close and not self._shadow_mode and self._on_close:
+            # In live mode: act on CLOSE_NOW (skipped when act=False — caller owns close)
+            if act and rec.should_close and not self._shadow_mode and self._on_close:
                 close_reason = rec.specific_action.get("close_reason", rec.recommendation_reasoning)
                 logger.warning(
                     "ExitAgent CLOSE_NOW: %s | reason=%s | kill=%s",

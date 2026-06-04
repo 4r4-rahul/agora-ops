@@ -1287,9 +1287,14 @@ class AgoraSession:
 
     async def _exit_intelligence_loop(self) -> None:
         """
-        ExitIntelligenceAgent hourly patrol — evaluates every open position.
+        ExitIntelligenceAgent hourly patrol — evaluates every open SPREAD position.
         Only runs during market hours (10:00–15:30 ET). Skips positions that
         were evaluated within exit_intelligence_interval_hours.
+
+        Long options are deliberately excluded here: their dedicated _long_options_loop
+        is the single exit owner and runs this same agent itself (with proper long_journal
+        thesis context). Evaluating them here too would mean two exit owners on one
+        position and a degraded check (no thesis in analyst_journal).
         """
         while self._running:
             await asyncio.sleep(3600)   # initial wait — PositionManager has time to load
@@ -1306,6 +1311,9 @@ class AgoraSession:
             interval = self._settings.exit_intelligence_interval_hours
             for pos in positions:
                 try:
+                    _strat = str(getattr(pos.strategy, "value", pos.strategy))
+                    if _strat in ("long_call", "long_put"):
+                        continue   # owned by _long_options_loop
                     if not self._exit_agent.should_evaluate(pos.position_id, interval):
                         continue
                     await self._exit_agent.evaluate(pos, self._macro_context)
@@ -1469,6 +1477,42 @@ class AgoraSession:
                         self._long_peak_pnl.pop(pid, None)
                     except Exception as e:
                         logger.error("LongOptions stop-close FAILED [%s]: %s", pos.ticker, e, exc_info=True)
+
+            # ── B2. LLM thesis-revalidation exit (single owner gains exit intelligence) ──
+            # The dedicated loop is the SOLE exit owner; here it runs ExitIntelligenceAgent
+            # itself — throttled (exit_intelligence_interval_hours) and fed the long_journal
+            # thesis — so long options get the same LLM thesis/kill-condition check that
+            # spreads get, closing EARLY when the directional thesis breaks, layered on top
+            # of the deterministic floors above. act=False so this loop owns the close (and
+            # the signal-stats learning update); shadow_mode logs the verdict without closing.
+            if self._exit_agent is not None:
+                _interval = self._settings.exit_intelligence_interval_hours
+                for pos in self._position_mgr.get_open_positions():
+                    strat = str(getattr(pos.strategy, "value", pos.strategy))
+                    if strat not in ("long_call", "long_put"):
+                        continue
+                    if not self._exit_agent.should_evaluate(pos.position_id, _interval):
+                        continue
+                    try:
+                        _thesis = self._long_thesis_for(pos.position_id)
+                        rec = await self._exit_agent.evaluate(
+                            pos, self._macro_context, thesis_override=_thesis, act=False)
+                        if rec is not None and rec.should_close and not self._exit_agent.shadow_mode:
+                            logger.info(
+                                "LongOptions thesis-exit [%s] %s | kill=%s | %s",
+                                pos.ticker, rec.thesis_validity, rec.kill_condition_status,
+                                (rec.recommendation_reasoning or "")[:80],
+                            )
+                            await asyncio.wait_for(
+                                close_trade(pos, self._settings, self._session_id), timeout=30.0)
+                            self._position_mgr.mark_position_closed(
+                                pos.position_id, realized_pnl=pos.unrealized_pnl, source="thesis_exit")
+                            from agora.agents.long_options_agent import LongOptionsAgent as _LOA
+                            _LOA.update_signal_stats(
+                                str(self._settings.db_path), pos.position_id, pos.unrealized_pnl)
+                            self._long_peak_pnl.pop(pos.position_id, None)
+                    except Exception as e:
+                        logger.error("LongOptions thesis-exit FAILED [%s]: %s", pos.ticker, e, exc_info=True)
 
             # ── C. Intraday timing gate — no entries in price discovery or EOD window ──
             # Skip entries 9:30–9:45 ET (price discovery) and after 3:10 ET (EOD risk).
@@ -3114,6 +3158,47 @@ class AgoraSession:
                 )
         except Exception as exc:
             logger.error("Post-earnings trade build failed for %s: %s", result.ticker, exc)
+
+    def _long_thesis_for(self, position_id: str) -> dict:
+        """
+        Build an ExitIntelligenceAgent thesis dict from the long_journal entry, so the
+        exit agent can re-validate long options with real context (their thesis lives in
+        long_journal, not analyst_journal). Returns {} if no entry — the agent then
+        evaluates on position state alone.
+        """
+        try:
+            import sqlite3, json as _json
+            with sqlite3.connect(str(self._settings.db_path), timeout=5) as conn:
+                row = conn.execute(
+                    """SELECT direction, conviction_score, signal_stack, decided_at_utc,
+                              regime, flow_direction
+                       FROM long_journal WHERE position_id=? AND outcome='proceed'
+                       ORDER BY journal_id DESC LIMIT 1""",
+                    (position_id,),
+                ).fetchone()
+            if not row:
+                return {}
+            try:
+                stack = _json.loads(row[2] or "{}")
+            except Exception:
+                stack = {}
+            return {
+                "direction":       row[0],
+                "magnitude_pct":   None,
+                "horizon_days":    self._settings.long_options_max_hold_days,
+                "confidence_pct":  row[1],
+                "strategy_family": "long_directional",
+                "kill_conditions": [
+                    "directional thesis broken — trend or institutional flow reversed",
+                    "underlying RSI hit an extreme against the position",
+                    "expected catalyst passed with no follow-through",
+                ],
+                "reasoning_trace": f"entry signals={stack} | regime={row[4]} | flow={row[5]}",
+                "thesis_date":     row[3],
+            }
+        except Exception as exc:
+            logger.debug("_long_thesis_for failed [%s]: %s", position_id, exc)
+            return {}
 
     def _load_long_peaks(self) -> dict:
         try:
