@@ -55,3 +55,46 @@ def load_approved_lessons(
     except Exception as exc:
         logger.debug("lessons_store.load_approved_lessons[%s]: %s", agent_name, exc)
         return []
+
+
+def load_calibration_note(db_path: str, agent_name: str, min_gap: float = 0.15) -> str:
+    """
+    Return a one-line calibration self-awareness note for an agent's prompt when the
+    outcome attributor has measured it as materially over- or under-confident
+    (|predicted - actual| >= min_gap over >=5 samples). Empty string otherwise.
+
+    This is the 'calibration haircut': rather than a crude numeric discount, we feed the
+    agent its own measured accuracy so it recalibrates — an over-confident advocate
+    (e.g. predicts 83% right, delivers 63%) is over-blocking and throttling entries.
+    """
+    try:
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute(
+                """SELECT predicted_win_rate, actual_win_rate, calibration_gap, sample_size
+                   FROM calibration_log
+                   WHERE agent_name = ? AND predicted_win_rate IS NOT NULL
+                     AND actual_win_rate IS NOT NULL
+                   ORDER BY measured_at_utc DESC LIMIT 1""",
+                (agent_name,),
+            ).fetchone()
+        if not row:
+            return ""
+        pred, act, gap, n = row
+        if n is None or n < 5 or gap is None or abs(gap) < min_gap:
+            return ""
+        if pred > act:  # over-confident — the case that throttles entries
+            return (
+                f"CALIBRATION FEEDBACK: over your last {int(n)} attributed decisions you were "
+                f"correct {act*100:.0f}% of the time but expressed ~{pred*100:.0f}% confidence — "
+                f"you have been OVER-CONFIDENT. Recalibrate: lower your stated confidence and "
+                f"reserve the strongest negative verdict (BLOCK / CLOSE_NOW) for genuinely "
+                f"high-severity, well-evidenced cases; when uncertain, prefer the softer call."
+            )
+        return (
+            f"CALIBRATION FEEDBACK: over your last {int(n)} attributed decisions you were "
+            f"correct {act*100:.0f}% vs ~{pred*100:.0f}% stated confidence — you have been "
+            f"UNDER-CONFIDENT. You can trust strong, well-evidenced judgments more."
+        )
+    except Exception as exc:
+        logger.debug("lessons_store.load_calibration_note[%s]: %s", agent_name, exc)
+        return ""

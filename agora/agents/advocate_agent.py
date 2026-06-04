@@ -22,6 +22,7 @@ System prompt: §13.2 of AGORA Grand Specification v1.0
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import sqlite3
@@ -34,7 +35,7 @@ import anthropic
 
 from agora.ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
 from agora.ops.payload_compressor import compress_payload as _compress
-from agora.ops.lessons_store import load_approved_lessons as _load_lessons
+from agora.ops.lessons_store import load_approved_lessons as _load_lessons, load_calibration_note as _load_cal_note
 from agora.mcp.sqlite_tools import SQLITE_TOOLS, sqlite_tool_handlers
 from agora.mcp.search_tools import SEARCH_TOOLS, search_tool_handlers
 from agora.mcp.flow_tools import FLOW_TOOLS, flow_tool_handlers
@@ -44,6 +45,39 @@ logger = logging.getLogger(__name__)
 
 PROMPT_VERSION = "1.0.0"
 _MODEL = "claude-sonnet-4-6"
+
+# Transient API failures that should be RETRIED, not fail-closed. The advocate is the
+# single gate every entry funnels through; treating a momentary timeout / 429 / 5xx as a
+# hard BLOCK silently halts the entry engine (observed: 243 fail-closed blocks in a day,
+# 0 fills). Retry-with-backoff recovers these before the fail-closed policy kicks in.
+_RETRYABLE_ERRORS = tuple(
+    e for e in (
+        getattr(anthropic, "APITimeoutError", None),
+        getattr(anthropic, "APIConnectionError", None),
+        getattr(anthropic, "RateLimitError", None),
+        getattr(anthropic, "InternalServerError", None),
+    ) if e is not None
+)
+
+
+async def _with_retry(coro_factory, *, ticker: str, attempts: int = 3, base_backoff: float = 1.5):
+    """Await coro_factory(), retrying transient Anthropic errors with exponential backoff.
+    Re-raises the last error after `attempts` tries (caller then fail-closes). Non-transient
+    errors (parse failures etc.) are NOT caught here — they propagate immediately."""
+    last_exc = None
+    for i in range(attempts):
+        try:
+            return await coro_factory()
+        except _RETRYABLE_ERRORS as exc:
+            last_exc = exc
+            if i < attempts - 1:
+                wait = base_backoff * (2 ** i)
+                logger.warning(
+                    "Advocate transient API error [%s] attempt %d/%d: %s — retrying in %.1fs",
+                    ticker, i + 1, attempts, type(exc).__name__, wait,
+                )
+                await asyncio.sleep(wait)
+    raise last_exc
 
 # ── System prompt (spec §13.2) ────────────────────────────────────────────────
 
@@ -206,6 +240,11 @@ class AdvocateAgent:
         Never raises — failures return None (treated as PASS by callers).
         """
         lessons = _load_lessons(str(self._settings.db_path), "advocate")
+        # Calibration haircut: prepend the agent's measured over/under-confidence so it
+        # self-corrects (an over-confident advocate over-blocks and throttles entries).
+        _cal_note = _load_cal_note(str(self._settings.db_path), "advocate")
+        if _cal_note:
+            lessons = [_cal_note] + lessons
         payload = self._build_payload(ticker, recommendation, thesis, positions, macro_context, lessons)
         t0 = time.monotonic()
         verdict: AdvocateVerdict | None = None
@@ -225,7 +264,9 @@ class AdvocateAgent:
 
         _cached_system = [{"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}]
         try:
-            response = await run_with_tools(
+            # Retry transient API errors before the caller's fail-closed policy blocks the
+            # trade — keeps the entry engine alive through momentary outages.
+            response = await _with_retry(lambda: run_with_tools(
                 client=self._client,
                 model=_MODEL,
                 system=_cached_system,
@@ -237,7 +278,7 @@ class AdvocateAgent:
                 thinking={"type": "disabled"},
                 output_config={"effort": "medium"},
                 timeout=anthropic.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0),
-            )
+            ), ticker=ticker)
             latency_ms = int((time.monotonic() - t0) * 1000)
             in_tok  = response.usage.input_tokens  if response.usage else 0
             out_tok = response.usage.output_tokens if response.usage else 0

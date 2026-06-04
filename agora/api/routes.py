@@ -1768,6 +1768,8 @@ async def get_exit_quality(days: int = 30) -> JSONResponse:
         import sqlite3
         db = str(session._settings.db_path)
         with sqlite3.connect(db, timeout=5) as conn:
+            # Exclude non-decision close sources (broker reconciliation / startup sync) —
+            # they aren't exit decisions and pollute the exit-quality attribution.
             rows = conn.execute(
                 """SELECT COALESCE(close_source,'unknown') src, COUNT(*) n,
                           SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) wins,
@@ -1775,6 +1777,7 @@ async def get_exit_quality(days: int = 30) -> JSONResponse:
                           ROUND(MIN(realized_pnl),2) worst, ROUND(MAX(realized_pnl),2) best
                    FROM positions
                    WHERE status='closed' AND close_date >= date('now', ?)
+                     AND COALESCE(close_source,'') NOT IN ('tws_startup_sync','reconcile','startup_sync')
                    GROUP BY close_source ORDER BY total DESC""",
                 (f"-{int(days)} days",),
             ).fetchall()

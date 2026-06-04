@@ -38,7 +38,7 @@ from typing import Any, Callable, Awaitable
 import anthropic
 
 from agora.ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
-from agora.ops.lessons_store import load_approved_lessons as _load_lessons
+from agora.ops.lessons_store import load_approved_lessons as _load_lessons, load_calibration_note as _load_cal_note
 from agora.ops.payload_compressor import compress_payload as _compress
 
 logger = logging.getLogger(__name__)
@@ -193,6 +193,11 @@ class ExitIntelligenceAgent:
         original_thesis = thesis_override if thesis_override is not None \
             else self._fetch_original_thesis(position_id)
         lessons = _load_lessons(str(self._settings.db_path), "exit")
+        # Calibration haircut: feed the exit agent its measured over-confidence (it predicts
+        # ~79% right, delivers ~42%) so it stops closing winners on weak thesis-break calls.
+        _cal_note = _load_cal_note(str(self._settings.db_path), "exit")
+        if _cal_note:
+            lessons = [_cal_note] + lessons
         payload = self._build_payload(position, original_thesis, macro_context, lessons)
         decision_id = self._fetch_chain_id(position_id)
 
