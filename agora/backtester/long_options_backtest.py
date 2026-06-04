@@ -120,6 +120,27 @@ def _hv(closes: list[float], i: int, window: int) -> float:
     return statistics.pstdev(rets) * math.sqrt(252)
 
 
+def _adx(highs: list[float], lows: list[float], closes: list[float], i: int, period: int = 14) -> float:
+    """Wilder ADX at index i (trend-strength: >25 trending, <20 ranging). Lookahead-free."""
+    if i < period * 2:
+        return 0.0
+    trs, plus_dm, minus_dm = [], [], []
+    for k in range(i - period * 2 + 1, i + 1):
+        up = highs[k] - highs[k - 1]
+        dn = lows[k - 1] - lows[k]
+        plus_dm.append(up if (up > dn and up > 0) else 0.0)
+        minus_dm.append(dn if (dn > up and dn > 0) else 0.0)
+        trs.append(max(highs[k] - lows[k], abs(highs[k] - closes[k - 1]), abs(lows[k] - closes[k - 1])))
+    # Wilder-smoothed DI over the last `period`
+    atr = sum(trs[-period:]) / period
+    if atr <= 0:
+        return 0.0
+    pdi = 100 * (sum(plus_dm[-period:]) / period) / atr
+    mdi = 100 * (sum(minus_dm[-period:]) / period) / atr
+    dx = 100 * abs(pdi - mdi) / (pdi + mdi) if (pdi + mdi) > 0 else 0.0
+    return dx  # single-period DX ~ ADX proxy (sufficient for regime bucketing)
+
+
 def _hv_rank(hv_series: list[float], i: int, lookback: int = 252) -> float:
     """Percentile rank of current HV vs its trailing `lookback` — IVR proxy (0-100)."""
     lo = max(0, i - lookback)
@@ -241,139 +262,148 @@ class Trade:
     pnl_dollars: float      # net of commission, sized
     hold_days: int
     signals: dict = field(default_factory=dict)
+    regime: str = "all"     # market regime at entry (set by regime-aware runner)
 
 
 def simulate_ticker(ticker: str, bars: list[dict]) -> tuple[list[Trade], list[dict]]:
-    """Returns (trades, daily_signal_rows) for one ticker. No lookahead."""
+    """Returns (trades, daily_signal_rows) for one ticker — default momentum signal. No lookahead."""
     closes = [b["close"] for b in bars]
-    vols   = [b["volume"] for b in bars]
-    dates  = [b["date"] for b in bars]
     n = len(bars)
-    hv20_series = [_hv(closes, i, 20) for i in range(n)]
-
-    trades: list[Trade] = []
     sig_rows: list[dict] = []
-    open_until_idx = -1  # index until which a position is open (block new entries)
-
     for i in range(60, n):
-        S = closes[i]
-        rsi = _rsi(closes, i)
-        above20 = S > _sma(closes, i, 20)
-        above50 = S > _sma(closes, i, 50)
-        ret10 = (closes[i] / closes[i - 10] - 1.0) if closes[i - 10] > 0 else 0.0
-        avg_vol20 = statistics.fmean(vols[i - 20:i]) if i >= 20 else 0
-        vol_surge = avg_vol20 > 0 and vols[i] > 2 * avg_vol20
-
-        direction, conviction, quality, stack = _score(rsi, above20, above50, ret10, vol_surge)
-
-        # Record signal row for IC (every day, independent of entry filter)
         if i + 5 < n:
+            S = closes[i]; rsi = _rsi(closes, i)
+            above20 = S > _sma(closes, i, 20); above50 = S > _sma(closes, i, 50)
+            ret10 = (closes[i] / closes[i - 10] - 1.0) if closes[i - 10] > 0 else 0.0
+            avg = statistics.fmean([b["volume"] for b in bars][i - 20:i]) if i >= 20 else 0
+            vs = avg > 0 and bars[i]["volume"] > 2 * avg
             fwd5 = closes[i + 5] / S - 1.0
             mom = 1 if (rsi > 55 and above20 and above50) else (-1 if (rsi < 45 and not above20 and not above50) else 0)
             rs = 1 if ret10 > 0.03 else (-1 if ret10 < -0.03 else 0)
-            sig_rows.append({"mom": mom, "rs": rs, "vol": 1 if vol_surge else 0,
-                             "conv_net": (mom + rs), "fwd5": fwd5})
+            sig_rows.append({"mom": mom, "rs": rs, "vol": 1 if vs else 0, "conv_net": (mom + rs), "fwd5": fwd5})
 
-        if i <= open_until_idx or direction is None:
+    def _default_signal(f):
+        return _score(f["rsi"], f["above20"], f["above50"], f["ret10"], f["vol_surge"])
+    return run_strategy(ticker, bars, _default_signal), sig_rows
+
+
+def _features(closes, vols, highs, lows, hv20_series, i):
+    """All indicators at bar i (lookahead-free) — the feature vector strategies/regimes read."""
+    S = closes[i]
+    avg20 = statistics.fmean(vols[i - 20:i]) if i >= 20 else 0
+    return {
+        "S": S, "i": i,
+        "rsi": _rsi(closes, i),
+        "above20": S > _sma(closes, i, 20),
+        "above50": S > _sma(closes, i, 50),
+        "above200": S > _sma(closes, i, 200),
+        "ret5":  (closes[i] / closes[i - 5] - 1.0)  if closes[i - 5] > 0 else 0.0,
+        "ret10": (closes[i] / closes[i - 10] - 1.0) if closes[i - 10] > 0 else 0.0,
+        "ret20": (closes[i] / closes[i - 20] - 1.0) if closes[i - 20] > 0 else 0.0,
+        "vol_surge": avg20 > 0 and vols[i] > 2 * avg20,
+        "adx": _adx(highs, lows, closes, i),
+        "hv20": hv20_series[i],
+        "ivr": _hv_rank(hv20_series, i),
+        "high20": max(closes[i - 20:i]) if i >= 20 else S,   # prior 20-day high (breakout)
+        "low20":  min(closes[i - 20:i]) if i >= 20 else S,
+    }
+
+
+def _simulate_position(ticker, closes, dates, i, n, direction, conviction, quality,
+                       ivr, hv20, hv5, stack, regime="all"):
+    """Run one option entry + the exact exit ladder from bar i. Returns (Trade|None, exit_idx)."""
+    S = closes[i]
+    dte = _select_dte(ticker, ivr, MAX_HOLD_DAYS, hv5, hv20)
+    sigma = hv20 * (1 + VRP)
+    opt = "call" if direction == "bull" else "put"
+    tdelta = _conviction_delta(conviction, TARGET_DELTA)
+    T = dte / 365.0     # calendar-day convention (see note: avoids 1.448x theta over-decay)
+    K = strike_for_delta(S, T, sigma, tdelta, opt, R_FREE)
+    if opt == "call" and K <= S * 1.001:
+        K = round(S * 1.01, 2)
+    if opt == "put" and K >= S * 0.999:
+        K = round(S * 0.99, 2)
+    mid = bs_price(S, K, T, R_FREE, sigma, opt)
+    if mid <= 0:
+        return None, i
+    slip = entry_slippage(ticker)
+    pay = mid * (1 + slip)
+    if pay * 100 < MIN_PREMIUM:
+        return None, i
+    contracts = _contracts(quality, pay * 100)
+    if contracts < 1:
+        return None, i
+
+    entry_dt = dates[i]
+    target_close_dt = entry_dt + timedelta(days=MAX_HOLD_DAYS)
+    profit_tgt = _conviction_profit_target(conviction)
+    peak = 0.0; exit_reason = "expiry"; exit_idx = i; pnl_pct = 0.0; cur_pct = 0.0
+    j = i + 1
+    while j < n:
+        Sd = closes[j]
+        age = (dates[j] - entry_dt).days
+        dte_rem = dte - age
+        if dte_rem <= 0:
+            val = max(0.0, Sd - K) if opt == "call" else max(0.0, K - Sd)
+        else:
+            sig_t = sigma * (1 - IV_CRUSH * min(age / 10.0, 1.0))
+            val = bs_price(Sd, K, dte_rem / 365.0, R_FREE, sig_t, opt)
+        exit_val = val * (1 - slip)
+        cur_pct = exit_val / pay - 1.0
+        peak = max(peak, cur_pct)
+        urgent = (target_close_dt - dates[j]).days <= 3
+        eff_tgt = profit_tgt * 0.5 if urgent else profit_tgt
+        eff_floor = TRAIL_FLOOR * 0.5 if urgent else TRAIL_FLOOR
+        if age >= MAX_HOLD_DAYS:
+            exit_reason = "time_stop"; pnl_pct = cur_pct; exit_idx = j; break
+        if cur_pct >= eff_tgt and peak < TRAIL_TRIGGER:
+            exit_reason = "profit_target"; pnl_pct = cur_pct; exit_idx = j; break
+        if peak >= TRAIL_TRIGGER and cur_pct <= (peak - eff_floor):
+            exit_reason = "trailing_stop"; pnl_pct = cur_pct; exit_idx = j; break
+        if cur_pct <= -STOP_LOSS_PCT:
+            exit_reason = "stop_loss"; pnl_pct = cur_pct; exit_idx = j; break
+        j += 1
+    else:
+        pnl_pct = cur_pct; exit_idx = n - 1
+
+    pnl_dollars = pnl_pct * pay * 100 * contracts - COMMISSION * 2 * contracts
+    return Trade(
+        ticker=ticker, direction=direction, entry_date=str(entry_dt), exit_date=str(dates[exit_idx]),
+        conviction=conviction, quality=round(quality, 2), dte=dte, entry_spot=round(S, 2), strike=K,
+        entry_premium=round(pay, 3), contracts=contracts, exit_reason=exit_reason,
+        pnl_pct=round(pnl_pct, 4), pnl_dollars=round(pnl_dollars, 2),
+        hold_days=(dates[exit_idx] - entry_dt).days, signals=stack, regime=regime,
+    ), exit_idx
+
+
+def run_strategy(ticker, bars, signal_fn, regime_fn=None):
+    """
+    Generic strategy runner. signal_fn(features) -> (direction, conviction, quality, stack);
+    regime_fn(features) -> regime label (tagged onto each trade). One position per ticker.
+    """
+    closes = [b["close"] for b in bars]; vols = [b["volume"] for b in bars]
+    highs = [b["high"] for b in bars]; lows = [b["low"] for b in bars]; dates = [b["date"] for b in bars]
+    n = len(bars)
+    hv20_series = [_hv(closes, i, 20) for i in range(n)]
+    trades: list[Trade] = []
+    open_until = -1
+    for i in range(200, n - 1):   # need 200 bars for SMA200/ADX context
+        if i <= open_until:
             continue
-
-        # IVR proxy + gate
-        ivr = _hv_rank(hv20_series, i)
+        f = _features(closes, vols, highs, lows, hv20_series, i)
+        direction, conviction, quality, stack = signal_fn(f)
+        if direction is None or f["hv20"] <= 0:
+            continue
+        ivr = f["ivr"]
         if ivr > IVR_CAP:
             continue
-        hv20 = hv20_series[i]
-        hv5 = _hv(closes, i, 5)
-        if hv20 <= 0:
-            continue
-
-        if i + 1 >= n:
-            continue  # need at least one forward bar to mark/exit
-        dte = _select_dte(ticker, ivr, MAX_HOLD_DAYS, hv5, hv20)
-        sigma = hv20 * (1 + VRP)
-        opt = "call" if direction == "bull" else "put"
-        tdelta = _conviction_delta(conviction, TARGET_DELTA)
-        # DTE is CALENDAR days-to-expiry → annualize with 365 (calendar convention),
-        # and decrement by calendar days when marking. (Mixing calendar-day decrement
-        # with /252 over-charges theta by 365/252 = 1.448x — corrected here.)
-        T = dte / 365.0
-        K = strike_for_delta(S, T, sigma, tdelta, opt, R_FREE)
-        # OTM-only constraint
-        if opt == "call" and K <= S * 1.001:
-            K = round(S * 1.01, 2)
-        if opt == "put" and K >= S * 0.999:
-            K = round(S * 0.99, 2)
-
-        mid = bs_price(S, K, T, R_FREE, sigma, opt)
-        if mid <= 0:
-            continue
-        slip = entry_slippage(ticker)
-        pay = mid * (1 + slip)                     # buy at ask
-        prem_per_contract = pay * 100
-        if prem_per_contract < MIN_PREMIUM:
-            continue
-        contracts = _contracts(quality, prem_per_contract)
-        if contracts < 1:
-            continue
-
-        # ── Forward simulation with the exact exit ladder ──────────────────────
-        entry_dt = dates[i]
-        target_close_dt = entry_dt + timedelta(days=MAX_HOLD_DAYS)
-        profit_tgt = _conviction_profit_target(conviction)
-        peak = 0.0
-        exit_reason = "expiry"
-        exit_idx = i
-        pnl_pct = 0.0
-        cur_pct = 0.0
-
-        j = i + 1
-        while j < n:
-            Sd = closes[j]
-            age = (dates[j] - entry_dt).days
-            dte_rem = dte - age
-            if dte_rem <= 0:
-                val = max(0.0, Sd - K) if opt == "call" else max(0.0, K - Sd)
-            else:
-                sig_t = sigma * (1 - IV_CRUSH * min(age / 10.0, 1.0))
-                val = bs_price(Sd, K, dte_rem / 365.0, R_FREE, sig_t, opt)
-            exit_val = val * (1 - slip)            # sell at bid
-            cur_pct = exit_val / pay - 1.0
-            peak = max(peak, cur_pct)
-
-            days_to_close = (target_close_dt - dates[j]).days
-            urgent = days_to_close <= 3
-            eff_tgt = profit_tgt * 0.5 if urgent else profit_tgt
-            eff_floor = TRAIL_FLOOR * 0.5 if urgent else TRAIL_FLOOR
-
-            # A. time stop (calendar)
-            if age >= MAX_HOLD_DAYS:
-                exit_reason = "time_stop"; pnl_pct = cur_pct; exit_idx = j; break
-            # B. profit target (only before trail active)
-            if cur_pct >= eff_tgt and peak < TRAIL_TRIGGER:
-                exit_reason = "profit_target"; pnl_pct = cur_pct; exit_idx = j; break
-            # C. trailing stop
-            if peak >= TRAIL_TRIGGER and cur_pct <= (peak - eff_floor):
-                exit_reason = "trailing_stop"; pnl_pct = cur_pct; exit_idx = j; break
-            # D. flat stop
-            if cur_pct <= -STOP_LOSS_PCT:
-                exit_reason = "stop_loss"; pnl_pct = cur_pct; exit_idx = j; break
-            j += 1
-        else:
-            # ran out of data: mark at last available
-            pnl_pct = cur_pct
-            exit_idx = n - 1
-
-        pnl_dollars = pnl_pct * pay * 100 * contracts - COMMISSION * 2 * contracts
-        trades.append(Trade(
-            ticker=ticker, direction=direction, entry_date=str(entry_dt),
-            exit_date=str(dates[exit_idx]), conviction=conviction, quality=round(quality, 2),
-            dte=dte, entry_spot=round(S, 2), strike=K, entry_premium=round(pay, 3),
-            contracts=contracts, exit_reason=exit_reason, pnl_pct=round(pnl_pct, 4),
-            pnl_dollars=round(pnl_dollars, 2), hold_days=(dates[exit_idx] - entry_dt).days,
-            signals=stack,
-        ))
-        open_until_idx = exit_idx   # one position per ticker at a time
-
-    return trades, sig_rows
+        regime = regime_fn(f) if regime_fn else "all"
+        tr, exit_idx = _simulate_position(ticker, closes, dates, i, n, direction, conviction,
+                                          quality, ivr, f["hv20"], _hv(closes, i, 5), stack, regime)
+        if tr is not None:
+            trades.append(tr)
+            open_until = exit_idx
+    return trades
 
 
 # ── Metrics ─────────────────────────────────────────────────────────────────────
@@ -425,13 +455,12 @@ def summarize(trades: list[Trade]) -> dict:
     }
 
 
-def main():
+def load_universe(tickers=UNIVERSE, start=START, end=END, min_bars=250):
+    """Batch-download daily OHLCV → {ticker: [bar dicts]}. Shared by main() and the regime engine."""
     import yfinance as yf
-    print(f"Fetching {len(UNIVERSE)} tickers {START}..{END} ...")
-    df = yf.download(UNIVERSE, start=START, end=END, progress=False,
-                     auto_adjust=True, group_by="ticker")
+    df = yf.download(tickers, start=start, end=end, progress=False, auto_adjust=True, group_by="ticker")
     data: dict[str, list[dict]] = {}
-    for t in UNIVERSE:
+    for t in tickers:
         try:
             tdf = df[t]
         except Exception:
@@ -444,8 +473,14 @@ def main():
             bars.append({"date": ts.date(), "open": float(row.get("Open", c)),
                          "high": float(row.get("High", c)), "low": float(row.get("Low", c)),
                          "close": float(c), "volume": int(row.get("Volume", 0) or 0)})
-        if len(bars) > 100:
+        if len(bars) > min_bars:
             data[t] = bars
+    return data
+
+
+def main():
+    print(f"Fetching {len(UNIVERSE)} tickers {START}..{END} ...")
+    data = load_universe()
     print(f"Loaded {len(data)} tickers with history.\n")
 
     all_trades: list[Trade] = []
