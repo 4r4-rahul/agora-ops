@@ -226,6 +226,18 @@ class ExitIntelligenceAgent:
             raw_output = json.loads(raw_text)
             rec = _parse_recommendation(raw_output)
 
+            # Fact-grounding monitor — verify the exit agent's event claims vs the calendar.
+            try:
+                from agora.ops.fact_grounding import scan as _fact_scan
+                _claim_text = " ".join([
+                    rec.recommendation_reasoning or "", rec.thesis_validity_reasoning or "",
+                    " ".join(rec.key_risks or []),
+                ])
+                _fact_scan(_claim_text, str(self._settings.db_path),
+                           source="exit", ticker=position.ticker)
+            except Exception:
+                pass
+
             try:
                 _log_msg(str(self._settings.db_path), "ExitIntelligenceAgent", self._model,
                          response.usage, purpose=f"exit_{position.ticker}",

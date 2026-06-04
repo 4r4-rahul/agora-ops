@@ -317,6 +317,18 @@ class AdvocateAgent:
             )
             verdict = _parse_verdict(raw_output)
 
+            # Fact-grounding monitor — verify the advocate's stated event claims against the
+            # macro calendar (catches the "FOMC tomorrow" hallucination class independently).
+            try:
+                from agora.ops.fact_grounding import scan as _fact_scan
+                _claim_text = (raw_output.get("most_likely_loss_scenario", "") or "") + " " + \
+                    (getattr(verdict, "verdict_reasoning", "") or "") + " " + " ".join(
+                        f"{fm.get('mode_name','')} {fm.get('trigger_conditions','')}"
+                        for fm in (raw_output.get("failure_modes") or []) if isinstance(fm, dict))
+                _fact_scan(_claim_text, str(self._settings.db_path), source="advocate", ticker=ticker)
+            except Exception:
+                pass
+
             try:
                 _log_msg(str(self._settings.db_path), "AdvocateAgent", _MODEL,
                          response.usage, purpose=f"advocate_{ticker}",

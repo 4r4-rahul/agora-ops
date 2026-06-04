@@ -1799,6 +1799,41 @@ async def get_exit_quality(days: int = 30) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+@router.get("/fact-divergence")
+async def get_fact_divergence(days: int = 7) -> JSONResponse:
+    """
+    GET /agora/fact-divergence — the fact-grounding monitor's log.
+    Times an agent's stated reasoning diverged from deterministic ground truth (e.g. cited
+    an event as imminent when the calendar disagrees). The systemic safety net from the
+    C-suite post-mortem: catches confidently-wrong agent claims that metrics miss.
+    """
+    session = get_session()
+    if session is None:
+        return JSONResponse({"error": "session not running"}, status_code=503)
+    try:
+        import sqlite3
+        db = str(session._settings.db_path)
+        with sqlite3.connect(db, timeout=5) as conn:
+            try:
+                rows = conn.execute(
+                    """SELECT ts_utc, source, ticker, claimed_event, actual_next_event, issue, severity
+                       FROM fact_divergence_log
+                       WHERE ts_utc >= datetime('now', ?)
+                       ORDER BY ts_utc DESC LIMIT 50""",
+                    (f"-{int(days)} days",),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                rows = []   # table not created yet → no divergences ever recorded
+        items = [{
+            "ts": r[0], "source": r[1], "ticker": r[2], "claimed_event": r[3],
+            "actual": r[4], "issue": r[5], "severity": r[6],
+        } for r in rows]
+        return JSONResponse({"days": days, "count": len(items), "divergences": items})
+    except Exception as exc:
+        logger.error("fact-divergence endpoint error: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 @router.get("/calibration")
 async def get_calibration() -> JSONResponse:
     """

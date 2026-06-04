@@ -846,6 +846,27 @@ tr.pos-detail-row td { padding: 0; background: var(--bg1); }
       </div>
     </div>
 
+    <!-- ── Fact-Grounding monitor row ── -->
+    <div id="row-factcheck" style="margin-top:10px">
+      <div class="panel">
+        <div class="panel-header">🔍 Fact-Grounding Monitor
+          <span id="factcheck-badge" style="margin-left:8px;font-size:11px;font-weight:600;color:var(--green)">✓ no divergences (7d)</span>
+          <button onclick="fetchFactCheck()"
+            style="margin-left:auto;padding:1px 7px;font-size:10px;font-family:var(--font);
+                   background:rgba(88,166,255,.12);border:1px solid rgba(88,166,255,.3);
+                   color:var(--blue);border-radius:4px;cursor:pointer">↻</button>
+        </div>
+        <div class="tbl-wrap" style="max-height:140px">
+          <table>
+            <thead><tr><th>When</th><th>Agent</th><th>Ticker</th><th>Claimed</th><th>Reality / Issue</th></tr></thead>
+            <tbody id="factcheck-tbody">
+              <tr><td colspan="5" style="color:var(--text2);text-align:center;padding:8px;font-size:10px">No agent fact divergences — reasoning matches ground truth</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
     <!-- ── LLM Cost row ── -->
     <div id="row-llmcost" style="margin-top:10px">
       <div class="panel">
@@ -2618,6 +2639,39 @@ async function fetchExits() {
   }
 }
 
+// ── Fact-Grounding Monitor ────────────────────────────────────────────────────
+async function fetchFactCheck() {
+  const tbody = document.getElementById('factcheck-tbody');
+  const badge = document.getElementById('factcheck-badge');
+  try {
+    const r = await fetch('/agora/fact-divergence');
+    if (!r.ok) return;
+    const d = await r.json();
+    const items = d.divergences || [];
+    if (!items.length) {
+      badge.textContent = '✓ no divergences (7d)';
+      badge.style.color = 'var(--green)';
+      tbody.innerHTML = '<tr><td colspan="5" style="color:var(--text2);text-align:center;padding:8px;font-size:10px">No agent fact divergences — reasoning matches ground truth</td></tr>';
+      return;
+    }
+    badge.textContent = `⚠ ${d.count} divergence(s) (7d)`;
+    badge.style.color = 'var(--red)';
+    tbody.innerHTML = items.map(x => {
+      const sc = x.severity === 'high' ? 'var(--red)' : 'var(--yellow)';
+      const when = (x.ts || '').slice(5, 16).replace('T', ' ');
+      return `<tr>
+        <td style="color:var(--text2);font-size:10px">${when}</td>
+        <td>${x.source}</td>
+        <td>${x.ticker || '-'}</td>
+        <td style="color:${sc};font-weight:600">${x.claimed_event}</td>
+        <td style="font-size:10px" title="${(x.issue||'').replace(/"/g,'')}">${x.actual || ''} — ${(x.issue||'').slice(0,70)}</td>
+      </tr>`;
+    }).join('');
+  } catch(ex) {
+    tbody.innerHTML = `<tr><td colspan="5" style="color:var(--red);padding:8px;font-size:10px">Error: ${ex.message}</td></tr>`;
+  }
+}
+
 // ── LLM Cost ──────────────────────────────────────────────────────────────────
 async function fetchCosts() {
   const tbody = document.getElementById('llmcost-tbody');
@@ -2764,7 +2818,7 @@ async function fetchToday() {
 
   await Promise.all([
     fetchHealth(), fetchOrders(), fetchPositions(), fetchAttribution(), fetchSignals(),
-    fetchMarket(), fetchReadiness(), fetchCsuite(), fetchToday(), fetchLong(), fetchExits(), fetchCosts(),
+    fetchMarket(), fetchReadiness(), fetchCsuite(), fetchToday(), fetchLong(), fetchExits(), fetchCosts(), fetchFactCheck(),
   ]);
 
   // TWS live data — fetch once on load then every 30s (makes a real IBKR connection)
@@ -2783,6 +2837,7 @@ async function fetchToday() {
   setInterval(fetchLong,        60_000); // long-options status: refresh every 60s
   setInterval(fetchExits,      300_000); // exit-quality attribution: refresh every 5m
   setInterval(fetchCosts,      300_000); // LLM cost breakdown: refresh every 5m
+  setInterval(fetchFactCheck,  300_000); // fact-grounding monitor: refresh every 5m
   setInterval(fetchStratHealth, 300_000); // strategy health: refresh every 5 min (matches patrol)
 })();
 
