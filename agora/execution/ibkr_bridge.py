@@ -135,6 +135,8 @@ async def submit_trade(rec: Any, settings: Any, session_id: str) -> dict:
         port=settings.ibkr_port,
         client_id=settings.ibkr_client_id,
         price_step_size=getattr(settings, "pricing_step_size", 0.05),
+        use_adaptive_algo=getattr(settings, "use_adaptive_algo", True),
+        adaptive_algo_priority=getattr(settings, "adaptive_algo_priority", "Normal"),
     )
 
     # Paper mode: submit each leg individually to bypass the IBKR riskless-combination

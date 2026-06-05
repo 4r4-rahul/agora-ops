@@ -226,6 +226,21 @@ class AgoraSettings(BaseSettings):
                     "6 steps × $0.05 = $0.30 sweep — covers typical $0.15–$0.50 combo bid-ask. "
                     "Do NOT set to $0.01 (min tick): 6 × $0.01 = $0.06 sweep, never crosses.",
     )
+    use_adaptive_algo: bool = Field(
+        default=True,
+        description="Submit orders with IBKR's Adaptive (Price Management) algo so they fill at a "
+                    "fair price WITHIN the regulatory price collar instead of being rejected/stuck "
+                    "at PendingSubmit. Diagnosed root cause of 100%% order timeouts (2026-06-04): "
+                    "AGORA priced limits >3%% from reference, tripping IBKR's price collar; the "
+                    "Adaptive algo manages the price server-side to avoid that. When ON, the manual "
+                    "price-step loop is skipped (the algo owns pricing).",
+    )
+    adaptive_algo_priority: Literal["Urgent", "Normal", "Patient"] = Field(
+        default="Normal",
+        description="IBKR Adaptive algo aggressiveness: Urgent (fastest fill, worst price), "
+                    "Normal (balanced), Patient (best price, slowest). Normal is a good default "
+                    "for swing entries; Urgent if fills still lag at the open.",
+    )
 
     # ── Paths ──────────────────────────────────────────────────────
     iv_cache_dir: Path = Field(default=Path(".agora/iv_cache"))

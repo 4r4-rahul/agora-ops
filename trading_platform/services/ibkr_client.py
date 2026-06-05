@@ -27,7 +27,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 try:
-    from ib_insync import IB, Option, Contract, ComboLeg, LimitOrder, StopOrder, Order
+    from ib_insync import IB, Option, Contract, ComboLeg, LimitOrder, StopOrder, Order, TagValue
     _IB_AVAILABLE = True
 except ImportError:
     IB = Option = Contract = ComboLeg = LimitOrder = StopOrder = Order = None  # type: ignore[assignment,misc]
@@ -106,6 +106,27 @@ def get_ibkr_client(host: str = "127.0.0.1", port: int = 7497) -> _IBKRPersisten
     return _persistent_client
 
 
+def _apply_adaptive_algo(order: Any, priority: str = "Normal") -> None:
+    """Attach IBKR's Adaptive (Price Management) algo to an order in place.
+
+    Root cause of the 100%-timeout execution failure (diagnosed 2026-06-04 via TWS):
+    AGORA's limit prices landed >3% from the reference price, tripping IBKR's regulatory
+    price collar — orders were rejected / stuck at PendingSubmit and never filled. The
+    Adaptive algo lets IBKR manage the price SERVER-SIDE (using its own market data, so it
+    works even without a client market-data subscription) to fill at a fair price within the
+    collar. This is the programmatic equivalent of TWS's "Use Price Management Algo" prompt.
+
+    Defensive: never let an algo-attach error block a trade — the order still submits plain.
+    """
+    try:
+        if priority not in ("Urgent", "Normal", "Patient"):
+            priority = "Normal"
+        order.algoStrategy = "Adaptive"
+        order.algoParams = [TagValue("adaptivePriority", priority)]
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Could not attach Adaptive algo (%s) — submitting order plain", exc)
+
+
 def _next_expiry(dte: int) -> str:
     """
     Convert DTE to the nearest valid option expiration date string (YYYYMMDD).
@@ -136,6 +157,8 @@ async def place_bracket_order(
     client_id: int = 1,
     timeout: float = 30.0,
     price_step_size: float = 0.05,
+    use_adaptive_algo: bool = True,
+    adaptive_algo_priority: str = "Normal",
 ) -> dict[str, Any]:
     """
     Submit entry + GTC profit-target for a multi-leg spread.
@@ -209,6 +232,9 @@ async def place_bracket_order(
         entry_order.tif = "DAY"
         entry_order.transmit = True
         entry_order.nonGuaranteedFill = True  # required for combo orders on paper accounts
+        # Adaptive algo: fill within the regulatory price collar at a fair price.
+        if use_adaptive_algo:
+            _apply_adaptive_algo(entry_order, adaptive_algo_priority)
 
         entry_trade = ib.placeOrder(bag, entry_order)
         parent_id = entry_trade.order.orderId
@@ -369,6 +395,8 @@ async def place_legs_individually(
     port: int = 7497,
     client_id: int = 10,
     price_step_size: float = 0.05,
+    use_adaptive_algo: bool = True,
+    adaptive_algo_priority: str = "Normal",
 ) -> dict[str, Any]:
     """
     Submit each leg of a spread as a standalone option order.
@@ -439,6 +467,10 @@ async def place_legs_individually(
             order.orderRef = f"{session_id[:35]}-L{i}"
             order.tif = "DAY"
             order.transmit = True
+            # Adaptive algo: let IBKR manage the price within the regulatory collar so the
+            # order fills at a fair price instead of resting unfilled / stuck at PendingSubmit.
+            if use_adaptive_algo:
+                _apply_adaptive_algo(order, adaptive_algo_priority)
             trade = ib.placeOrder(contract, order)
             trades.append(trade)
             orders.append(order)
@@ -448,12 +480,18 @@ async def place_legs_individually(
                 action, ticker, leg_spec["strike"], leg_spec["option_type"].upper(), lmt,
             )
 
-        # ── Adaptive pricing loop ─────────────────────────────────────────────
+        # ── Pricing loop ──────────────────────────────────────────────────────
+        # When the Adaptive algo is on, IBKR owns the price (server-side, within the
+        # collar) — we only POLL for fills and must NOT also step the limit manually
+        # (that would fight the algo). When off, fall back to the manual price walk.
         for step in range(_MAX_PRICE_STEPS):
             await asyncio.sleep(_PRICE_STEP_SEC)
             all_filled = all(t.orderStatus.status == "Filled" for t in trades)
             if all_filled:
                 break
+
+            if use_adaptive_algo:
+                continue  # Adaptive algo manages price; just keep polling for fills
 
             for i, (trade, order) in enumerate(zip(trades, orders)):
                 if trade.orderStatus.status == "Filled":
