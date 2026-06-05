@@ -1928,7 +1928,7 @@ async function fetchAttribution() {
 
     let totalWins = 0, totalT = 0;
     Object.values(pillars).forEach(p => {
-      totalWins += (p.trades || 0) * (p.win_rate || 0) / 100;
+      totalWins += (p.trades || 0) * (p.win_rate || 0);  // win_rate is a FRACTION (0-1)
       totalT    += (p.trades || 0);
     });
     const wr = totalT ? Math.round(totalWins / totalT * 100) : null;
@@ -1943,14 +1943,16 @@ async function fetchAttribution() {
     } else {
       tb.innerHTML = entries.map(([name, p]) => {
         const pnl = p.total_pnl    || 0;
-        const pf  = p.profit_factor || 0;
-        const wr2 = p.win_rate      || 0;
+        const pf  = p.profit_factor;                 // null = no losses = infinite PF
+        const wrPct = (p.win_rate || 0) * 100;       // win_rate is a FRACTION (0-1)
+        const pfTxt = pf == null ? '∞' : pf.toFixed(2);
+        const pfCol = pf == null ? 'var(--green)' : pf >= 1.5 ? 'var(--green)' : pf >= 1 ? 'var(--yellow)' : 'var(--red)';
         return `<tr>
           <td style="color:${PILLAR_COLORS[name]||'var(--text)'};font-size:11px">${PILLAR_LABELS[name]||name}</td>
           <td>${p.trades || 0}</td>
-          <td style="color:${wr2 >= 50 ? 'var(--green)' : 'var(--red)'}">${wr2.toFixed(0)}%</td>
+          <td style="color:${wrPct >= 50 ? 'var(--green)' : 'var(--red)'}">${wrPct.toFixed(0)}%</td>
           <td class="${pnl >= 0 ? 'pnl-pos' : 'pnl-neg'}">${fmt$(pnl)}</td>
-          <td style="color:${pf >= 1.5 ? 'var(--green)' : pf >= 1 ? 'var(--yellow)' : 'var(--red)'}">${pf.toFixed(2)}</td>
+          <td style="color:${pfCol}">${pfTxt}</td>
         </tr>`;
       }).join('');
     }
@@ -1969,9 +1971,17 @@ async function fetchAttribution() {
     const reg = d.regime_accuracy || {};
     document.getElementById('regime-info').innerHTML =
       Object.entries(reg).length
-        ? Object.entries(reg).map(([k, v]) =>
-            `${k}: <span style="color:var(--blue)">${typeof v === 'number' ? v.toFixed(0)+'%' : v}</span>`
-          ).join('<br>')
+        ? Object.entries(reg).map(([k, v]) => {
+            if (v && typeof v === 'object') {       // {regime, pillar, trades, win_rate(frac), total_pnl}
+              const wr  = ((v.win_rate || 0) * 100).toFixed(0);
+              const pnl = v.total_pnl || 0;
+              const label = (v.regime || '—') + (v.pillar ? ' · ' + v.pillar : '');
+              return `${label}: <span style="color:var(--blue)">${wr}% win</span> · `
+                   + `<span class="${pnl >= 0 ? 'pnl-pos' : 'pnl-neg'}">${fmt$(pnl)}</span> `
+                   + `<span style="color:var(--text2)">(${v.trades || 0})</span>`;
+            }
+            return `${k}: <span style="color:var(--blue)">${typeof v === 'number' ? v.toFixed(0)+'%' : v}</span>`;
+          }).join('<br>')
         : '<span style="color:var(--text2)">No data yet</span>';
 
   } catch (err) { console.warn('attribution poll failed', err); }
@@ -1994,14 +2004,14 @@ async function fetchSignals() {
     const stanceColor = stance === 'risk_on' ? 'var(--green)' : stance === 'risk_off' ? 'var(--red)' : 'var(--yellow)';
     document.getElementById('s-stance').textContent   = stance.replace(/_/g,' ');
     document.getElementById('s-stance').style.color   = stanceColor;
-    document.getElementById('s-confidence').textContent = conf ? conf + '%' : '—';
+    document.getElementById('s-confidence').textContent = conf ? Math.round(conf * 100) + '%' : '—';
     document.getElementById('s-vol-selling').textContent = volOk == null ? '—' : (volOk ? '✓ OK' : '✗ BLOCKED');
     document.getElementById('s-vol-selling').style.color = volOk == null ? 'var(--text2)' : (volOk ? 'var(--green)' : 'var(--red)');
     document.getElementById('s-size-bias').textContent   = typeof bias === 'number' ? bias.toFixed(2) + 'x' : bias;
     document.getElementById('s-method').textContent      = method;
 
     setKpi('k-stance', stance.replace(/_/g,' '), stance==='risk_on'?'pos':stance==='risk_off'?'neg':'neu');
-    document.getElementById('k-conf').textContent = conf ? `Confidence: ${conf}%` : 'Confidence: —';
+    document.getElementById('k-conf').textContent = conf ? `Confidence: ${Math.round(conf * 100)}%` : 'Confidence: —';
 
     // Universe chips
     document.getElementById('universe-chips').innerHTML = (d.universe || []).map(sym =>

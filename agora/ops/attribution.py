@@ -98,8 +98,12 @@ class PnlAttributor:
                 "total_pnl": round(s["total_pnl"], 2),
                 "avg_win": round(s["win_pnl"] / wins, 2) if wins > 0 else 0.0,
                 "avg_loss": round(s["loss_pnl"] / max(1, n - wins), 2),
-                "profit_factor": round(
-                    s["win_pnl"] / max(0.01, abs(s["loss_pnl"])), 3
+                # Profit factor is gross_win / gross_loss. With NO losses it is
+                # mathematically infinite — return None (UI renders ∞) instead of
+                # dividing by a 0.01 floor, which produced absurd values (e.g. 56900).
+                "profit_factor": (
+                    round(s["win_pnl"] / abs(s["loss_pnl"]), 3)
+                    if abs(s["loss_pnl"]) > 0 else None
                 ),
                 "total_slippage": round(s["total_slippage"], 2),
                 "total_commission": round(s["total_commission"], 2),
