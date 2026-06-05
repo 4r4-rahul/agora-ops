@@ -1704,6 +1704,9 @@ class AgoraSession:
                                     "profit_target_pct": decision.profit_target_pct,
                                     "signal_quality":    decision.signal_quality,
                                     "conviction":        decision.conviction,
+                                    # C-lite: tag post-event-settle entries so attribution can
+                                    # measure whether event-day entries are +EV (re-evaluate after ~10-15).
+                                    "event_day":         bool(getattr(rec, "event_day", False)),
                                 },
                             )
                             agent.journal(decision, str(self._settings.db_path), position_id or "")
@@ -2996,7 +2999,46 @@ class AgoraSession:
         is_long = strat in ("long_call", "long_put")
 
         if risk == "avoid" or days == 0:
-            return ("block", f"{event} is TODAY (calendar=avoid) — event-day block on new multi-day risk")
+            # ── C-lite: time-aware, event-type-aware event-day handling ──────────
+            # Pre-market prints (NFP/CPI/PPI, ~8:30 ET) resolve before the open — block
+            # pre-release through a settle window, then ALLOW size-reduced + tagged entries
+            # to ride the post-event momentum (the strategy's core edge). Intraday events
+            # (FOMC ~14:00 ET + presser) reverse violently all afternoon → blocked all day.
+            ev_lower   = (event or "").lower()
+            is_fomc    = any(k in ev_lower for k in ("fomc", "fed ", "rate decision", "powell", "interest rate"))
+            reopen_on  = getattr(self._settings, "event_gate_intraday_reopen", True)
+            settle_str = getattr(self._settings, "event_gate_settle_et", "10:00")
+            try:
+                _sh, _sm = (int(x) for x in settle_str.split(":"))
+            except Exception:
+                _sh, _sm = 10, 0
+            now_et      = datetime.now(tz=ET)
+            past_settle = (now_et.hour, now_et.minute) >= (_sh, _sm)
+            # Only the genuine event-day, pre-market type, past settle, with flag on, reopens.
+            eligible = reopen_on and (days == 0) and (not is_fomc) and past_settle
+            if not eligible:
+                if reopen_on and days == 0 and not is_fomc and not past_settle:
+                    reason = (f"{event} is TODAY (calendar=avoid) — pre-settle block "
+                              f"(entries reopen {settle_str} ET, post-event, size-reduced)")
+                elif is_fomc:
+                    reason = f"{event} is TODAY (calendar=avoid) — FOMC/intraday event blocked ALL day (reversal risk)"
+                else:
+                    reason = f"{event} is TODAY (calendar=avoid) — event-day block on new multi-day risk"
+                return ("block", reason)
+            # Past the settle window on a pre-market event day → ALLOW, size-reduced + tagged.
+            try:
+                rec.event_day = True
+            except Exception:
+                pass
+            _pre_ev = rec.contracts
+            rec.contracts = max(1, int(_pre_ev * 0.5))   # half size on event days (extra conservative)
+            logger.info("Event gate [%s]: %s TODAY but past %s ET settle — ALLOW post-event "
+                        "(size %d→%d, event_day tagged)", ticker, event, settle_str, _pre_ev, rec.contracts)
+            note = (f"EVENT-DAY POST-SETTLE: {event} resolved pre-market (now past {settle_str} ET). "
+                    f"Entry ALLOWED to capture post-event momentum, size-reduced ({_pre_ev}→{rec.contracts}) "
+                    f"and tagged event_day. Elevated whipsaw risk — block only on a distinct, "
+                    f"high-severity, well-evidenced risk, not on event proximity alone.")
+            return ("size_down", note)
 
         cushion_txt = ""
         if not is_long:

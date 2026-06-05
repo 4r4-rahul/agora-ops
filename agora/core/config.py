@@ -150,6 +150,21 @@ class AgoraSettings(BaseSettings):
                     "the advocate ACCURATE quantified event context so it stops over-blocking on "
                     "mis-identified/assumed events. Set false to revert to blanket behavior.",
     )
+    event_gate_intraday_reopen: bool = Field(
+        default=True,
+        description="C-lite event-day refinement: PRE-MARKET events (NFP/CPI/PPI, ~8:30 ET) "
+                    "resolve before the open, so instead of blocking the whole day, block only "
+                    "until the settle window below, then ALLOW entries (size-reduced + tagged "
+                    "event_day) to ride the post-event momentum — the strategy's core edge. "
+                    "INTRADAY events (FOMC, ~14:00 ET + presser) stay blocked ALL day regardless "
+                    "(violent reversal risk). Set false to revert to all-day block on every event.",
+    )
+    event_gate_settle_et: str = Field(
+        default="10:00",
+        description="ET time (HH:MM) after which new entries reopen on a PRE-MARKET event day "
+                    "(NFP/CPI prints at 8:30; ~90 min lets the open settle). Entries before this "
+                    "time, and FOMC days entirely, remain blocked.",
+    )
 
     # ── Universe ───────────────────────────────────────────────────
     etf_universe: list[str] = Field(
