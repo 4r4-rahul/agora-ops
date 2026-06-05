@@ -103,7 +103,25 @@ class ExecutionQualityAgent:
         """Call when IBKR confirms a fill."""
         self._session_fills += 1
         slippage = mid_price - fill_price  # positive = better than mid (rare)
-        self._session_slippage.append(slippage)
+
+        # Sanity guard: a multi-leg combo reports one execution per LEG, so passing a
+        # single leg's price here instead of the NET fill produces impossible slippage
+        # (e.g. mid 0.53 vs leg 5.79 => -5.42). If |slippage| dwarfs the mid, the units
+        # almost certainly don't match — flag it and DON'T pollute the slippage average.
+        plausible = (
+            mid_price > 0
+            and fill_price > 0
+            and abs(slippage) <= max(0.50, 1.5 * mid_price)
+        )
+        if plausible:
+            self._session_slippage.append(slippage)
+        else:
+            slippage = None  # type: ignore[assignment]
+            logger.warning(
+                "ExecutionQuality: implausible slippage for %s (mid=%.4f fill=%.4f) — "
+                "likely a per-leg vs net-combo unit mismatch; slippage not recorded",
+                ticker, mid_price, fill_price,
+            )
 
         cur = self._db.execute(
             "UPDATE execution_quality SET outcome='fill', fill_price=?, slippage_ticks=? "
@@ -123,8 +141,9 @@ class ExecutionQualityAgent:
             )
         self._db.commit()
         logger.info(
-            "ExecutionQuality FILL: %s | fill=%.4f mid=%.4f slippage=%.4f",
-            ticker, fill_price, mid_price, slippage,
+            "ExecutionQuality FILL: %s | fill=%.4f mid=%.4f slippage=%s",
+            ticker, fill_price, mid_price,
+            f"{slippage:+.4f}" if slippage is not None else "n/a(unit-mismatch)",
         )
 
     def record_reject(

@@ -135,19 +135,23 @@ async def submit_trade(rec: Any, settings: Any, session_id: str) -> dict:
         port=settings.ibkr_port,
         client_id=settings.ibkr_client_id,
         price_step_size=getattr(settings, "pricing_step_size", 0.05),
-        use_adaptive_algo=getattr(settings, "use_adaptive_algo", True),
+        use_adaptive_algo=getattr(settings, "use_adaptive_algo", False),
         adaptive_algo_priority=getattr(settings, "adaptive_algo_priority", "Normal"),
     )
 
-    # Paper mode: submit each leg individually to bypass the IBKR riskless-combination
-    # order limit (Error 201). Individual option orders are not classified as "riskless
-    # combination orders" and work for all tickers including single-name equities.
-    # Live mode: always use BAG combo (atomic fill guarantee, no leg gap risk).
-    if settings.trading_mode == "paper":
+    # BAG combo is the default for BOTH modes: it needs only the NET spread price
+    # (the one price we have from yfinance), whereas leg-by-leg mis-prices each leg
+    # at the net value when there's no per-leg market-data subscription — which
+    # drove the 0.7% fill rate on 2026-06-05. Error 201 (riskless-combo limit) no
+    # longer fires now that GTC profit-target children are removed, so paper can use
+    # BAG too. Leg-by-leg stays as an explicit opt-out (paper_use_bag_combo=False).
+    paper_bag = getattr(settings, "paper_use_bag_combo", True)
+    if settings.trading_mode == "paper" and not paper_bag:
         fn = place_legs_individually
-        logger.info("PAPER mode: using leg-by-leg submission for %s (avoids Error 201)", rec.ticker)
+        logger.info("PAPER mode: leg-by-leg submission for %s (paper_use_bag_combo=False)", rec.ticker)
     else:
         fn = place_bracket_order
+        kwargs["max_slippage_pct_of_width"] = getattr(settings, "max_slippage_pct_of_width", 0.10)
 
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(

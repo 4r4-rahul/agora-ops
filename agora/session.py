@@ -3497,13 +3497,16 @@ class AgoraSession:
             reason = order.get("reason", "")
             self._exec_quality.record_reject(ticker, error_code, reason, str(strategy_str))
             logger.warning("ORDER REJECTED: %s | code=%s | %s", ticker, error_code, reason)
-            # Execution cooldown: if the order timed out after all price steps, the spread
-            # is too illiquid to fill at mid+step. Block re-submission for 2 hours.
-            if "price steps" in reason or "Unfilled" in reason:
+            # Execution cooldown: any non-201 cancel means the spread didn't fill even
+            # after walking mid -> natural. Re-submitting the same idea this cycle just
+            # restarts a multi-minute walk that will fail again (this is what produced
+            # the ~20-attempts/ticker/day storm). Block re-submission for 2 hours.
+            # (Error 201 has its own per-session block below.)
+            if error_code != "201":
                 _cooldown_until = datetime.now(tz=timezone.utc) + timedelta(seconds=self._EXEC_COOLDOWN_SECS)
                 self._exec_cooldowns[ticker] = _cooldown_until
                 logger.info(
-                    "EXEC COOLDOWN set: %s blocked until %s (spread too illiquid at current pricing)",
+                    "EXEC COOLDOWN set: %s blocked until %s (unfilled after repricing walk)",
                     ticker, _cooldown_until.strftime("%H:%M ET"),
                 )
             # If Error 201 detected, trigger orphan reconciliation and block ticker for session.
@@ -3515,7 +3518,14 @@ class AgoraSession:
         elif order_status == "Filled":
             # Only record the position on confirmed fill — not on Submitted/PreSubmitted
             fills = order.get("fills", [])
-            fill_price = float(fills[0]["price"]) if fills else mid_price
+            # Use the NET combo fill (same units as the mid) for slippage; fall back
+            # to a single leg, then the mid. The old fills[0]["price"] was one LEG's
+            # price vs the net mid — that logged nonsense slippage (mid 0.53 vs 5.79).
+            fill_price = float(
+                order.get("net_fill_price")
+                or (fills[0]["price"] if fills else 0.0)
+                or mid_price
+            )
             self._exec_quality.record_fill(ticker, fill_price, mid_price, str(strategy_str))
             logger.info("ORDER FILLED: %s | fill_price=%.4f | mid=%.4f", ticker, fill_price, mid_price)
             position_id = self._record_position(
@@ -3586,27 +3596,23 @@ class AgoraSession:
             )
             logger.warning(
                 "ORDER PENDING (not recorded): %s | status=%s | order_id=%s — "
-                "scheduling 90s retry; orphan reconciler will cancel if still open",
+                "armed exec cooldown; orphan reconciler will cancel if still open",
                 ticker, order_status, order.get("order_id"),
             )
             # Record as an attempt but not a fill
             self._exec_quality.record_reject(ticker, "pending", order_status, str(strategy_str))
 
-            # Retry: re-evaluate after 90s — don't abandon a valid setup just because
-            # the first submission landed in TWS limbo. All gates re-run on retry;
-            # if setup is no longer valid it won't trade.
-            _retry_ticker = ticker
-            async def _retry_pending_order():
-                await asyncio.sleep(90)
-                if self._position_mgr.get_open_position_by_ticker(_retry_ticker):
-                    logger.info("PENDING RETRY skipped — %s now has an open position", _retry_ticker)
-                    return
-                logger.info("PENDING RETRY: re-evaluating %s after 90s", _retry_ticker)
-                try:
-                    await self._evaluate_ticker(_retry_ticker)
-                except Exception as _retry_exc:
-                    logger.warning("PENDING RETRY failed for %s: %s", _retry_ticker, _retry_exc)
-            asyncio.create_task(_retry_pending_order())
+            # Arm the SAME exec cooldown as a cancel. A resting/limbo order must NOT be
+            # re-submitted — that created duplicate working orders and was the engine of
+            # the ~20-attempts/ticker/day storm (the old 90s auto-retry re-evaluated the
+            # ticker with no cooldown, looping all day). The orphan reconciler cancels any
+            # order still open in TWS; the cooldown lets the spread settle before we retry.
+            _cooldown_until = datetime.now(tz=timezone.utc) + timedelta(seconds=self._EXEC_COOLDOWN_SECS)
+            self._exec_cooldowns[ticker] = _cooldown_until
+            logger.info(
+                "EXEC COOLDOWN set (pending): %s blocked until %s",
+                ticker, _cooldown_until.strftime("%H:%M ET"),
+            )
 
     def _record_position(
         self,

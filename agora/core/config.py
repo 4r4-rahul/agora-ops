@@ -242,19 +242,39 @@ class AgoraSettings(BaseSettings):
                     "Do NOT set to $0.01 (min tick): 6 × $0.01 = $0.06 sweep, never crosses.",
     )
     use_adaptive_algo: bool = Field(
-        default=True,
-        description="Submit orders with IBKR's Adaptive (Price Management) algo so they fill at a "
-                    "fair price WITHIN the regulatory price collar instead of being rejected/stuck "
-                    "at PendingSubmit. Diagnosed root cause of 100%% order timeouts (2026-06-04): "
-                    "AGORA priced limits >3%% from reference, tripping IBKR's price collar; the "
-                    "Adaptive algo manages the price server-side to avoid that. When ON, the manual "
-                    "price-step loop is skipped (the algo owns pricing).",
+        default=False,
+        description="Attach IBKR's Adaptive (Price Management) algo to entry orders. "
+                    "VERIFIED 2026-06-05: IBKR does NOT support Adaptive on multi-leg combo/BAG "
+                    "orders (credit & debit spreads) — it is silently ignored and the order rests "
+                    "as a plain static limit. The 2026-06-04 'fix' that turned this ON (and turned "
+                    "OFF the repricing walk) drove fill rate to 0.7%% on 06-05. Adaptive is valid "
+                    "ONLY on single-leg orders, so this defaults OFF; the midpoint->natural "
+                    "repricing walk is what fills combos. Leave OFF unless routing single legs.",
     )
     adaptive_algo_priority: Literal["Urgent", "Normal", "Patient"] = Field(
         default="Normal",
-        description="IBKR Adaptive algo aggressiveness: Urgent (fastest fill, worst price), "
-                    "Normal (balanced), Patient (best price, slowest). Normal is a good default "
-                    "for swing entries; Urgent if fills still lag at the open.",
+        description="IBKR Adaptive algo aggressiveness (only used when use_adaptive_algo is ON, "
+                    "i.e. single-leg routing): Urgent (fastest fill, worst price), Normal "
+                    "(balanced), Patient (best price, slowest).",
+    )
+    max_slippage_pct_of_width: float = Field(
+        default=0.10,
+        description="Repricing-walk slippage budget as a fraction of the spread's strike WIDTH. "
+                    "The entry limit starts at the net mid and walks toward the marketable "
+                    "(natural) price — up for debits, down for credits — stopping once it has given "
+                    "up this fraction of the width (e.g. a $5-wide vertical at 0.10 => $0.50 of "
+                    "room). Width-based (not %% of credit) so credit spreads still get enough room "
+                    "to cross. Owner-chosen 2026-06-05. The execution advisor tunes this from "
+                    "observed fill rates.",
+    )
+    paper_use_bag_combo: bool = Field(
+        default=True,
+        description="In paper mode, route entries as atomic BAG combo orders priced at the net "
+                    "mid (the only price we have without a per-leg market-data subscription) "
+                    "instead of leg-by-leg. Leg-by-leg mis-prices every leg at the net spread "
+                    "value (no per-leg quotes) and risks naked shorts; BAG needs only the net "
+                    "price. Error 201 (riskless-combo limit) no longer fires now that GTC "
+                    "profit-target children are removed. Set False to revert to leg-by-leg.",
     )
 
     # ── Paths ──────────────────────────────────────────────────────

@@ -157,25 +157,38 @@ async def place_bracket_order(
     client_id: int = 1,
     timeout: float = 30.0,
     price_step_size: float = 0.05,
-    use_adaptive_algo: bool = True,
+    use_adaptive_algo: bool = False,
     adaptive_algo_priority: str = "Normal",
+    max_slippage_pct_of_width: float = 0.10,
 ) -> dict[str, Any]:
     """
-    Submit entry + GTC profit-target for a multi-leg spread.
+    Submit a multi-leg spread entry as an atomic BAG combo order, priced at the
+    net mid and repriced toward the marketable (natural) price until it fills or
+    a slippage budget is exhausted.
 
     IBKR does not support STP/STP LMT orders on BAG (combo) contracts, so the
-    stop-loss is intentionally omitted here. MonitorAgent owns stop-loss exits:
+    stop-loss is intentionally omitted here. PositionManager owns stop-loss exits:
     it polls prices every 60 s and calls close_position() when the stop is hit.
     This design avoids silent order rejections and keeps exit logic in one place.
 
+    Execution model (VERIFIED 2026-06-05)
+    -------------------------------------
+    There is no algo shortcut for filling option combos: IBKR's Adaptive algo is
+    silently IGNORED on BAG orders (it only applies to single legs), and native
+    combo books exist only on ISE/ONE/DTB — SMART-routed US combos are legged for
+    best execution, so the only lever is the net limit price. We therefore start
+    at the net mid (the price we have from yfinance) and walk it toward the natural
+    in `price_step_size` increments, capped at `max_slippage_pct_of_width` × the
+    spread's strike width. Adaptive is left off for combos by default.
+
     Parameters
     ----------
-    entry_price:    Net debit (positive) or credit (negative) for the spread
-    profit_target:  Price at which to take profit (GTC limit child order)
-    stop_loss:      Informational only — enforced by MonitorAgent, not submitted here
-    price_step_size: Dollars to step toward market each 30s interval. Options combo
-                    bid-ask spreads are typically $0.15–$0.50 wide; 6 × $0.05 = $0.30
-                    sweep covers most liquid names. Default 0.05, NOT 0.01 (minimum tick).
+    entry_price:    Net debit (positive) or credit (negative) per share for the spread
+    profit_target:  Informational — PositionManager owns the profit exit (no TWS child)
+    stop_loss:      Informational only — enforced by PositionManager, not submitted here
+    price_step_size: Dollars to step the net limit toward the natural each interval.
+    max_slippage_pct_of_width: Walk budget as a fraction of strike width. A $5-wide
+                    vertical at 0.10 gives $0.50 of room before the order is cancelled.
     """
     if not _IB_AVAILABLE:
         raise RuntimeError("ib_insync not installed. Run: pip install ib_insync")
@@ -218,144 +231,137 @@ async def place_bracket_order(
             for leg_spec, contract in qualified_legs
         ]
 
-        # ── Entry order (standalone DAY limit — no GTC profit-target child) ──
-        # GTC child orders accumulate across sessions and trigger IBKR Error 201
-        # ("riskless combination limit"). PositionManager owns all exits (50%
-        # profit, 2× stop, DTE close) — no need for a TWS-side target order.
+        # ── Slippage budget from the spread's strike width ──────────────────
+        _TICK = 0.01  # minimum options tick size
+        strikes = [float(ls["strike"]) for ls, _ in qualified_legs]
+        width = (max(strikes) - min(strikes)) if len(strikes) >= 2 else 0.0
+        # Calendars / same-strike combos have no strike width — fall back to a
+        # fraction of the net mid so the walk still has somewhere to go.
+        slippage_budget = round(
+            (width * max_slippage_pct_of_width) if width > 0
+            else max(price_step_size, abs(entry_price) * max_slippage_pct_of_width),
+            2,
+        )
+
+        # ── Entry: net limit at the mid, no GTC child, no Adaptive on a BAG ──
+        # GTC children accumulate across sessions → Error 201; PositionManager owns
+        # all exits. Adaptive is silently ignored on combos (verified 06-05), so we
+        # attach it ONLY to a genuine single leg.
         order_action = "BUY" if entry_price > 0 else "SELL"
+        mid_limit = abs(round(entry_price, 2))
         entry_order = LimitOrder(
             action=order_action,
             totalQuantity=contracts,
-            lmtPrice=abs(round(entry_price, 2)),
+            lmtPrice=mid_limit,
         )
         entry_order.orderRef = session_id[:40]
         entry_order.tif = "DAY"
         entry_order.transmit = True
-        entry_order.nonGuaranteedFill = True  # required for combo orders on paper accounts
-        # Adaptive algo: fill within the regulatory price collar at a fair price.
-        if use_adaptive_algo:
+        entry_order.nonGuaranteedFill = True  # required for SMART-routed combos
+        if use_adaptive_algo and len(qualified_legs) == 1:
             _apply_adaptive_algo(entry_order, adaptive_algo_priority)
 
         entry_trade = ib.placeOrder(bag, entry_order)
         parent_id = entry_trade.order.orderId
 
-        _PRICE_STEP_SEC  = 30    # seconds between price adjustments
-        _MAX_PRICE_STEPS = 6     # 6 steps × 30s = 3 minutes total
-        _TICK            = 0.01  # minimum options tick size
-        # Credit spreads (SELL): accept less credit each step → step price down
-        # Debit spreads  (BUY):  pay more each step            → step price up
-        # Use price_step_size not the $0.01 minimum tick — combo bid-ask is $0.15–$0.50 wide;
-        # $0.01/step only sweeps $0.06 total, which never crosses the spread.
-        price_step = -price_step_size if order_action == "SELL" else +price_step_size
+        # Walk direction & natural bound. Debit (BUY) pays more toward the ask;
+        # credit (SELL) accepts less credit toward the bid. Clamp so a debit never
+        # exceeds the spread's max value and a credit never gives up more than half.
+        step_dir = +1 if order_action == "BUY" else -1
+        if order_action == "BUY":
+            natural = mid_limit + slippage_budget
+            if width > 0:
+                natural = min(natural, width * 0.99)  # can't pay more than it can be worth
+        else:
+            natural = max(mid_limit - slippage_budget, mid_limit * 0.5, _TICK)
+        natural = round(natural, 2)
+        walk_room = abs(natural - mid_limit)
+        # Bound the walk to a fixed number of reprices so a wide spread can't hog the
+        # single-threaded IBKR executor for 10+ min. Size each step to cover the whole
+        # budget within _MAX_WALK_STEPS (so the per-step move grows with width).
+        _MAX_WALK_STEPS = 12
+        _PRICE_STEP_SEC = 20  # seconds the limit rests before the next reprice (~4 min max)
+        max_steps = max(1, min(_MAX_WALK_STEPS, int(round(walk_room / max(price_step_size, _TICK)))))
+        eff_step = (max(price_step_size, round(walk_room / max_steps, 2))
+                    if walk_room > 0 else price_step_size)
 
         logger.info(
-            "[%s] Entry submitted — orderId=%d entry=%.2f "
-            "(stop=%.2f target=%.2f managed by PositionManager)",
-            session_id, parent_id, entry_price, stop_loss, profit_target,
+            "[%s] BAG entry submitted — orderId=%d action=%s mid=%.2f walk->%.2f "
+            "(width=%.2f budget=%.2f steps=%d) | stop=%.2f managed by PositionManager",
+            session_id, parent_id, order_action, mid_limit, natural,
+            width, slippage_budget, max_steps, stop_loss,
         )
 
-        # ── Phase 1: wait for TWS acknowledgement (up to `timeout` seconds) ─
-        loop = asyncio.get_event_loop()
-        deadline = loop.time() + timeout
-        while loop.time() < deadline:
-            await asyncio.sleep(1)
-            status = entry_trade.orderStatus.status
-            if status in ("Filled", "Submitted", "PreSubmitted"):
-                break
-            if status in ("Cancelled", "ApiCancelled", "Inactive"):
-                # Brief wait: ib_insync may update entry_trade.log slightly after
-                # orderStatus flips — errorCode=201 arrives in a separate callback.
-                await asyncio.sleep(0.25)
-                log_entries = list(entry_trade.log)
-                tws_msgs = [e.message for e in log_entries if e.message]
-                error_codes = [e.errorCode for e in log_entries if getattr(e, "errorCode", 0)]
-                reason = " | ".join(tws_msgs[-3:]) if tws_msgs else "no detail"
-                logger.warning("[%s] BAG combo rejected (%s): %s", session_id, status, reason)
-                is_201 = (
-                    201 in error_codes
-                    or any("201" in m or "Riskless" in m or "riskless" in m for m in tws_msgs)
-                )
-                if is_201:
-                    # Error 201: riskless combo limit — do NOT fall back to individual
-                    # legs. Legging in fills the short but leaves the long unhedged,
-                    # creating a naked short put that bypasses all risk controls.
-                    # Return a structured rejection; the session skips the trade.
-                    logger.warning(
-                        "[%s] Error 201: riskless combo disabled on this account — "
-                        "trade skipped (no leg fallback to prevent naked shorts)",
-                        session_id,
-                    )
-                    return {
-                        "order_id": parent_id,
-                        "status": "Cancelled",
-                        "error_code": "201",
-                        "fills": [],
-                        "entry_price": entry_price,
-                        "profit_target": profit_target,
-                        "stop_loss": stop_loss,
-                        "reason": "Error 201 — riskless combination orders disabled on this account",
-                    }
-                raise RuntimeError(f"Bracket entry {parent_id} rejected: {status} — {reason}")
-
-        # ── Phase 2: adaptive pricing — step toward market every 30s ─────────
-        current_limit = abs(round(entry_price, 2))
-        for step in range(1, _MAX_PRICE_STEPS + 1):
-            if entry_trade.orderStatus.status == "Filled":
-                break
-            await asyncio.sleep(_PRICE_STEP_SEC)
+        # ── Repricing walk: mid → natural until filled or budget exhausted ──
+        current_limit = mid_limit
+        # One extra interval so the order rests at `natural` before we give up.
+        for step in range(max_steps + 1):
+            # Let the limit rest for one interval, breaking early on a terminal status.
+            for _ in range(_PRICE_STEP_SEC):
+                await asyncio.sleep(1)
+                if entry_trade.orderStatus.status in (
+                    "Filled", "Cancelled", "ApiCancelled", "Inactive"
+                ):
+                    break
 
             status = entry_trade.orderStatus.status
             if status == "Filled":
                 break
             if status in ("Cancelled", "ApiCancelled", "Inactive"):
-                tws_msgs = [e.message for e in entry_trade.log if e.message]
-                raise RuntimeError(
-                    f"Bracket entry {parent_id} cancelled during pricing: "
-                    f"{'|'.join(tws_msgs[-2:])}"
+                await asyncio.sleep(0.25)  # errorCode 201 lands in a later callback
+                log_entries = list(entry_trade.log)
+                tws_msgs = [e.message for e in log_entries if e.message]
+                error_codes = [e.errorCode for e in log_entries if getattr(e, "errorCode", 0)]
+                reason = " | ".join(tws_msgs[-3:]) if tws_msgs else "no detail"
+                is_201 = (
+                    201 in error_codes
+                    or any("201" in m or "iskless" in m for m in tws_msgs)
                 )
+                logger.warning("[%s] BAG combo rejected (%s): %s", session_id, status, reason)
+                if is_201:
+                    # Riskless-combo limit — do NOT leg in (would leave a naked short).
+                    return {
+                        "order_id": parent_id, "status": "Cancelled", "error_code": "201",
+                        "fills": [], "entry_price": entry_price,
+                        "profit_target": profit_target, "stop_loss": stop_loss,
+                        "reason": "Error 201 — riskless combination orders disabled on this account",
+                    }
+                return {
+                    "order_id": parent_id, "status": "Cancelled", "fills": [],
+                    "entry_price": current_limit, "profit_target": profit_target,
+                    "stop_loss": stop_loss, "reason": f"Rejected during walk: {reason}",
+                }
 
-            # Adjust limit price one tick toward market
-            current_limit = round(current_limit + price_step, 2)
-            current_limit = max(current_limit, _TICK)   # never go below 1 tick
+            # Reprice one step toward the natural (unless already there).
+            if abs(current_limit - natural) < _TICK:
+                continue  # resting at the natural — keep waiting, don't overshoot
+            current_limit = round(current_limit + step_dir * eff_step, 2)
+            current_limit = (min(current_limit, natural) if step_dir > 0
+                             else max(current_limit, natural, _TICK))
             entry_order.lmtPrice = current_limit
-            entry_order.transmit = True  # standalone modification — transmit immediately
+            entry_order.transmit = True
             ib.placeOrder(bag, entry_order)
             logger.info(
-                "[%s] Price step %d/%d — new limit=%.2f (%s)",
-                session_id, step, _MAX_PRICE_STEPS, current_limit, order_action,
+                "[%s] Reprice step %d/%d — limit=%.2f (%s, natural=%.2f)",
+                session_id, step + 1, max_steps, current_limit, order_action, natural,
             )
 
-        # ── Cancel if still unfilled after all steps ──────────────────────────
-        final_status = entry_trade.orderStatus.status
-        if final_status == "Filled":
-            pass  # handled below
-        elif final_status in ("Submitted", "PreSubmitted"):
-            # Order is still working in TWS. Cancel it — a DAY order that couldn't
-            # fill at any price step in 3 minutes is too wide. Caller will NOT record
-            # a position; the bracket sits cancelled in TWS.
-            ib.cancelOrder(entry_order)
+        # ── Cancel if still unfilled after the full walk ───────────────────
+        if entry_trade.orderStatus.status != "Filled":
+            try:
+                ib.cancelOrder(entry_order)
+            except Exception:
+                pass
             logger.warning(
-                "[%s] Order %d still pending (%s) after %d price steps — cancelled",
-                session_id, parent_id, final_status, _MAX_PRICE_STEPS,
+                "[%s] Order %d unfilled after walking mid=%.2f->natural=%.2f — cancelled",
+                session_id, parent_id, mid_limit, natural,
             )
             return {
-                "order_id": parent_id,
-                "status": "Cancelled",
-                "fills": [],
-                "entry_price": current_limit,
-                "profit_target": profit_target,
+                "order_id": parent_id, "status": "Cancelled", "fills": [],
+                "entry_price": current_limit, "profit_target": profit_target,
                 "stop_loss": stop_loss,
-                "reason": f"Unfilled after {_MAX_PRICE_STEPS} price steps (3 min)",
+                "reason": f"Unfilled after walking mid {mid_limit:.2f} -> natural {natural:.2f}",
             }
-        else:
-            ib.cancelOrder(entry_order)
-            logger.warning(
-                "[%s] Order %d unfilled after %d price steps — cancelled",
-                session_id, parent_id, _MAX_PRICE_STEPS,
-            )
-            raise RuntimeError(
-                f"Bracket entry {parent_id} unfilled after {_MAX_PRICE_STEPS} price steps"
-            )
 
         fills = [
             {
@@ -367,11 +373,28 @@ async def place_bracket_order(
             for f in entry_trade.fills
         ]
 
+        # Net combo fill price (per share), so slippage-vs-mid is comparable.
+        # A BAG reports one execution PER LEG — using a single leg's price (the old
+        # bug) logged nonsense slippage like mid=0.53 vs fill=5.79. Sum the signed
+        # leg fills (BUY=+, SELL=-) to recover the net; abs() to match the mid's
+        # magnitude regardless of debit/credit sign.
+        sign_by_conid = {
+            c.conId: (+1 if ls["action"].upper() == "BUY" else -1)
+            for ls, c in qualified_legs
+        }
+        net_fill = 0.0
+        for f in entry_trade.fills:
+            cid = getattr(getattr(f, "contract", None), "conId", None)
+            net_fill += sign_by_conid.get(cid, +1) * float(f.execution.price)
+        net_fill_price = round(abs(net_fill), 4) if entry_trade.fills else current_limit
+
         return {
             "order_id": parent_id,
             "status": entry_trade.orderStatus.status,
             "fills": fills,
-            "entry_price": current_limit,   # actual limit at time of fill
+            "entry_price": net_fill_price,       # net combo fill per share
+            "net_fill_price": net_fill_price,    # explicit; used for slippage tracking
+            "limit_at_fill": current_limit,      # the net limit when it filled
             "profit_target": profit_target,
             "stop_loss": stop_loss,
         }

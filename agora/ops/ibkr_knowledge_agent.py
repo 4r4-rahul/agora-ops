@@ -8,6 +8,9 @@ Owns all IBKR-specific intelligence for AGORA:
   • Adaptive-pricing loop audit (are we walking the limit too aggressively?)
   • Shadow-book vs IBKR-book reconciliation
   • Fill-rate and slippage benchmarking
+  • ACTIVE execution-parameter advisor: reads execution quality every scan and
+    recommends concrete param changes (use_adaptive_algo, max_slippage_pct_of_width,
+    liquidity filtering) in shadow mode → execution_advisor_journal + COO escalation
   • On-demand IBKR question answering via Claude (used by COO and CEO)
 
 Reporting chain:  IBKRKnowledgeAgent → COOAgent → CEOAgent → Owner (Rahul)
@@ -21,6 +24,7 @@ Claude features used:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sqlite3
 from collections import defaultdict
@@ -152,25 +156,38 @@ Entry order action:
   Credit spread (we get) → action="SELL", lmtPrice = +credit_per_share (positive)
   IBKR interprets the sign from the action, so limitPrice is ALWAYS positive.
 
-Bracket structure (AGORA's setup):
-  parent = LimitOrder(action=..., lmtPrice=..., transmit=False)
-  parent.tif = "DAY"
-  parent.orderRef = session_id[:30]
+Entry structure (AGORA's CURRENT setup — single standalone DAY limit):
+  entry = LimitOrder(action=..., lmtPrice=net_mid, totalQuantity=contracts)
+  entry.tif = "DAY"
+  entry.transmit = True
+  entry.nonGuaranteedFill = True   ← required for SMART-routed combos
+  entry.orderRef = session_id[:40]
 
-  profit_child = LimitOrder(action=reverse, lmtPrice=target)
-  profit_child.parentId = parent.orderId
-  profit_child.tif = "GTC"      ← CRITICAL: persists across sessions until cancelled
-  profit_child.transmit = True   ← True on last child triggers entire bracket
+  NO GTC profit-target child is submitted. (GTC children persisted across sessions
+  and consumed the riskless-combination counter → Error 201 storms. Removed.)
+  NO STP/STPLMT (IBKR rejects them on BAG). PositionManager owns ALL exits (50%
+  profit, 2× stop, 21-DTE) by polling every 60s and calling close_position().
 
-  IBKR limitation: STP/STPLMT orders are rejected on BAG contracts.
-  Stop-loss is enforced by PositionManager polling (not an IBKR order).
+CRITICAL — Adaptive algo does NOT work on combos (verified 2026-06-05):
+  IBKR silently IGNORES algoStrategy="Adaptive" on a BAG (multi-leg) order and
+  treats it as a plain static limit. Adaptive is valid ONLY on single-leg orders.
+  Attaching it to a credit/debit spread does nothing — and the 2026-06-04 change
+  that turned it ON while turning OFF the repricing walk drove fill rate to 0.7%.
+  => config.use_adaptive_algo defaults OFF; only attach it to a 1-leg order.
 
-Adaptive pricing loop (AGORA's place_bracket_order):
-  Start at mid price. If unfilled after STEP_TIMEOUT (30s), adjust by TICK_STEP.
-  Direction: improve toward ask (debit) or bid (credit) to increase fill probability.
-  _MAX_PRICE_STEPS = 6 steps × 30s = 3 minutes max.
-  After 6 steps unfilled: cancelOrder(), return status="Cancelled".
-  Never record a Submitted/PreSubmitted order as a position — ONLY status="Filled".
+Repricing walk (AGORA's place_bracket_order — the ONLY lever that fills combos):
+  Start the net limit at the yfinance net mid. Every ~20s, if unfilled, step the
+  net limit toward the NATURAL (marketable) price: UP for debits (pay more), DOWN
+  for credits (accept less). Stop once the limit has moved by the slippage budget
+  = max_slippage_pct_of_width × strike width (default 0.10 → $0.50 on a $5 vertical;
+  credit walks are floored at half the mid so they never go negative; debit walks
+  are capped at the spread's max value). If still unfilled at the natural: cancel,
+  return status="Cancelled" (the session arms a 2h exec cooldown so it is NOT
+  re-stormed). Record a position ONLY on status="Filled".
+
+Native combo books exist only on ISE / ONE / DTB. SMART-routed US-options combos
+  are LEGGED for best execution — there is no single venue that fills a SPY vertical
+  atomically, so the net limit price (and walking it) is the only thing that matters.
 
 ━━━ SECTION 4: ORDER LIFECYCLE AND STATUS MACHINE ━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -308,19 +325,21 @@ Contract specification objects:
 
 ━━━ SECTION 7: OPTION EXECUTION BEST PRACTICES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Limit pricing for options:
-  ALWAYS use LMT orders for options. Market orders get slaughtered on bid-ask spread.
-  Starting price: (bid + ask) / 2 = mid price
-  Improvement cadence: 1 tick ($0.05 or $0.10) every 30s toward unfavorable side.
-  Maximum drift: ≤ 10% worse than mid. Beyond that, cancel and wait.
+Limit pricing for combos:
+  ALWAYS use net LMT orders. Market orders get slaughtered on the combo spread.
+  Starting price: the net mid (from yfinance — the only price we have without a
+  per-leg market-data subscription; do NOT trust reqMktData leg quotes on this
+  account, they come back empty and mis-price every leg at the net value).
+  Improvement cadence: step the NET limit toward the natural every ~20s.
+  Maximum drift: max_slippage_pct_of_width × strike width (default 10% of width).
+  Beyond that: cancel; the session arms a 2h exec cooldown (do NOT re-storm).
 
 When to use which order type on BAG:
-  LMT  → entry (primary), profit-target child. ALWAYS.
-  MOC  → forced end-of-day close (expiration day). Use sparingly.
-  MKT  → NEVER on options. 1–2% immediate slippage on any liquid name.
+  LMT  → entry. ALWAYS, walked from net mid → natural. (No GTC child any more.)
+  MKT  → close path only (close_position uses BAG MKT for a guaranteed exit).
   STP  → NOT supported on BAG contracts. IBKR rejects silently.
-  REL  → pegged-to-midpoint; can improve fills on liquid names (SPY, QQQ).
-  GTC  → profit-target child orders ONLY. All other orders should be DAY.
+  Adaptive algo → IGNORED on a BAG. Single-leg only. Never rely on it for spreads.
+  GTC  → not used. Every AGORA order is DAY; exits are PositionManager-driven.
 
 Spread pricing precision:
   Spread price = sum(action_sign × mid_price for each leg)
@@ -332,19 +351,22 @@ Spread pricing precision:
 
 ━━━ SECTION 8: TWS PRECAUTIONARY SETTINGS (critical for AGORA) ━━━━━━━━━━━━━━
 
-TWS Global Configuration → Presets → Options:
-  "Maximum number of option combo orders simultaneously in account" — default=3.
-  Each GTC profit-target child of a bracket = 1 combo order slot.
-  With 3 positions each having a GTC profit-target → slot count = 3 → FULL.
-  Next order → Error 201 "max combo orders exceeded."
+Error 201 "riskless combination order limit" is driven by RESTING combo orders
+(historically the GTC profit-target children). Verified 2026-06-05 with the owner's
+TWS (DUP344869): filtering Global Configuration for "precautionary" surfaces NO
+standalone "max combo orders" numeric field in this TWS version — and crucially,
+with GTC children now REMOVED, Error 201 no longer fires (0 rejects on 06-05; the
+day's failures were all timeouts/mis-pricing, not 201). The combo-count limit is
+therefore insurance, not the active blocker.
 
-AGORA's fix:
-  1. Set this limit to 25+ in TWS Precautionary Settings.
-  2. OrphanOrderReconciler cleans up orphan GTC children every 30 min.
-  3. When closing a position, AGORA should cancel the GTC profit-target child first.
+Relevant TWS settings that DO matter (Global Config → search "combo"):
+  Features → Order Management → Complex Order Types:
+    "Advanced Combo Routing" — must be ENABLED (it is) → SMART legs combos for best fill.
+    "Combos / Spreads"       — enable too (belt-and-suspenders for combo order entry).
+  Order presets do NOT apply to API orders; only account-level precautionary limits do.
 
-Access path: Edit → Global Configuration → Presets → Options → ...
-On IB Gateway (headless): Set via TWS first, then run Gateway.
+If Error 201 ever returns: run OrphanOrderReconciler.reconcile_now() to cancel any
+stale resting combo orders. On IB Gateway (headless): set via TWS first, then run Gateway.
 
 ━━━ SECTION 9: SHADOW BOOK RECONCILIATION ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -411,27 +433,26 @@ Complete execution path for a new trade:
      d. RiskCouncil.approve_trade() (max positions=4, delta limits, loss limits)
      e. exec_quality.record_attempt()
      f. ibkr_bridge.submit_trade() → IBKR_EXECUTOR → _run_in_new_loop → place_bracket_order
-  4. place_bracket_order():
-     a. ib.connectAsync(host, port, clientId=2, timeout=10)
+  4. place_bracket_order() — the default for BOTH paper and live (paper_use_bag_combo):
+     a. ib.connectAsync(host, port, clientId=ibkr_client_id, timeout=10)
      b. Qualify all option legs via qualifyContractsAsync()
-     c. Build BAG contract with ComboLegs
-     d. Entry LimitOrder (transmit=False) + GTC profit-target child (transmit=True)
+     c. Build BAG contract with ComboLegs; compute strike width
+     d. Single entry LimitOrder at the NET MID (no GTC child, no Adaptive on a BAG)
      e. ib.placeOrder(bag, entry_order)
-     f. Adaptive pricing loop: 6 steps × 30s → adjust limit price toward fill
-     g. On Filled: return fills with price, commission
-     h. On timeout (Submitted): cancelOrder() → return status="Cancelled"
-     i. On Error 201: _place_individual_legs() fallback (legs submitted separately)
+     f. Repricing walk: step the net limit mid → natural every ~20s, capped at
+        max_slippage_pct_of_width × width
+     g. On Filled: return net_fill_price (signed sum of leg fills) + raw leg fills
+     h. On unfilled at natural: cancelOrder() → status="Cancelled" (session arms 2h cooldown)
+     i. On Error 201: return status="Cancelled", error_code="201" (NO leg fallback —
+        legging would leave a naked short). Session blocks the ticker for the session.
   5. Session records outcome:
-     - Filled: _record_position() + add_journal_entry()
-     - Cancelled/Rejected: record_reject(), trigger OrphanOrderReconciler if code=201
+     - Filled: record_fill(net_fill_price, mid) + _record_position() + journal
+     - Cancelled/Rejected: record_reject(); arm exec cooldown; reconcile if code=201
 
-Fallback: _place_individual_legs()
-  Used when Error 201 blocks combo orders.
-  Submits each leg separately as vanilla LimitOrder.
-  Short leg: SELL at net spread credit as limit price.
-  Long leg: BUY at ~30% of spread price as proxy limit.
-  Risk: leg risk (short leg fills, long leg doesn't). Acceptable in paper; fix TWS setting in live.
-  Returns mode="individual_legs" so session can differentiate.
+Leg-by-leg fallback: place_legs_individually()
+  ONLY used when paper_use_bag_combo=False (explicit opt-out). NOT auto-invoked on
+  Error 201. It mis-prices legs without a per-leg market-data subscription (it stamps
+  the net spread value onto every leg) and risks leg gaps — avoid unless debugging.
 
 ━━━ SECTION 12: FILL RATE AND SLIPPAGE BENCHMARKS ━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -541,6 +562,7 @@ class IBKRKnowledgeAgent:
         self._open_order_count: int = 0
         self._orphan_count: int = 0
         self._error_201_count: int = 0
+        self._last_recommendations: list[dict] = []  # active execution-param advice
 
     def register_csuite_manager(self, manager: Any) -> None:
         self._csuite_manager = manager
@@ -630,6 +652,7 @@ class IBKRKnowledgeAgent:
             "last_scan_time":      self._last_scan_time.isoformat() if self._last_scan_time else None,
             "last_scan":           self._last_scan,
             "last_diagnosis":      self._last_diagnosis[:300] if self._last_diagnosis else "",
+            "execution_recommendations": self._last_recommendations,
         }
 
     def get_cached_portfolio(self) -> tuple[list[dict], float | None]:
@@ -645,6 +668,136 @@ class IBKRKnowledgeAgent:
         if self._last_scan_time:
             age = (datetime.now(tz=ET) - self._last_scan_time).total_seconds()
         return items, age
+
+    # ── Active execution-parameter advisor ───────────────────────────
+    # The expert doesn't just answer questions — it reads execution quality every
+    # scan and recommends concrete parameter changes (shadow mode). This is the
+    # "system recommends its own execution solutions" loop.
+
+    _FILL_RATE_TARGET   = 0.70   # below this → loosen to fill more
+    _FILL_RATE_HEALTHY  = 0.85   # above this → may tighten to recapture price
+    _SLIPPAGE_TOLERANCE = 0.15   # paying worse than this/sh over mid → tighten
+    _WIDTH_CAP_FLOOR    = 0.05
+    _WIDTH_CAP_CEILING  = 0.25
+
+    def evaluate_execution_params(self) -> dict[str, Any]:
+        """
+        Read execution-quality stats and emit concrete shadow-mode recommendations
+        for the execution parameters (use_adaptive_algo, max_slippage_pct_of_width,
+        upstream liquidity filtering). Deterministic rules — cheap, runs every scan.
+        Recommendations are persisted to execution_advisor_journal and surfaced to
+        the COO/dashboard; nothing is auto-applied.
+        """
+        if not self._eq:
+            return {"available": False, "reason": "no execution_quality agent wired"}
+
+        today = self._eq.get_today_db_stats()
+        week  = self._eq.get_7day_stats()
+        total_today = today.get("total", 0) or 0
+        use = today if total_today >= 10 else week  # need a meaningful sample
+        fill_rate    = use.get("fill_rate")
+        timeout_rate = today.get("timeout_rate")
+        avg_slippage = float(week.get("avg_slippage", 0.0) or 0.0)
+        sample       = use.get("total", 0) or 0
+        reject_reasons = week.get("reject_reasons", {}) or {}
+
+        cur_cap      = float(getattr(self._settings, "max_slippage_pct_of_width", 0.10))
+        cur_adaptive = bool(getattr(self._settings, "use_adaptive_algo", False))
+        recs: list[dict] = []
+
+        # 1) Adaptive must be OFF for combos (no-op that masks the repricing walk).
+        if cur_adaptive:
+            recs.append({
+                "param": "use_adaptive_algo", "current": True, "suggested": False,
+                "severity": "high",
+                "reason": "Adaptive is silently ignored on BAG combos and disables the "
+                          "repricing walk — it tanks fill rate. Turn OFF for combos.",
+            })
+
+        # 2) Low fill rate (timeout-dominated) → widen the slippage budget.
+        if fill_rate is not None and fill_rate < self._FILL_RATE_TARGET and sample >= 10:
+            if cur_cap < self._WIDTH_CAP_CEILING:
+                suggested = round(min(self._WIDTH_CAP_CEILING, cur_cap + 0.05), 2)
+                recs.append({
+                    "param": "max_slippage_pct_of_width",
+                    "current": cur_cap, "suggested": suggested, "severity": "high",
+                    "reason": f"Fill rate {fill_rate:.0%} < target {self._FILL_RATE_TARGET:.0%} "
+                              f"on {sample} attempts — widen the walk so the net limit reaches "
+                              f"the natural before the DAY order expires.",
+                })
+            else:
+                recs.append({
+                    "param": "min_open_interest / bid_ask_max_pct",
+                    "current": "cap at ceiling", "suggested": "tighten liquidity filter",
+                    "severity": "medium",
+                    "reason": f"Fill rate {fill_rate:.0%} still low at the cap ceiling "
+                              f"({cur_cap:.2f}) — the spreads are too wide/illiquid to fill; "
+                              f"filter them out upstream rather than overpay.",
+                })
+
+        # 3) Healthy fills but paying up → tighten to recapture entry price.
+        if (fill_rate is not None and fill_rate >= self._FILL_RATE_HEALTHY
+                and avg_slippage < -self._SLIPPAGE_TOLERANCE
+                and cur_cap > self._WIDTH_CAP_FLOOR):
+            suggested = round(max(self._WIDTH_CAP_FLOOR, cur_cap - 0.02), 2)
+            recs.append({
+                "param": "max_slippage_pct_of_width",
+                "current": cur_cap, "suggested": suggested, "severity": "low",
+                "reason": f"Fills healthy ({fill_rate:.0%}) but avg slippage {avg_slippage:+.2f}/sh "
+                          f"is costly — tighten the cap to recapture entry price.",
+            })
+
+        # 4) Error 201 → account/orphan action, not a pricing param.
+        if reject_reasons.get("201"):
+            recs.append({
+                "param": "orphans / tws_combo_limit", "current": "201 seen",
+                "suggested": "reconcile + verify TWS combo limit", "severity": "high",
+                "reason": f"{reject_reasons['201']} Error-201 rejects in 7d — run "
+                          f"OrphanOrderReconciler and confirm GTC children are gone.",
+            })
+
+        headline = (
+            (f"fill={fill_rate:.0%} " if fill_rate is not None else "fill=n/a ")
+            + (f"timeout={timeout_rate:.0%} " if timeout_rate is not None else "")
+            + f"slip={avg_slippage:+.2f}/sh n={sample} | {len(recs)} rec(s)"
+        )
+        result = {
+            "available": True, "fill_rate": fill_rate, "timeout_rate": timeout_rate,
+            "avg_slippage": avg_slippage, "sample_size": sample,
+            "recommendations": recs, "headline": headline, "shadow_mode": True,
+        }
+        self._last_recommendations = recs
+        self._persist_recommendations(result)
+        return result
+
+    def _persist_recommendations(self, result: dict[str, Any]) -> None:
+        try:
+            conn = sqlite3.connect(str(self._settings.db_path), check_same_thread=False)
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS execution_advisor_journal (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts TEXT NOT NULL,
+                    fill_rate REAL, timeout_rate REAL, avg_slippage REAL,
+                    sample_size INTEGER, recommendations TEXT, headline TEXT,
+                    shadow_mode INTEGER DEFAULT 1
+                )"""
+            )
+            conn.execute(
+                "INSERT INTO execution_advisor_journal "
+                "(ts, fill_rate, timeout_rate, avg_slippage, sample_size, recommendations, headline, shadow_mode) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 1)",
+                (
+                    datetime.now(tz=ET).isoformat(),
+                    result.get("fill_rate"), result.get("timeout_rate"),
+                    result.get("avg_slippage"), result.get("sample_size"),
+                    json.dumps(result.get("recommendations", [])),
+                    result.get("headline", ""),
+                ),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as exc:
+            logger.debug("persist execution recommendations failed: %s", exc)
 
     # ── Background scan ──────────────────────────────────────────────
 
@@ -671,6 +824,25 @@ class IBKRKnowledgeAgent:
 
         # Escalate critical findings to COO
         await self._evaluate_and_escalate(state)
+
+        # Active execution-parameter advisor — recommend (shadow mode) and escalate.
+        try:
+            advice = self.evaluate_execution_params()
+            if advice.get("available"):
+                state["execution_advisor"] = advice
+                highs = [r for r in advice.get("recommendations", [])
+                         if r.get("severity") == "high"]
+                if highs:
+                    lines = "; ".join(
+                        f"{r['param']}: {r['current']}→{r['suggested']}" for r in highs
+                    )
+                    await self._notify(
+                        "warning",
+                        f"🛠️ Execution advisor ({advice.get('headline', '')}) — "
+                        f"recommend (shadow): {lines}",
+                    )
+        except Exception as exc:
+            logger.debug("execution advisor evaluation failed: %s", exc)
 
     def _sync_closed_positions_from_fills(self, tws_fills: list[dict]) -> int:
         """
