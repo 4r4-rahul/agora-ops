@@ -314,6 +314,12 @@ tr.pos-detail-row td { padding: 0; background: var(--bg1); }
 .rtab:hover  { color: var(--text); }
 .rtab-content { display: none; flex: 1; overflow-y: auto; padding: 10px; }
 .rtab-content.active { display: block; }
+.perf-gran { background: var(--bg3); border: 1px solid var(--border); border-radius: 3px;
+  color: var(--text2); font-size: 10px; padding: 3px 10px; cursor: pointer; }
+.perf-gran.active { color: var(--blue); border-color: var(--blue); }
+.perf-stat { background: var(--bg3); border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; }
+.perf-stat .lbl { font-size: 9px; color: var(--text2); text-transform: uppercase; letter-spacing: .4px; }
+.perf-stat .val { font-size: 14px; font-weight: 700; margin-top: 2px; }
 .info-row {
   display: flex; justify-content: space-between; align-items: center;
   padding: 7px 0; border-bottom: 1px solid rgba(48,54,61,.4); font-size: 12px;
@@ -897,6 +903,7 @@ tr.pos-detail-row td { padding: 0; background: var(--bg1); }
   <div id="right-panel">
     <div id="right-tabs">
       <div class="rtab active" data-tab="tab-signals" onclick="switchTab(this)">Signals</div>
+      <div class="rtab" data-tab="tab-performance" onclick="switchTab(this);fetchPerformance()">Performance</div>
       <div class="rtab" data-tab="tab-journal" onclick="switchTab(this);fetchJournal()">Journal</div>
       <div class="rtab" data-tab="tab-strat-health" onclick="switchTab(this);fetchStratHealth()">Strat Health</div>
       <div class="rtab" data-tab="tab-intel" onclick="switchTab(this);fetchIntel()">Intel</div>
@@ -1021,6 +1028,42 @@ tr.pos-detail-row td { padding: 0; background: var(--bg1); }
         <div id="costs-bar" style="height:100%;border-radius:4px;background:var(--green);transition:width .3s"></div>
       </div>
       <div id="costs-breakdown" style="font-size:11px"></div>
+    </div>
+
+    <div id="tab-performance" class="rtab-content">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <span style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px">Performance — capital deployed &amp; P&amp;L</span>
+        <button onclick="fetchPerformance()" style="background:none;border:1px solid var(--border);border-radius:3px;color:var(--text2);font-size:10px;padding:2px 6px;cursor:pointer">↻</button>
+      </div>
+
+      <!-- Confidence headline grid -->
+      <div id="perf-headline" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-bottom:12px"></div>
+
+      <!-- Period toggle -->
+      <div style="display:flex;gap:4px;margin-bottom:8px">
+        <button class="perf-gran active" data-gran="daily"   onclick="setPerfGran(this)">Daily</button>
+        <button class="perf-gran"        data-gran="weekly"  onclick="setPerfGran(this)">Weekly</button>
+        <button class="perf-gran"        data-gran="monthly" onclick="setPerfGran(this)">Monthly</button>
+      </div>
+      <table style="margin-bottom:14px">
+        <thead><tr>
+          <th style="text-align:left">Period</th><th style="text-align:right">Deployed</th>
+          <th style="text-align:right">Realized P&amp;L</th><th style="text-align:right">Trades</th>
+          <th style="text-align:right">Win%</th>
+        </tr></thead>
+        <tbody id="perf-period-tbody"></tbody>
+      </table>
+
+      <div style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">By strategy</div>
+      <table>
+        <thead><tr>
+          <th style="text-align:left">Strategy</th><th style="text-align:right">Trades</th>
+          <th style="text-align:right">Deployed</th><th style="text-align:right">Realized</th>
+          <th style="text-align:right">Win%</th>
+        </tr></thead>
+        <tbody id="perf-strat-tbody"></tbody>
+      </table>
+      <div id="perf-note" style="font-size:10px;color:var(--text2);margin-top:8px"></div>
     </div>
 
     <div id="tab-info" class="rtab-content">
@@ -2030,6 +2073,75 @@ function fmt$(n) {
     minimumFractionDigits: 0, maximumFractionDigits: 0,
   });
 }
+// ── Performance tab (capital deployed + P&L + confidence stats) ───────────────
+let _perfData = null;
+let _perfGran = 'daily';
+function setPerfGran(btn) {
+  document.querySelectorAll('.perf-gran').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  _perfGran = btn.dataset.gran;
+  _renderPerfPeriods();
+}
+function _renderPerfPeriods() {
+  const tb = document.getElementById('perf-period-tbody');
+  if (!tb || !_perfData) return;
+  const rows = _perfData[_perfGran] || [];
+  if (!rows.length) {
+    tb.innerHTML = '<tr><td colspan="5" style="color:var(--text2);text-align:center;padding:12px">No activity yet</td></tr>';
+    return;
+  }
+  tb.innerHTML = rows.map(r => {
+    const closes = r.closes || 0;
+    return `<tr>
+      <td style="font-size:11px">${r.period}</td>
+      <td style="text-align:right">${r.deployed ? '$' + r.deployed.toLocaleString('en-US',{maximumFractionDigits:0}) : '—'}</td>
+      <td style="text-align:right" class="${r.realized >= 0 ? 'pnl-pos' : 'pnl-neg'}">${closes ? fmt$(r.realized) : '—'}</td>
+      <td style="text-align:right">${r.entries || 0}/${closes}</td>
+      <td style="text-align:right;color:${r.win_rate == null ? 'var(--text2)' : r.win_rate >= 50 ? 'var(--green)' : 'var(--yellow)'}">${r.win_rate == null ? '—' : r.win_rate + '%'}</td>
+    </tr>`;
+  }).join('');
+}
+async function fetchPerformance() {
+  try {
+    const r = await fetch('/agora/performance');
+    const d = await r.json();
+    if (d.error) return;
+    _perfData = d;
+    const h = d.headline || {};
+
+    // Headline confidence grid
+    const exp = h.expectancy || 0, net = h.net_realized || 0, pf = h.profit_factor;
+    const stat = (lbl, val, color) =>
+      `<div class="perf-stat"><div class="lbl">${lbl}</div><div class="val" style="color:${color||'var(--text)'}">${val}</div></div>`;
+    document.getElementById('perf-headline').innerHTML =
+      stat('Net Realized', fmt$(net), net >= 0 ? 'var(--green)' : 'var(--red)') +
+      stat('Deployed', '$' + (h.total_deployed||0).toLocaleString('en-US',{maximumFractionDigits:0}), 'var(--text)') +
+      stat('Win Rate', h.win_rate == null ? '—' : h.win_rate + '%', h.win_rate >= 50 ? 'var(--green)' : 'var(--yellow)') +
+      stat('Expectancy/Trade', fmt$(exp), exp >= 0 ? 'var(--green)' : 'var(--red)') +
+      stat('Win:Loss Size', h.wl_ratio == null ? '—' : h.wl_ratio + ' : 1', (h.wl_ratio||0) >= 1.5 ? 'var(--green)' : 'var(--yellow)') +
+      stat('Profit Factor', pf == null ? '—' : pf.toFixed(2), (pf||0) >= 1.5 ? 'var(--green)' : (pf||0) >= 1 ? 'var(--yellow)' : 'var(--red)') +
+      stat('Closed Trades', h.total_trades_closed || 0, 'var(--text)') +
+      stat('Avg Win / Loss', fmt$(h.avg_win||0) + ' / ' + fmt$(h.avg_loss||0), 'var(--text2)') +
+      stat('Best / Worst', fmt$(h.best||0) + ' / ' + fmt$(h.worst||0), 'var(--text2)');
+
+    _renderPerfPeriods();
+
+    // By strategy
+    const st = document.getElementById('perf-strat-tbody');
+    const ss = d.by_strategy || [];
+    st.innerHTML = ss.length ? ss.map(s => `<tr>
+      <td style="font-size:11px">${s.strategy}</td>
+      <td style="text-align:right">${s.trades}</td>
+      <td style="text-align:right">${s.deployed ? '$' + s.deployed.toLocaleString('en-US',{maximumFractionDigits:0}) : '—'}</td>
+      <td style="text-align:right" class="${s.realized >= 0 ? 'pnl-pos' : 'pnl-neg'}">${fmt$(s.realized)}</td>
+      <td style="text-align:right;color:${s.win_rate == null ? 'var(--text2)' : s.win_rate >= 50 ? 'var(--green)' : 'var(--yellow)'}">${s.win_rate == null ? '—' : s.win_rate + '%'}</td>
+    </tr>`).join('') : '<tr><td colspan="5" style="color:var(--text2);text-align:center;padding:12px">No trades yet</td></tr>';
+
+    document.getElementById('perf-note').textContent =
+      `Deployed = premium paid on debit entries (recycled turnover, not simultaneous). ` +
+      `${h.reset_excluded || 0} admin resets excluded. ${h.open_positions || 0} open now. Paper mode.`;
+  } catch (e) { /* keep last good render */ }
+}
 function setKpi(id, val, cls) {
   const el = document.getElementById(id);
   if (!el) return;
@@ -2819,6 +2931,7 @@ async function fetchToday() {
   await Promise.all([
     fetchHealth(), fetchOrders(), fetchPositions(), fetchAttribution(), fetchSignals(),
     fetchMarket(), fetchReadiness(), fetchCsuite(), fetchToday(), fetchLong(), fetchExits(), fetchCosts(), fetchFactCheck(),
+    fetchPerformance(),
   ]);
 
   // TWS live data — fetch once on load then every 30s (makes a real IBKR connection)
@@ -2828,6 +2941,7 @@ async function fetchToday() {
   setInterval(fetchOrders,       8_000);  // orders refresh every 8s — catches fills fast
   setInterval(fetchPositions,   15_000);
   setInterval(fetchAttribution, 60_000);
+  setInterval(fetchPerformance, 60_000);
   setInterval(fetchSignals,     30_000);
   setInterval(fetchMarket,      60_000);
   setInterval(fetchReadiness,   20_000);

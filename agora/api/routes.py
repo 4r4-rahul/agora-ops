@@ -467,6 +467,156 @@ async def get_attribution(days: int = 30) -> JSONResponse:
     })
 
 
+@router.get("/performance")
+async def get_performance() -> JSONResponse:
+    """
+    Capital-deployed + P&L rollups (daily / weekly / monthly) and the confidence
+    stats that tell you whether the book is genuinely working:
+
+      - deployed   = premium paid on DEBIT entries (real money out), grouped by entry_date
+      - realized   = realized P&L from CLOSED trades, grouped by close_date
+      - headline   = win rate, avg win/loss, win:loss ratio, expectancy, profit factor
+      - by_strategy= the same, split per strategy
+
+    'reset' rows are admin position-clears (not real outcomes) and are EXCLUDED from
+    all performance math. Credit-spread entries (negative cost) are excluded from
+    'deployed' since they collect premium rather than deploy capital.
+    """
+    session = get_session()
+    if session is None:
+        return JSONResponse({"error": "session not ready"}, status_code=503)
+
+    import sqlite3 as _sql
+    from datetime import date as _date, datetime as _dt
+
+    db_path = session._settings.db_path
+    try:
+        conn = _sql.connect(str(db_path), check_same_thread=False)
+        rows = conn.execute(
+            "SELECT strategy, status, contracts, entry_price, entry_date, "
+            "close_date, realized_pnl FROM positions"
+        ).fetchall()
+        conn.close()
+    except Exception as exc:
+        return JSONResponse({"error": f"db read failed: {exc}"}, status_code=500)
+
+    # Column indices
+    STRAT, STATUS, QTY, ENTRY_PX, ENTRY_D, CLOSE_D, RPNL = range(7)
+
+    def _cost(r) -> float:
+        return float(r[ENTRY_PX] or 0) * 100 * int(r[QTY] or 1)
+
+    def _day(s):   return (s or "")[:10] or None
+    def _month(s): return (s or "")[:7] or None
+    def _week(s):
+        d = _day(s)
+        if not d:
+            return None
+        try:
+            y, w, _ = _dt.fromisoformat(d).isocalendar()
+            return f"{y}-W{w:02d}"
+        except Exception:
+            return None
+
+    # Genuine trades only (drop admin resets)
+    genuine = [r for r in rows if (r[STATUS] or "") != "reset"]
+    closed  = [r for r in genuine if (r[STATUS] or "") == "closed" and r[RPNL] is not None]
+
+    # ── Period rollups: deployed by entry_date, realized by close_date ──────────
+    def _rollup(keyfn):
+        acc: dict = {}
+        for r in genuine:
+            ek = keyfn(r[ENTRY_D])
+            c  = _cost(r)
+            if ek and c > 0:                       # debit entries only = capital deployed
+                a = acc.setdefault(ek, _blank())
+                a["deployed"] += c
+                a["entries"]  += 1
+        for r in closed:
+            ck = keyfn(r[CLOSE_D])
+            if ck:
+                a = acc.setdefault(ck, _blank())
+                a["realized"] += float(r[RPNL] or 0)
+                a["closes"]   += 1
+                if float(r[RPNL] or 0) > 0:
+                    a["wins"] += 1
+        out = []
+        for k in sorted(acc.keys(), reverse=True):
+            a = acc[k]
+            a["period"]   = k
+            a["deployed"] = round(a["deployed"], 2)
+            a["realized"] = round(a["realized"], 2)
+            a["win_rate"] = round(100.0 * a["wins"] / a["closes"], 1) if a["closes"] else None
+            out.append(a)
+        return out
+
+    # ── Headline confidence stats (closed only) ─────────────────────────────────
+    wins   = [float(r[RPNL]) for r in closed if float(r[RPNL] or 0) > 0]
+    losses = [float(r[RPNL]) for r in closed if float(r[RPNL] or 0) <= 0]
+    gross_win  = sum(wins)
+    gross_loss = abs(sum(losses))
+    n_closed   = len(closed)
+    avg_win    = round(gross_win / len(wins), 2) if wins else 0.0
+    avg_loss   = round(sum(losses) / len(losses), 2) if losses else 0.0
+    win_rate   = round(100.0 * len(wins) / n_closed, 1) if n_closed else None
+    expectancy = round(sum(float(r[RPNL]) for r in closed) / n_closed, 2) if n_closed else 0.0
+    profit_factor = round(gross_win / gross_loss, 2) if gross_loss else None
+    wl_ratio   = round(avg_win / abs(avg_loss), 2) if avg_loss else None
+    total_deployed = round(sum(_cost(r) for r in genuine if _cost(r) > 0), 2)
+    net_realized   = round(sum(float(r[RPNL] or 0) for r in closed), 2)
+
+    # ── By strategy ─────────────────────────────────────────────────────────────
+    strat: dict = {}
+    for r in genuine:
+        s = r[STRAT] or "?"
+        a = strat.setdefault(s, {"trades": 0, "deployed": 0.0, "realized": 0.0,
+                                 "wins": 0, "closes": 0})
+        a["trades"] += 1
+        if _cost(r) > 0:
+            a["deployed"] += _cost(r)
+        if (r[STATUS] or "") == "closed" and r[RPNL] is not None:
+            a["closes"] += 1
+            a["realized"] += float(r[RPNL] or 0)
+            if float(r[RPNL] or 0) > 0:
+                a["wins"] += 1
+    by_strategy = []
+    for s, a in sorted(strat.items(), key=lambda kv: kv[1]["realized"], reverse=True):
+        by_strategy.append({
+            "strategy": s, "trades": a["trades"],
+            "deployed": round(a["deployed"], 2), "realized": round(a["realized"], 2),
+            "win_rate": round(100.0 * a["wins"] / a["closes"], 1) if a["closes"] else None,
+        })
+
+    return JSONResponse({
+        "headline": {
+            "total_trades_closed": n_closed,
+            "open_positions":      sum(1 for r in genuine if (r[STATUS] or "") == "open"),
+            "reset_excluded":      sum(1 for r in rows if (r[STATUS] or "") == "reset"),
+            "total_deployed":      total_deployed,
+            "net_realized":        net_realized,
+            "win_rate":            win_rate,
+            "wins":                len(wins),
+            "losses":              len(losses),
+            "avg_win":             avg_win,
+            "avg_loss":            avg_loss,
+            "wl_ratio":            wl_ratio,
+            "expectancy":          expectancy,
+            "profit_factor":       profit_factor,
+            "best":                round(max((float(r[RPNL]) for r in closed), default=0.0), 2),
+            "worst":               round(min((float(r[RPNL]) for r in closed), default=0.0), 2),
+        },
+        "daily":       _rollup(_day)[:30],
+        "weekly":      _rollup(_week)[:12],
+        "monthly":     _rollup(_month)[:12],
+        "by_strategy": by_strategy,
+        "timestamp":   datetime.now(_ET).isoformat(),
+    })
+
+
+def _blank() -> dict:
+    return {"deployed": 0.0, "realized": 0.0, "entries": 0, "closes": 0, "wins": 0}
+
+
 @router.get("/health")
 async def get_health() -> JSONResponse:
     """
