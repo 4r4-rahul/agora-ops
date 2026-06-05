@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import uuid
 from datetime import date, timedelta
 from typing import Any
@@ -127,6 +128,77 @@ def _apply_adaptive_algo(order: Any, priority: str = "Normal") -> None:
         logger.warning("Could not attach Adaptive algo (%s) — submitting order plain", exc)
 
 
+def _valid_quote(x: Any) -> bool:
+    """True if x is a usable positive price (not None / NaN / <= 0)."""
+    return x is not None and isinstance(x, (int, float)) and not math.isnan(x) and x > 0
+
+
+async def _fetch_ibkr_combo_pricing(
+    ib: Any,
+    qualified_legs: list[tuple[dict, Any]],
+    *,
+    timeout: float = 6.0,
+) -> tuple[float | None, float | None, dict[str, float]]:
+    """
+    Read per-leg bid/ask from IBKR and derive the NET spread mid + natural price.
+
+    `ib.reqMarketDataType(...)` must already be set on the connection (1=live / 3=delayed).
+    Per-leg quotes are unambiguous (no combo sign confusion) and also carry greeks.
+
+    Net is expressed as cost-to-us: debit POSITIVE, credit NEGATIVE.
+      net_mid     = Σ sign · leg_mid                    (sign +1 BUY, -1 SELL)
+      net_natural = Σ (BUY leg at ask, SELL leg at bid) — the marketable side we
+                    must cross to fill (pay the ask on longs, hit the bid on shorts).
+
+    Returns (net_mid, net_natural, greeks). net_* are None if any leg quote is missing.
+    greeks is a best-effort {delta, iv} aggregate (empty if unavailable).
+    """
+    tickers = [(leg_spec, ib.reqMktData(contract, "", False, False))
+               for leg_spec, contract in qualified_legs]
+
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + timeout
+
+    def _all_ready() -> bool:
+        return all(_valid_quote(tk.bid) and _valid_quote(tk.ask) for _, tk in tickers)
+
+    while loop.time() < deadline and not _all_ready():
+        await asyncio.sleep(0.3)
+
+    ok = _all_ready()
+    net_mid = net_natural = 0.0
+    net_delta = 0.0
+    iv_vals: list[float] = []
+    if ok:
+        for leg_spec, tk in tickers:
+            sign = +1 if leg_spec["action"].upper() == "BUY" else -1
+            leg_mid = (tk.bid + tk.ask) / 2.0
+            net_mid += sign * leg_mid
+            net_natural += (tk.ask if sign > 0 else -tk.bid)
+            g = getattr(tk, "modelGreeks", None)
+            if g is not None:
+                if _valid_quote(abs(getattr(g, "delta", 0) or 0)):
+                    net_delta += sign * (g.delta or 0)
+                if getattr(g, "impliedVol", None):
+                    iv_vals.append(g.impliedVol)
+
+    for _, tk in tickers:
+        try:
+            ib.cancelMktData(tk.contract)
+        except Exception:
+            pass
+
+    greeks: dict[str, float] = {}
+    if ok and net_delta:
+        greeks["net_delta"] = round(net_delta, 4)
+    if iv_vals:
+        greeks["avg_iv"] = round(sum(iv_vals) / len(iv_vals), 4)
+
+    if not ok:
+        return None, None, greeks
+    return round(net_mid, 2), round(net_natural, 2), greeks
+
+
 def _next_expiry(dte: int) -> str:
     """
     Convert DTE to the nearest valid option expiration date string (YYYYMMDD).
@@ -160,6 +232,7 @@ async def place_bracket_order(
     use_adaptive_algo: bool = False,
     adaptive_algo_priority: str = "Normal",
     max_slippage_pct_of_width: float = 0.10,
+    market_data_type: int = 3,
 ) -> dict[str, Any]:
     """
     Submit a multi-leg spread entry as an atomic BAG combo order, priced at the
@@ -198,6 +271,12 @@ async def place_bracket_order(
     try:
         await ib.connectAsync(host, port, clientId=client_id, timeout=10)
         logger.info("[%s] Bracket order — connecting to %s:%d", session_id, host, port)
+
+        # Market-data type for execution pricing: 1=live (needs OPRA sub), 3=delayed (free).
+        try:
+            ib.reqMarketDataType(market_data_type)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("[%s] reqMarketDataType(%d) failed: %s", session_id, market_data_type, exc)
 
         # ── Qualify legs and build BAG contract ───────────────────────────
         qualified_legs: list[tuple[dict, Any]] = []
@@ -243,12 +322,41 @@ async def place_bracket_order(
             2,
         )
 
+        # ── Pricing source: IBKR market data (delayed/live) → yfinance fallback ──
+        # IBKR gives the REAL net mid + natural (the marketable side we cross to fill);
+        # yfinance only gives a mid, so without IBKR we fall back to a width-heuristic
+        # natural. Sign of the IBKR net must agree with the recommendation (debit>0 /
+        # credit<0) — otherwise the quote is suspect and we keep yfinance.
+        order_action = "BUY" if entry_price > 0 else "SELL"
+        ibkr_mid = ibkr_natural = None
+        ibkr_greeks: dict[str, float] = {}
+        try:
+            net_mid, net_natural, ibkr_greeks = await _fetch_ibkr_combo_pricing(ib, qualified_legs)
+            if (net_mid is not None and abs(net_mid) >= _TICK
+                    and (net_mid > 0) == (entry_price > 0)):
+                ibkr_mid = abs(net_mid)
+                ibkr_natural = abs(net_natural) if net_natural is not None else None
+                logger.info(
+                    "[%s] IBKR pricing (mdType=%d): net_mid=%.2f natural=%.2f greeks=%s "
+                    "| yfinance mid=%.2f",
+                    session_id, market_data_type, ibkr_mid,
+                    ibkr_natural if ibkr_natural is not None else float("nan"),
+                    ibkr_greeks or "{}", abs(entry_price),
+                )
+            elif net_mid is not None:
+                logger.warning(
+                    "[%s] IBKR net_mid=%.2f sign disagrees with yfinance entry=%.2f — "
+                    "using yfinance mid", session_id, net_mid, entry_price,
+                )
+        except Exception as exc:
+            logger.warning("[%s] IBKR combo pricing failed (%s) — using yfinance mid",
+                           session_id, exc)
+
         # ── Entry: net limit at the mid, no GTC child, no Adaptive on a BAG ──
         # GTC children accumulate across sessions → Error 201; PositionManager owns
         # all exits. Adaptive is silently ignored on combos (verified 06-05), so we
         # attach it ONLY to a genuine single leg.
-        order_action = "BUY" if entry_price > 0 else "SELL"
-        mid_limit = abs(round(entry_price, 2))
+        mid_limit = round(ibkr_mid if ibkr_mid is not None else abs(entry_price), 2)
         entry_order = LimitOrder(
             action=order_action,
             totalQuantity=contracts,
@@ -264,16 +372,21 @@ async def place_bracket_order(
         entry_trade = ib.placeOrder(bag, entry_order)
         parent_id = entry_trade.order.orderId
 
-        # Walk direction & natural bound. Debit (BUY) pays more toward the ask;
-        # credit (SELL) accepts less credit toward the bid. Clamp so a debit never
-        # exceeds the spread's max value and a credit never gives up more than half.
+        # Walk target = the NATURAL (marketable) price. Prefer IBKR's real natural;
+        # else a width heuristic. Always bound by the slippage budget and structural
+        # limits (debit ≤ width, credit ≥ half the mid, ≥ 1 tick).
         step_dir = +1 if order_action == "BUY" else -1
         if order_action == "BUY":
-            natural = mid_limit + slippage_budget
+            natural = ibkr_natural if ibkr_natural is not None else mid_limit + slippage_budget
+            natural = min(natural, mid_limit + slippage_budget)      # budget cap
             if width > 0:
-                natural = min(natural, width * 0.99)  # can't pay more than it can be worth
+                natural = min(natural, width * 0.99)                 # ≤ max value
+            natural = max(natural, mid_limit)                        # debit walks up, not down
         else:
-            natural = max(mid_limit - slippage_budget, mid_limit * 0.5, _TICK)
+            natural = ibkr_natural if ibkr_natural is not None else max(
+                mid_limit - slippage_budget, mid_limit * 0.5, _TICK)
+            natural = max(natural, mid_limit - slippage_budget, _TICK)  # budget cap
+            natural = min(natural, mid_limit)                        # credit walks down, not up
         natural = round(natural, 2)
         walk_room = abs(natural - mid_limit)
         # Bound the walk to a fixed number of reprices so a wide spread can't hog the
@@ -395,6 +508,7 @@ async def place_bracket_order(
             "entry_price": net_fill_price,       # net combo fill per share
             "net_fill_price": net_fill_price,    # explicit; used for slippage tracking
             "limit_at_fill": current_limit,      # the net limit when it filled
+            "ibkr_greeks": ibkr_greeks,          # net delta / avg IV from IBKR (best-effort)
             "profit_target": profit_target,
             "stop_loss": stop_loss,
         }

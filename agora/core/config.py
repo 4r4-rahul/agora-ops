@@ -267,6 +267,17 @@ class AgoraSettings(BaseSettings):
                     "to cross. Owner-chosen 2026-06-05. The execution advisor tunes this from "
                     "observed fill rates.",
     )
+    ibkr_market_data_type: int = Field(
+        default=3,
+        description="IBKR market-data type for execution pricing: 1=live (real-time, needs an "
+                    "OPRA subscription), 3=delayed (15-min, FREE — works today). The execution "
+                    "walk reads IBKR's real combo bid/ask + greeks as the limit's mid and natural "
+                    "(strictly better than the yfinance width heuristic). Default 3 (delayed). "
+                    "Flip to 1 the day a non-pro OPRA subscription (~$1.50/mo) goes live — same "
+                    "code path. Falls back to the yfinance mid + width heuristic if IBKR returns "
+                    "no quote (e.g. contract not found / market closed). Probed 2026-06-05: delayed "
+                    "options+combo quotes work; live options need the paid OPRA sub.",
+    )
     paper_use_bag_combo: bool = Field(
         default=True,
         description="In paper mode, route entries as atomic BAG combo orders priced at the net "

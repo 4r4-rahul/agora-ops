@@ -327,9 +327,12 @@ Contract specification objects:
 
 Limit pricing for combos:
   ALWAYS use net LMT orders. Market orders get slaughtered on the combo spread.
-  Starting price: the net mid (from yfinance — the only price we have without a
-  per-leg market-data subscription; do NOT trust reqMktData leg quotes on this
-  account, they come back empty and mis-price every leg at the net value).
+  Starting price + natural: read IBKR per-leg bid/ask (config.ibkr_market_data_type:
+  3=delayed/free, 1=live/OPRA) → net_mid (Σ signed leg mids) and net_natural (BUY legs
+  at ask, SELL legs at bid). Verified 06-05: DELAYED options+combo quotes work via the
+  API for free; live needs the paid OPRA sub. If IBKR returns no quote (market closed /
+  unqualified), fall back to the yfinance net mid + a width-heuristic natural. Sign of
+  the IBKR net must match the recommendation (debit>0 / credit<0) or the quote is dropped.
   Improvement cadence: step the NET limit toward the natural every ~20s.
   Maximum drift: max_slippage_pct_of_width × strike width (default 10% of width).
   Beyond that: cancel; the session arms a 2h exec cooldown (do NOT re-storm).
@@ -754,6 +757,19 @@ class IBKRKnowledgeAgent:
                 "suggested": "reconcile + verify TWS combo limit", "severity": "high",
                 "reason": f"{reject_reasons['201']} Error-201 rejects in 7d — run "
                           f"OrphanOrderReconciler and confirm GTC children are gone.",
+            })
+
+        # 5) On DELAYED data with weak fills/slippage → live OPRA would tighten the anchor.
+        md_type = int(getattr(self._settings, "ibkr_market_data_type", 3))
+        weak = (fill_rate is not None and fill_rate < self._FILL_RATE_HEALTHY) or \
+               (avg_slippage < -self._SLIPPAGE_TOLERANCE)
+        if md_type == 3 and weak and sample >= 10:
+            recs.append({
+                "param": "ibkr_market_data_type", "current": 3, "suggested": 1,
+                "severity": "low",
+                "reason": "Execution prices off the 15-min DELAYED combo quote while fills/"
+                          "slippage are soft. Real-time (non-pro OPRA ~$1.50/mo) would tighten "
+                          "the walk's start mid + natural. Flip to 1 once OPRA is subscribed.",
             })
 
         headline = (

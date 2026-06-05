@@ -152,6 +152,7 @@ async def submit_trade(rec: Any, settings: Any, session_id: str) -> dict:
     else:
         fn = place_bracket_order
         kwargs["max_slippage_pct_of_width"] = getattr(settings, "max_slippage_pct_of_width", 0.10)
+        kwargs["market_data_type"] = getattr(settings, "ibkr_market_data_type", 3)
 
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(
