@@ -333,6 +333,16 @@ class IBKRNewsAgent:
             logger.debug("IBKRNewsAgent Claude call failed: %s", exc)
             return
 
+        # The Haiku classifier occasionally returns a JSON ARRAY (e.g. [{...}]) instead of
+        # a single object — calling .get() on a list raised AttributeError and dropped the
+        # signal. Unwrap to the first dict element; if the shape is anything else, skip.
+        if isinstance(data, list):
+            data = next((x for x in data if isinstance(x, dict)), {})
+        if not isinstance(data, dict):
+            logger.debug("IBKRNewsAgent: unexpected classification shape (%s) — skipping",
+                         type(data).__name__)
+            return
+
         direction = data.get("direction", "neutral")
         if direction == "neutral":
             return
