@@ -26,6 +26,25 @@ if [[ "$CODE" == "200" ]]; then
   exit 0   # healthy — nothing to do
 fi
 
+# ── Startup grace period ──────────────────────────────────────────────────────
+# The engine's startup reconciliation (position sync of all open IBKR positions)
+# blocks the event loop, so /health returns non-200 for a minute or two AT LAUNCH.
+# If a recently-started engine is still alive, do NOT restart — spawning a second
+# instance collides on IBKR clientIds (Error 326) and kills both (observed 2026-06-05).
+# Only restart once it has had GRACE_SECS to come up; a genuinely hung engine persists
+# past the window and is then restarted. If NO engine process exists, restart immediately.
+GRACE_SECS=300
+PID_FILE="$LOG_DIR/agora.pid"
+ENGINE_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
+if [[ -n "${ENGINE_PID:-}" ]] && kill -0 "$ENGINE_PID" 2>/dev/null; then
+  PID_MTIME="$(stat -f %m "$PID_FILE" 2>/dev/null || echo 0)"
+  AGE=$(( $(date +%s) - PID_MTIME ))
+  if [[ "$AGE" -ge 0 && "$AGE" -lt "$GRACE_SECS" ]]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] watchdog: PID $ENGINE_PID unhealthy (HTTP $CODE) but only ${AGE}s old (<${GRACE_SECS}s grace) — skipping restart (likely startup)" >> "$WLOG"
+    exit 0
+  fi
+fi
+
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] watchdog: engine unhealthy (HTTP $CODE) during trading hours — restarting" >> "$WLOG"
 /bin/bash "$REPO/agora/ops/start.sh" >> "$WLOG" 2>&1
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] watchdog: start.sh invoked" >> "$WLOG"
