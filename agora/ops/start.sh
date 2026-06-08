@@ -35,6 +35,14 @@ ln -sf "$DATED_LOG" "$LOG"   # symlink agora.log → today's dated log
 
 # ── Start uvicorn ──────────────────────────────────────────────────────────────
 cd "$REPO"
+
+# Raise the open-file limit. The engine opens many concurrent FDs — IBKR + yfinance
+# sockets, per-agent sqlite handles, the IV cache — and the launchd default (~256) is
+# exhausted mid-session => "Too many open files" (Errno 24), which silently breaks price
+# fetching and the health endpoint (observed 2026-06-08). 10240 gives ample headroom.
+ulimit -n 10240 2>/dev/null || ulimit -n 4096 2>/dev/null || true
+echo "[start.sh] open-file limit (ulimit -n) = $(ulimit -n)" >> "$LOG_DIR/launchd-start.log"
+
 # Load .env so subprocesses inherit API keys etc.
 set -a; source "$REPO/.env"; set +a
 
