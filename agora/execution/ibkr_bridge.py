@@ -139,20 +139,24 @@ async def submit_trade(rec: Any, settings: Any, session_id: str) -> dict:
         adaptive_algo_priority=getattr(settings, "adaptive_algo_priority", "Normal"),
     )
 
-    # BAG combo is the default for BOTH modes: it needs only the NET spread price
-    # (the one price we have from yfinance), whereas leg-by-leg mis-prices each leg
-    # at the net value when there's no per-leg market-data subscription — which
-    # drove the 0.7% fill rate on 2026-06-05. Error 201 (riskless-combo limit) no
-    # longer fires now that GTC profit-target children are removed, so paper can use
-    # BAG too. Leg-by-leg stays as an explicit opt-out (paper_use_bag_combo=False).
-    paper_bag = getattr(settings, "paper_use_bag_combo", True)
-    if settings.trading_mode == "paper" and not paper_bag:
+    # Both paths price off IBKR per-leg/combo market data (delayed by default).
+    kwargs["market_data_type"] = getattr(settings, "ibkr_market_data_type", 3)
+
+    # Spread-type-aware routing (verified 2026-06-08):
+    #   • CREDIT spreads (entry credit < 0) on the PAPER account → leg-by-leg. IBKR
+    #     hard-rejects credit-spread BAGs with Error 201 (riskless/guaranteed-loss combo
+    #     limit) — a paper-account restriction that "Bypass Order Precautions for API
+    #     Orders" does NOT clear. Individual legs aren't riskless combos, so they go through.
+    #   • Everything else (debit spreads, and ALL live orders) → atomic BAG. Debit spreads
+    #     fill fine as a BAG and atomicity avoids a naked-short leg gap; live accounts allow
+    #     riskless combos.
+    is_credit = entry_per_share < 0
+    if settings.trading_mode == "paper" and is_credit:
         fn = place_legs_individually
-        logger.info("PAPER mode: leg-by-leg submission for %s (paper_use_bag_combo=False)", rec.ticker)
+        logger.info("PAPER credit spread %s → leg-by-leg (avoids riskless-combo Error 201)", rec.ticker)
     else:
         fn = place_bracket_order
         kwargs["max_slippage_pct_of_width"] = getattr(settings, "max_slippage_pct_of_width", 0.10)
-        kwargs["market_data_type"] = getattr(settings, "ibkr_market_data_type", 3)
 
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(
