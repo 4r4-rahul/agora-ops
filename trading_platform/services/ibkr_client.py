@@ -365,7 +365,15 @@ async def place_bracket_order(
         entry_order.orderRef = session_id[:40]
         entry_order.tif = "DAY"
         entry_order.transmit = True
-        entry_order.nonGuaranteedFill = True  # required for SMART-routed combos
+        # NOTE: keep the BAG GUARANTEED (atomic — both legs fill together or neither),
+        # which avoids a naked-short leg gap on credit spreads. The old
+        # `nonGuaranteedFill = True` was a no-op (not a real ib_insync field) AND
+        # non-guaranteed routing does NOT clear the credit-spread rejection anyway:
+        # IBKR flags a credit spread as a "riskless/guaranteed-loss combination" by
+        # POSITION type, not fill type (verified 2026-06-08). The Error-201 reject on
+        # credit spreads is a TWS *precautionary* block ("Transmit anyway" in the GUI) —
+        # it requires enabling "Bypass Order Precautions for API Orders" in TWS
+        # (Global Configuration -> API -> Settings), not a code/routing change.
         if use_adaptive_algo and len(qualified_legs) == 1:
             _apply_adaptive_algo(entry_order, adaptive_algo_priority)
 
