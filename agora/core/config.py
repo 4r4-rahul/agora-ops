@@ -278,6 +278,15 @@ class AgoraSettings(BaseSettings):
                     "no quote (e.g. contract not found / market closed). Probed 2026-06-05: delayed "
                     "options+combo quotes work; live options need the paid OPRA sub.",
     )
+    max_combo_spread_pct: float = Field(
+        default=0.50,
+        description="Liquidity gate at execution: skip the order if the spread's NET bid-ask "
+                    "(from IBKR quotes) exceeds this fraction of the net mid. A thin name like "
+                    "MKSI quotes ~138%% of mid (legs 7.10/9.40) — walking to fill there gives up "
+                    "most of the credit, so don't trade it. Liquid SPY/QQQ verticals quote ~5-15%%. "
+                    "Only applied when IBKR quotes are available (best-effort last line of defense "
+                    "below the upstream conviction/OI gates). 0.50 = skip if the combo is >50%% wide.",
+    )
     paper_use_bag_combo: bool = Field(
         default=True,
         description="In paper mode, route entries as atomic BAG combo orders priced at the net "

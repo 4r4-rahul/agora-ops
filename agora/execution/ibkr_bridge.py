@@ -149,8 +149,10 @@ async def submit_trade(rec: Any, settings: Any, session_id: str) -> dict:
         adaptive_algo_priority=getattr(settings, "adaptive_algo_priority", "Normal"),
     )
 
-    # Both paths price off IBKR per-leg/combo market data (delayed by default).
+    # Both paths price off IBKR per-leg/combo market data (delayed by default) and
+    # apply the execution-time liquidity gate.
     kwargs["market_data_type"] = getattr(settings, "ibkr_market_data_type", 3)
+    kwargs["max_combo_spread_pct"] = getattr(settings, "max_combo_spread_pct", 0.50)
 
     # Spread-type-aware routing (verified 2026-06-08):
     #   • CREDIT spreads (entry credit < 0) on the PAPER account → leg-by-leg. IBKR

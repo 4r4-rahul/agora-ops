@@ -233,6 +233,7 @@ async def place_bracket_order(
     adaptive_algo_priority: str = "Normal",
     max_slippage_pct_of_width: float = 0.10,
     market_data_type: int = 3,
+    max_combo_spread_pct: float = 0.50,
 ) -> dict[str, Any]:
     """
     Submit a multi-leg spread entry as an atomic BAG combo order, priced at the
@@ -351,6 +352,23 @@ async def place_bracket_order(
         except Exception as exc:
             logger.warning("[%s] IBKR combo pricing failed (%s) — using yfinance mid",
                            session_id, exc)
+
+        # ── Liquidity gate (best-effort; only when IBKR quotes are available) ─
+        if ibkr_mid is not None and ibkr_natural is not None and ibkr_mid > 0:
+            rel_spread = 2.0 * abs(ibkr_mid - ibkr_natural) / ibkr_mid
+            if rel_spread > max_combo_spread_pct:
+                logger.warning(
+                    "[%s] Skipping %s — combo too illiquid: net bid-ask %.0f%% of mid "
+                    "(mid=%.2f natural=%.2f) > %.0f%% gate",
+                    session_id, ticker, rel_spread * 100, ibkr_mid, ibkr_natural,
+                    max_combo_spread_pct * 100,
+                )
+                return {
+                    "order_id": -1, "status": "Cancelled", "fills": [],
+                    "entry_price": entry_price, "profit_target": profit_target,
+                    "stop_loss": stop_loss,
+                    "reason": f"Illiquid: combo bid-ask {rel_spread:.0%} of mid > {max_combo_spread_pct:.0%}",
+                }
 
         # ── Entry: net limit at the mid, no GTC child, no Adaptive on a BAG ──
         # GTC children accumulate across sessions → Error 201; PositionManager owns
@@ -543,6 +561,7 @@ async def place_legs_individually(
     use_adaptive_algo: bool = False,
     adaptive_algo_priority: str = "Normal",
     market_data_type: int = 3,
+    max_combo_spread_pct: float = 0.50,
 ) -> dict[str, Any]:
     """
     Submit each leg of a spread as a standalone option order.
@@ -639,6 +658,25 @@ async def place_legs_individually(
 
         logger.info("[%s] Leg pricing (mdType=%d): mids=%s naturals=%s",
                     session_id, market_data_type, leg_mid, leg_natural)
+
+        # ── Liquidity gate: net combo bid-ask from the per-leg IBKR quotes ────
+        net_mid = sum((+1 if ls["action"].upper() == "BUY" else -1) * leg_mid[i]
+                      for i, (ls, _) in enumerate(qualified))
+        net_nat = sum((+1 if ls["action"].upper() == "BUY" else -1) * leg_natural[i]
+                      for i, (ls, _) in enumerate(qualified))
+        if abs(net_mid) > 0:
+            rel_spread = 2.0 * abs(net_mid - net_nat) / abs(net_mid)
+            if rel_spread > max_combo_spread_pct:
+                logger.warning(
+                    "[%s] Skipping %s — legs too illiquid: net bid-ask %.0f%% of mid > %.0f%% gate",
+                    session_id, ticker, rel_spread * 100, max_combo_spread_pct * 100,
+                )
+                return {
+                    "order_id": -1, "status": "Cancelled", "fills": [],
+                    "entry_price": entry_price, "profit_target": profit_target,
+                    "stop_loss": stop_loss,
+                    "reason": f"Illiquid: net bid-ask {rel_spread:.0%} of mid > {max_combo_spread_pct:.0%}",
+                }
 
         # ── Submit each leg at its mid (the walk below moves it toward natural) ─
         trades = []
