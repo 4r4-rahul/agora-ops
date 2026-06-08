@@ -278,6 +278,17 @@ class AgoraSettings(BaseSettings):
                     "no quote (e.g. contract not found / market closed). Probed 2026-06-05: delayed "
                     "options+combo quotes work; live options need the paid OPRA sub.",
     )
+    pricing_sanity_max_ratio: float = Field(
+        default=2.0,
+        description="Execution circuit breaker: abort the order if the IBKR mid is more than this "
+                    "factor away from the yfinance mid the trade DECISION was built on (ratio "
+                    "outside [1/x, x]). yfinance option mids are sometimes badly stale — e.g. COST "
+                    "2026-06-08: yfinance net mid 1.85 but real IBKR/fill 8.55 (4.6x) — so the R/R "
+                    "the strategy 'saw' wasn't real and we entered bad economics. This kills such "
+                    "bad-data entries at the last step (recommended by the IBKR expert + COO as the "
+                    "circuit breaker, pending the larger fix of pricing strategy selection off IBKR). "
+                    "Arms the 2h exec cooldown on trip. Only applied when IBKR quotes are available.",
+    )
     max_combo_spread_pct: float = Field(
         default=0.50,
         description="Liquidity gate at execution: skip the order if the spread's NET bid-ask "

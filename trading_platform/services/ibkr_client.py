@@ -234,6 +234,7 @@ async def place_bracket_order(
     max_slippage_pct_of_width: float = 0.10,
     market_data_type: int = 3,
     max_combo_spread_pct: float = 0.50,
+    pricing_sanity_max_ratio: float = 2.0,
 ) -> dict[str, Any]:
     """
     Submit a multi-leg spread entry as an atomic BAG combo order, priced at the
@@ -352,6 +353,25 @@ async def place_bracket_order(
         except Exception as exc:
             logger.warning("[%s] IBKR combo pricing failed (%s) — using yfinance mid",
                            session_id, exc)
+
+        # ── Pricing sanity gate: IBKR mid vs the yfinance mid the trade was built on ─
+        # yfinance option mids are sometimes badly stale (COST: yf 1.85 vs real 8.55).
+        # If they disagree by > the ratio, the recommendation's economics aren't real — abort.
+        if ibkr_mid is not None and abs(entry_price) > 0:
+            ratio = ibkr_mid / abs(entry_price)
+            if not (1.0 / pricing_sanity_max_ratio <= ratio <= pricing_sanity_max_ratio):
+                logger.warning(
+                    "[%s] Skipping %s — pricing_sanity_fail: IBKR mid %.2f vs yfinance mid %.2f "
+                    "(%.1fx) — recommendation built on bad data",
+                    session_id, ticker, ibkr_mid, abs(entry_price), ratio,
+                )
+                return {
+                    "order_id": -1, "status": "Cancelled", "fills": [],
+                    "entry_price": entry_price, "profit_target": profit_target,
+                    "stop_loss": stop_loss,
+                    "reason": f"pricing_sanity_fail: IBKR {ibkr_mid:.2f} vs yfinance "
+                              f"{abs(entry_price):.2f} ({ratio:.1f}x)",
+                }
 
         # ── Liquidity gate (best-effort; only when IBKR quotes are available) ─
         if ibkr_mid is not None and ibkr_natural is not None and ibkr_mid > 0:
@@ -562,6 +582,7 @@ async def place_legs_individually(
     adaptive_algo_priority: str = "Normal",
     market_data_type: int = 3,
     max_combo_spread_pct: float = 0.50,
+    pricing_sanity_max_ratio: float = 2.0,
 ) -> dict[str, Any]:
     """
     Submit each leg of a spread as a standalone option order.
@@ -664,6 +685,25 @@ async def place_legs_individually(
                       for i, (ls, _) in enumerate(qualified))
         net_nat = sum((+1 if ls["action"].upper() == "BUY" else -1) * leg_natural[i]
                       for i, (ls, _) in enumerate(qualified))
+
+        # Pricing sanity gate: IBKR net mid vs the yfinance mid the trade was built on.
+        if abs(net_mid) > 0 and abs(entry_price) > 0:
+            ratio = abs(net_mid) / abs(entry_price)
+            if not (1.0 / pricing_sanity_max_ratio <= ratio <= pricing_sanity_max_ratio):
+                logger.warning(
+                    "[%s] Skipping %s — pricing_sanity_fail: IBKR net mid %.2f vs yfinance %.2f "
+                    "(%.1fx) — recommendation built on bad data",
+                    session_id, ticker, abs(net_mid), abs(entry_price), ratio,
+                )
+                return {
+                    "order_id": -1, "status": "Cancelled", "fills": [],
+                    "entry_price": entry_price, "profit_target": profit_target,
+                    "stop_loss": stop_loss,
+                    "reason": f"pricing_sanity_fail: IBKR {abs(net_mid):.2f} vs yfinance "
+                              f"{abs(entry_price):.2f} ({ratio:.1f}x)",
+                }
+
+        # Liquidity gate: net combo bid-ask vs mid.
         if abs(net_mid) > 0:
             rel_spread = 2.0 * abs(net_mid - net_nat) / abs(net_mid)
             if rel_spread > max_combo_spread_pct:
