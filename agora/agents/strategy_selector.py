@@ -386,13 +386,17 @@ def _parse_selection(raw: dict) -> StrategySelection:
 
 
 def _summarize_chain(chain_dict: dict, spot: float, focus_strikes=None) -> dict:
-    """Compact options chain for LLM: top 2 expiries, 4 strikes near spot each side PLUS
-    any focus_strikes (the strikes the rules engine actually proposed). Without the focus
-    strikes the selector validates against a window that excludes the very strikes it's
-    judging — e.g. a far-OTM premium-selling leg — and always returns 'no_structure'."""
+    """Compact options chain for LLM: ALL fetched expiries, 4 strikes near spot each side
+    PLUS any focus_strikes (the strikes the rules engine actually proposed). Without the
+    focus strikes the selector validates against a window that excludes the very strikes
+    it's judging; and truncating to the nearest expiries (the old `[:2]`) hid the very
+    expiry the rules engine proposed (it targets ~30 DTE, which is the 3rd/4th expiry, not
+    the front two) — so the selector saw a proposal referencing an expiry 'not in the chain
+    summary' and returned 'no_structure' on essentially every ticker. chain_dict is already
+    capped at one expiry per DTE bracket (≤4) upstream, so including all of them is cheap."""
     focus = {round(float(s), 2) for s in (focus_strikes or [])}
     summary = {}
-    for expiry, data in list(chain_dict.items())[:2]:
+    for expiry, data in list(chain_dict.items()):
         try:
             calls_df = data.get("calls")
             puts_df  = data.get("puts")
