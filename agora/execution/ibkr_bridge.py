@@ -42,6 +42,12 @@ def _run_in_new_loop(coro):
         asyncio.set_event_loop(None)
 
 
+# Credit strategies — a credit-spread BAG (entry OR close) is flagged by IBKR as a
+# "riskless/guaranteed-loss combination" and rejected with Error 201 on the paper
+# account. These route leg-by-leg in paper mode (entry and close). [[StrategyType]]
+_CREDIT_STRATEGIES = {"bull_put_spread", "bear_call_spread", "iron_condor"}
+
+
 # ── Leg translation helpers ────────────────────────────────────────────────────
 
 def _rec_to_legs(rec: Any) -> list[dict]:
@@ -60,13 +66,17 @@ def _rec_to_legs(rec: Any) -> list[dict]:
 
 
 def _pos_to_close_legs(pos: Any) -> list[dict]:
-    """Reverse the legs of an open position to produce a closing order."""
+    """Position legs in ibkr_client leg-dict form, carrying the ORIGINAL ENTRY actions.
+    The close functions (close_position / close_position_legs) reverse the action
+    themselves to flatten. Do NOT reverse here — doing so double-reverses (close_position
+    reverses again), which re-creates the entry combo and re-opens the position instead
+    of closing it (the cause of 'exits not executing'). Verified 2026-06-08."""
     today = date.today()
     return [
         {
             "strike":         leg.strike,
             "option_type":    leg.option_type,
-            "action":         "SELL" if leg.action.lower() == "buy" else "BUY",
+            "action":         leg.action.upper(),     # ORIGINAL entry action (BUY/SELL)
             "quantity":       1,
             "expiration_dte": max(1, (leg.expiration - today).days),
         }
@@ -181,7 +191,7 @@ async def close_trade(pos: Any, settings: Any, session_id: str) -> dict:
     )
 
     try:
-        from trading_platform.services.ibkr_client import close_position
+        from trading_platform.services.ibkr_client import close_position, close_position_legs
     except ImportError as exc:
         raise RuntimeError("ib_insync is not installed") from exc
 
@@ -194,8 +204,21 @@ async def close_trade(pos: Any, settings: Any, session_id: str) -> dict:
         port=settings.ibkr_port,
         client_id=settings.ibkr_client_id + 1,
     )
+
+    # Mirror entry routing: a CREDIT-spread close on the paper account would re-trip the
+    # riskless-combo Error 201 as a BAG and strand the position. Close those leg-by-leg
+    # (market orders). Debit spreads + all live closes use the atomic BAG.
+    strat = str(getattr(pos.strategy, "value", pos.strategy)).lower()
+    is_credit = strat in _CREDIT_STRATEGIES
+    close_fn = (close_position_legs
+                if (settings.trading_mode == "paper" and is_credit)
+                else close_position)
+    if close_fn is close_position_legs:
+        logger.info("PAPER credit close %s (%s) → leg-by-leg MKT (avoids riskless-combo 201)",
+                    pos.ticker, strat)
+
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(
         _IBKR_EXECUTOR,
-        lambda: _run_in_new_loop(close_position(**kwargs)),
+        lambda: _run_in_new_loop(close_fn(**kwargs)),
     )

@@ -865,3 +865,108 @@ async def close_position(
         if ib.isConnected():
             ib.disconnect()
         logger.debug("[%s] IBKR close connection closed", session_id)
+
+
+async def close_position_legs(
+    *,
+    ticker: str,
+    legs: list[dict[str, Any]],
+    contracts: int,
+    session_id: str,
+    host: str = "127.0.0.1",
+    port: int = 7497,
+    client_id: int = 2,
+    timeout: float = 25.0,
+) -> dict[str, Any]:
+    """
+    Close a spread LEG-BY-LEG with market orders.
+
+    Used for CREDIT-spread positions: the closing BAG re-creates a combo that IBKR
+    re-flags as a riskless/guaranteed-loss combination and rejects with Error 201 on
+    the paper account, stranding the position (an unbounded risk on a stop-loss exit).
+    Individual market orders aren't combos, guarantee the exit, and fill both legs
+    immediately (no leg gap).
+
+    `legs` carry the ORIGINAL entry actions; each is reversed here to flatten.
+    """
+    if not _IB_AVAILABLE:
+        raise RuntimeError("ib_insync not installed")
+
+    ib = IB()
+    try:
+        await ib.connectAsync(host, port, clientId=client_id, timeout=10)
+        logger.info("[%s] Closing position LEG-BY-LEG %s x%d", session_id, ticker, contracts)
+
+        qualified: list[tuple[dict, Any]] = []
+        for leg in legs:
+            opt = Option(
+                symbol=ticker,
+                lastTradeDateOrContractMonth=_next_expiry(leg.get("expiration_dte", 0)),
+                strike=float(leg["strike"]),
+                right="C" if leg["option_type"].lower() == "call" else "P",
+                exchange="SMART", currency="USD", multiplier="100",
+            )
+            q = await ib.qualifyContractsAsync(opt)
+            if not q:
+                raise RuntimeError(f"Could not qualify closing leg: {ticker} {leg}")
+            qualified.append((leg, q[0]))
+
+        trades = []
+        for i, (leg, contract) in enumerate(qualified):
+            close_action = "SELL" if leg["action"].upper() == "BUY" else "BUY"  # reverse to flatten
+            o = Order()
+            o.action = close_action
+            o.orderType = "MKT"
+            o.totalQuantity = contracts * leg.get("quantity", 1)
+            o.tif = "DAY"
+            o.orderRef = f"CLOSE_{session_id[:26]}-L{i}"
+            o.transmit = True
+            trades.append(ib.placeOrder(contract, o))
+            logger.info(
+                "[%s] Close leg %d/%d — %s %s %.0f %s MKT",
+                session_id, i + 1, len(qualified), close_action, ticker,
+                leg["strike"], leg["option_type"].upper(),
+            )
+
+        # Wait for all legs to fill (market orders fill fast).
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(1)
+            if all(t.orderStatus.status == "Filled" for t in trades):
+                break
+            for t in trades:
+                if t.orderStatus.status in ("Cancelled", "ApiCancelled", "Inactive"):
+                    tws_msgs = [e.message for e in t.log if e.message]
+                    raise RuntimeError(
+                        f"Close leg {t.order.orderId} rejected: {t.orderStatus.status} — "
+                        f"{'|'.join(tws_msgs[-2:])}"
+                    )
+
+        fills = []
+        net = 0.0
+        for t in trades:
+            sign = +1 if t.order.action.upper() == "BUY" else -1
+            for f in t.fills:
+                fills.append({
+                    "exec_id": f.execution.execId, "shares": f.execution.shares,
+                    "price": f.execution.price,
+                    "time": f.execution.time.isoformat() if f.execution.time else None,
+                })
+                net += sign * float(f.execution.price)
+        avg_price = round(abs(net), 4) if fills else None   # net cost to flatten, per share
+        n_filled = sum(1 for t in trades if t.orderStatus.status == "Filled")
+        logger.info(
+            "[%s] Position closed leg-by-leg — %d/%d legs filled net=%.2f",
+            session_id, n_filled, len(trades), avg_price or 0,
+        )
+        return {
+            "order_id": trades[0].order.orderId if trades else -1,
+            "status": "Filled" if (trades and n_filled == len(trades)) else "PartiallyClosed",
+            "fills": fills,
+            "avg_price": avg_price,
+        }
+
+    finally:
+        if ib.isConnected():
+            ib.disconnect()
+        logger.debug("[%s] Leg-by-leg close connection closed", session_id)
