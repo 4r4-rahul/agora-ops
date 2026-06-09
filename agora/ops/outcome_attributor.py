@@ -129,35 +129,25 @@ def _ensure_exit_journal_quality_cols(conn: sqlite3.Connection) -> None:
 
 # ── Analyst attribution ───────────────────────────────────────────────────────
 
-def _attribute_analyst(conn: sqlite3.Connection, trades: list[tuple]) -> int:
+def _attribute_analyst(conn: sqlite3.Connection) -> int:
+    """Re-keyed on the EXACT decision_id (was a fuzzy ticker+time match that mis-attributed when
+    a ticker was reviewed repeatedly). Join analyst_journal.decision_id = decision_chains.chain_id,
+    then chains.position_id -> positions.realized_pnl. positions is the source of truth (all closed
+    rows carry realized_pnl); the chain's own realized_pnl backfill leaks, so we read positions."""
+    rows = conn.execute(
+        """SELECT a.journal_id, a.confidence_pct, p.realized_pnl, p.max_loss_dollars, a.ticker
+           FROM analyst_journal a
+           JOIN decision_chains dc ON dc.chain_id = a.decision_id
+           JOIN positions       p  ON p.position_id = dc.position_id
+           WHERE a.thesis_played_out IS NULL
+             AND a.decision = 'thesis'
+             AND p.realized_pnl IS NOT NULL""",
+    ).fetchall()
     attributed = 0
-    for trade_id, ticker, entry_date_str, realized_pnl, max_loss, _max_gain in trades:
-        window_start = (
-            datetime.fromisoformat(entry_date_str) - timedelta(hours=MATCH_WINDOW_HOURS)
-        ).isoformat()
-        window_end = (
-            datetime.fromisoformat(entry_date_str) + timedelta(days=1)
-        ).isoformat()
-
-        row = conn.execute(
-            """SELECT journal_id, confidence_pct, thesis_played_out
-               FROM analyst_journal
-               WHERE ticker = ?
-                 AND decided_at_utc >= ?
-                 AND decided_at_utc <= ?
-                 AND decision = 'thesis'
-               ORDER BY decided_at_utc DESC LIMIT 1""",
-            (ticker, window_start, window_end),
-        ).fetchone()
-        if row is None or row[2] is not None:
-            continue
-
-        journal_id, confidence_pct, _ = row
+    for journal_id, confidence_pct, realized_pnl, max_loss, ticker in rows:
         won = (realized_pnl or 0) > 0
-        mag = (
-            round(abs(realized_pnl) / max_loss * 100, 1)
-            if (max_loss and max_loss > 0) else None
-        )
+        mag = (round(abs(realized_pnl) / max_loss * 100, 1)
+               if (max_loss and max_loss > 0) else None)
         conn.execute(
             """UPDATE analyst_journal
                SET thesis_played_out = ?, magnitude_realized_pct = ?,
@@ -166,87 +156,61 @@ def _attribute_analyst(conn: sqlite3.Connection, trades: list[tuple]) -> int:
             (1 if won else 0, mag, _calibrated(confidence_pct, won), journal_id),
         )
         attributed += 1
-        logger.info("OutcomeAttributor[analyst] %s jid=%d played_out=%d mag=%s",
+        logger.info("OutcomeAttributor[analyst] %s jid=%d played_out=%d mag=%s (decision_id)",
                     ticker, journal_id, 1 if won else 0, mag)
     return attributed
 
 
 # ── Strategy selector attribution ─────────────────────────────────────────────
 
-def _attribute_strategy(conn: sqlite3.Connection, trades: list[tuple]) -> int:
-    """Mark structure_used=1 and realized_pnl on strategy_journal rows."""
+def _attribute_strategy(conn: sqlite3.Connection) -> int:
+    """Mark structure_used=1 and realized_pnl, keyed on the exact decision_id (see _attribute_analyst)."""
+    rows = conn.execute(
+        """SELECT s.journal_id, p.realized_pnl, s.ticker
+           FROM strategy_journal s
+           JOIN decision_chains dc ON dc.chain_id = s.decision_id
+           JOIN positions       p  ON p.position_id = dc.position_id
+           WHERE s.structure_used IS NULL
+             AND p.realized_pnl IS NOT NULL""",
+    ).fetchall()
     attributed = 0
-    for trade_id, ticker, entry_date_str, realized_pnl, _max_loss, _max_gain in trades:
-        window_start = (
-            datetime.fromisoformat(entry_date_str) - timedelta(hours=MATCH_WINDOW_HOURS)
-        ).isoformat()
-        window_end = (
-            datetime.fromisoformat(entry_date_str) + timedelta(days=1)
-        ).isoformat()
-
-        row = conn.execute(
-            """SELECT journal_id, structure_used
-               FROM strategy_journal
-               WHERE ticker = ?
-                 AND decided_at_utc >= ?
-                 AND decided_at_utc <= ?
-               ORDER BY decided_at_utc DESC LIMIT 1""",
-            (ticker, window_start, window_end),
-        ).fetchone()
-        if row is None or row[1] is not None:
-            continue
-
+    for journal_id, realized_pnl, ticker in rows:
         conn.execute(
             """UPDATE strategy_journal
                SET structure_used = 1, realized_pnl = ?
                WHERE journal_id = ?""",
-            (round(realized_pnl, 2), row[0]),
+            (round(realized_pnl, 2), journal_id),
         )
         attributed += 1
-        logger.info("OutcomeAttributor[strategy] %s jid=%d pnl=%.2f",
-                    ticker, row[0], realized_pnl)
+        logger.info("OutcomeAttributor[strategy] %s jid=%d pnl=%.2f (decision_id)",
+                    ticker, journal_id, realized_pnl)
     return attributed
 
 
 # ── Advocate attribution ──────────────────────────────────────────────────────
 
-def _attribute_advocate(conn: sqlite3.Connection, trades: list[tuple]) -> int:
+def _attribute_advocate(conn: sqlite3.Connection) -> int:
     """
-    For trades that FILLED: mark trade_taken=1, realized_pnl, advocate_was_right.
-    advocate_was_right=1 when PASS verdict + win, or CAUTION verdict + win.
-    BLOCK rows cannot be attributed from fills (they were shadow-mode BLOCKs that
-    still executed); leave advocate_was_right NULL for those — they need manual review.
+    Keyed on the EXACT decision_id (was a fuzzy ticker+time match). Join advocate_journal.decision_id
+    = decision_chains.chain_id -> positions.realized_pnl. A PASS/CAUTION that filled is scored
+    right-if-win; a BLOCK that nonetheless executed (shadow-mode history) is scored right-if-loss.
+
+    NOTE: a LIVE BLOCK stops the trade -> no position -> never joins here, so live BLOCK precision
+    stays unmeasurable from fills alone. That is what the shadow book (loop-rebuild step 2) is for.
     """
+    rows = conn.execute(
+        """SELECT a.journal_id, a.verdict, p.realized_pnl, a.ticker
+           FROM advocate_journal a
+           JOIN decision_chains dc ON dc.chain_id = a.decision_id
+           JOIN positions       p  ON p.position_id = dc.position_id
+           WHERE a.trade_taken IS NULL
+             AND a.verdict IN ('PASS', 'CAUTION', 'BLOCK')
+             AND p.realized_pnl IS NOT NULL""",
+    ).fetchall()
     attributed = 0
-    for trade_id, ticker, entry_date_str, realized_pnl, _max_loss, _max_gain in trades:
-        window_start = (
-            datetime.fromisoformat(entry_date_str) - timedelta(hours=MATCH_WINDOW_HOURS)
-        ).isoformat()
-        window_end = (
-            datetime.fromisoformat(entry_date_str) + timedelta(days=1)
-        ).isoformat()
-
-        row = conn.execute(
-            """SELECT journal_id, verdict, trade_taken
-               FROM advocate_journal
-               WHERE ticker = ?
-                 AND decided_at_utc >= ?
-                 AND decided_at_utc <= ?
-               ORDER BY decided_at_utc DESC LIMIT 1""",
-            (ticker, window_start, window_end),
-        ).fetchone()
-        if row is None or row[2] is not None:
-            continue
-
-        journal_id, verdict, _ = row
+    for journal_id, verdict, realized_pnl, ticker in rows:
         won = (realized_pnl or 0) > 0
-        # BLOCK rows that executed (shadow mode): advocate_was_right = 1 if loss, 0 if win
-        # PASS/CAUTION rows that executed: advocate_was_right = 1 if win
-        if verdict == "BLOCK":
-            was_right = 1 if not won else 0   # advocate correctly predicted a loser
-        else:
-            was_right = 1 if won else 0
-
+        was_right = (1 if not won else 0) if verdict == "BLOCK" else (1 if won else 0)
         conn.execute(
             """UPDATE advocate_journal
                SET trade_taken = 1, realized_pnl = ?, advocate_was_right = ?
@@ -254,7 +218,7 @@ def _attribute_advocate(conn: sqlite3.Connection, trades: list[tuple]) -> int:
             (round(realized_pnl, 2), was_right, journal_id),
         )
         attributed += 1
-        logger.info("OutcomeAttributor[advocate] %s jid=%d verdict=%s right=%d",
+        logger.info("OutcomeAttributor[advocate] %s jid=%d verdict=%s right=%d (decision_id)",
                     ticker, journal_id, verdict, was_right)
     return attributed
 
@@ -409,16 +373,17 @@ def attribute_closed_trades(db_path: str) -> dict:
             if _table_exists(db_path, "exit_journal"):
                 _ensure_exit_journal_quality_cols(conn)
 
+            # Analyst / strategy / advocate are attributed by EXACT decision_id join (no fuzzy
+            # ticker+time match, no dependence on the leaky chain.realized_pnl) — they self-query.
+            total["analyst"] = _attribute_analyst(conn)
+            if _table_exists(db_path, "strategy_journal"):
+                total["strategy"] = _attribute_strategy(conn)
+            if _table_exists(db_path, "advocate_journal"):
+                total["advocate"] = _attribute_advocate(conn)
+            # Exit attribution still keys off closed-trade fills.
             trades = _fetch_closed_trades(conn)
-            # Attribution from trade fills — may be empty on a fresh session
-            if trades:
-                total["analyst"]  = _attribute_analyst(conn, trades)
-                if _table_exists(db_path, "strategy_journal"):
-                    total["strategy"] = _attribute_strategy(conn, trades)
-                if _table_exists(db_path, "advocate_journal"):
-                    total["advocate"] = _attribute_advocate(conn, trades)
-                if _table_exists(db_path, "exit_journal"):
-                    total["exit"]     = _attribute_exit(conn, trades)
+            if trades and _table_exists(db_path, "exit_journal"):
+                total["exit"] = _attribute_exit(conn, trades)
 
             # Calibration runs regardless of new trades — uses all attributed rows in journal
             if _table_exists(db_path, "calibration_log"):
