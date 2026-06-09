@@ -133,10 +133,102 @@ def _valid_quote(x: Any) -> bool:
     return x is not None and isinstance(x, (int, float)) and not math.isnan(x) and x > 0
 
 
+# M2: bounded marketable-limit close price. A pure MKT close on a thin/empty options book
+# can fill arbitrarily far from the touch (the order chases whatever liquidity exists). A
+# marketable LIMIT crosses the spread by a buffer so it fills like a market order in a normal
+# book, but caps catastrophic slippage. buffer = max(2 ticks, pct of the marketable side).
+def _marketable_close_limit(action: str, bid: float, ask: float,
+                            buffer_pct: float = 0.05) -> float | None:
+    """Price a closing order to fill now but bounded. Returns None if the quote is unusable
+    (caller should fall back to MKT — a guaranteed exit beats no exit on a stop)."""
+    _TICK = 0.01
+    if action.upper() == "BUY":          # buying to close a short leg — cross UP through the ask
+        if not _valid_quote(ask):
+            return None
+        return round(ask + max(2 * _TICK, ask * buffer_pct), 2)
+    # SELL to close a long leg — cross DOWN through the bid, floored at one tick
+    if not _valid_quote(bid):
+        return None
+    return round(max(bid - max(2 * _TICK, bid * buffer_pct), _TICK), 2)
+
+
 # H1: cache resolved option conIds (global, immutable per contract) so the SAME legs aren't
 # re-qualified on every call — the chosen legs get qualified across reprice → submit → close,
 # and a qualify round-trip is ~1.5s each. conIds never change, so the cache is always valid.
 _CONID_CACHE: dict[tuple, int] = {}
+
+
+# M3: critical IBKR connectivity/session errors that the trading engine must be ALERTED on
+# (not just logged). 10197 = a competing live session has taken over our market data — quotes
+# silently stop, so fills/reprices degrade with no obvious cause. 1100 = the API connection to
+# TWS/IBKR was lost. 2103/2105/10182 = a market-data farm is disconnected. We capture these on
+# each connection's errorEvent into a bounded buffer the bridge drains and the session alerts.
+_CRITICAL_IBKR_ERRORS: dict[int, str] = {
+    10197: "competing live session — market data is being starved (another login took over)",
+    1100: "API connection to TWS/IBKR lost",
+    2103: "market-data farm connection is broken",
+    2105: "historical-data farm connection is broken",
+    10182: "market-data farm disconnected — quotes unavailable",
+}
+_CRITICAL_ERR_BUFFER: list[dict[str, Any]] = []
+_CRITICAL_ERR_MAX = 50
+
+
+def _attach_error_monitor(ib: Any, session_id: str = "") -> None:
+    """Register an errorEvent handler that records critical IBKR errors (M3). Safe to call
+    once per fresh IB() — the handler lives for that connection's lifetime."""
+    def _on_error(reqId: int, errorCode: int, errorString: str, contract: Any = None) -> None:
+        if errorCode in _CRITICAL_IBKR_ERRORS:
+            entry = {
+                "code": errorCode,
+                "meaning": _CRITICAL_IBKR_ERRORS[errorCode],
+                "raw": errorString,
+                "session_id": session_id,
+            }
+            logger.warning("[%s] CRITICAL IBKR error %d — %s | %s",
+                           session_id, errorCode, entry["meaning"], errorString)
+            _CRITICAL_ERR_BUFFER.append(entry)
+            del _CRITICAL_ERR_BUFFER[:-_CRITICAL_ERR_MAX]   # keep only the most recent N
+    try:
+        ib.errorEvent += _on_error
+    except Exception:   # pragma: no cover - defensive
+        pass
+
+
+def drain_critical_errors() -> list[dict[str, Any]]:
+    """Pop and return all buffered critical IBKR errors (M3). The session polls this and
+    dispatches an operator alert. Draining clears the buffer so each error alerts once."""
+    out = list(_CRITICAL_ERR_BUFFER)
+    _CRITICAL_ERR_BUFFER.clear()
+    return out
+
+
+async def _connect_ibkr(
+    ib: Any,
+    *,
+    host: str,
+    port: int,
+    client_id: int,
+    market_data_type: int | None = None,
+    session_id: str = "",
+    timeout: float = 10,
+) -> None:
+    """M4: single source of truth for an execution connection — connect, attach the M3
+    critical-error monitor, and set the market-data type. Every entry/close/quote path
+    funnels its per-call setup through here so the connection lifecycle lives in one place.
+
+    A persistent (reused) socket is deliberately NOT used: each call runs in a fresh event
+    loop on the single executor thread, and an IB() is bound to the loop it connected on, so
+    reusing one across loops is unsafe. The H1 conId cache already removes the only expensive
+    repeated work (qualify), leaving just a ~1s connect that a persistent socket would save.
+    """
+    await ib.connectAsync(host, port, clientId=client_id, timeout=timeout)
+    _attach_error_monitor(ib, session_id)
+    if market_data_type is not None:
+        try:
+            ib.reqMarketDataType(market_data_type)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("[%s] reqMarketDataType(%s) failed: %s", session_id, market_data_type, exc)
 
 
 async def _qualify(ib: Any, opt: Any) -> Any | None:
@@ -292,14 +384,10 @@ async def place_bracket_order(
     ib = IB()
 
     try:
-        await ib.connectAsync(host, port, clientId=client_id, timeout=10)
+        # M4: connect + M3 error monitor + market-data type, all via the shared helper.
+        await _connect_ibkr(ib, host=host, port=port, client_id=client_id,
+                            market_data_type=market_data_type, session_id=session_id)
         logger.info("[%s] Bracket order — connecting to %s:%d", session_id, host, port)
-
-        # Market-data type for execution pricing: 1=live (needs OPRA sub), 3=delayed (free).
-        try:
-            ib.reqMarketDataType(market_data_type)
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.debug("[%s] reqMarketDataType(%d) failed: %s", session_id, market_data_type, exc)
 
         # ── Qualify legs and build BAG contract ───────────────────────────
         qualified_legs: list[tuple[dict, Any]] = []
@@ -439,6 +527,32 @@ async def place_bracket_order(
         entry_trade = ib.placeOrder(bag, entry_order)
         parent_id = entry_trade.order.orderId
 
+        # Net combo fill price (per share) — a BAG reports one execution PER LEG (and may
+        # report several per leg on a multi-contract fill). Average each leg by share volume,
+        # then sum the signed leg averages (BUY=+, SELL=-) to recover the net; abs() matches
+        # the mid's magnitude regardless of debit/credit sign. Defined here so BOTH the full-
+        # fill and the M5 partial-fill paths share one correct computation.
+        sign_by_conid = {
+            c.conId: (+1 if ls["action"].upper() == "BUY" else -1)
+            for ls, c in qualified_legs
+        }
+
+        def _net_fill_per_share(trade: Any) -> float:
+            by_conid: dict[Any, list[float]] = {}
+            for f in trade.fills:
+                cid = getattr(getattr(f, "contract", None), "conId", None)
+                sh = float(getattr(f.execution, "shares", 0) or 0)
+                if cid is None or sh <= 0:
+                    continue
+                acc = by_conid.setdefault(cid, [0.0, 0.0])
+                acc[0] += float(f.execution.price) * sh
+                acc[1] += sh
+            net = 0.0
+            for cid, (pxsum, shsum) in by_conid.items():
+                if shsum > 0:
+                    net += sign_by_conid.get(cid, +1) * (pxsum / shsum)
+            return round(abs(net), 4)
+
         # Walk TARGET = the slippage-budget cap, NOT merely the natural. The combo "natural"
         # (sum of leg marketable sides) often isn't a real combo-book price, so a limit that
         # only REACHES it doesn't cross and the order sits unfilled (observed 2026-06-09: walked
@@ -524,12 +638,45 @@ async def place_bracket_order(
                 session_id, step + 1, max_steps, current_limit, order_action, natural,
             )
 
+        def _fills_payload() -> list[dict[str, Any]]:
+            return [
+                {
+                    "exec_id": f.execution.execId,
+                    "shares": f.execution.shares,
+                    "price": f.execution.price,
+                    "time": f.execution.time.isoformat() if f.execution.time else None,
+                }
+                for f in entry_trade.fills
+            ]
+
         # ── Cancel if still unfilled after the full walk ───────────────────
         if entry_trade.orderStatus.status != "Filled":
             try:
                 ib.cancelOrder(entry_order)
             except Exception:
                 pass
+
+            # M5: a multi-contract BAG is LEG-atomic but not QUANTITY-atomic — it can fill
+            # part of the requested combos (e.g. 2 of 5) and rest. Cancelling the remainder
+            # above leaves a REAL, smaller position open. Report it as PartiallyFilled with the
+            # filled quantity so the session records the right size instead of discarding it as
+            # a clean cancel (which would strand the open contracts, unmanaged).
+            filled_qty = int(getattr(entry_trade.orderStatus, "filled", 0) or 0)
+            if filled_qty > 0 and entry_trade.fills:
+                net_fill_price = _net_fill_per_share(entry_trade) or current_limit
+                logger.warning(
+                    "[%s] Order %d PARTIALLY filled %d/%d combos after walk — "
+                    "remainder cancelled, recording the %d filled",
+                    session_id, parent_id, filled_qty, contracts, filled_qty,
+                )
+                return {
+                    "order_id": parent_id, "status": "PartiallyFilled",
+                    "fills": _fills_payload(), "filled_contracts": filled_qty,
+                    "entry_price": net_fill_price, "net_fill_price": net_fill_price,
+                    "limit_at_fill": current_limit, "ibkr_greeks": ibkr_greeks,
+                    "profit_target": profit_target, "stop_loss": stop_loss,
+                }
+
             logger.warning(
                 "[%s] Order %d unfilled after walking mid=%.2f->natural=%.2f — cancelled",
                 session_id, parent_id, mid_limit, natural,
@@ -541,35 +688,12 @@ async def place_bracket_order(
                 "reason": f"Unfilled after walking mid {mid_limit:.2f} -> natural {natural:.2f}",
             }
 
-        fills = [
-            {
-                "exec_id": f.execution.execId,
-                "shares": f.execution.shares,
-                "price": f.execution.price,
-                "time": f.execution.time.isoformat() if f.execution.time else None,
-            }
-            for f in entry_trade.fills
-        ]
-
-        # Net combo fill price (per share), so slippage-vs-mid is comparable.
-        # A BAG reports one execution PER LEG — using a single leg's price (the old
-        # bug) logged nonsense slippage like mid=0.53 vs fill=5.79. Sum the signed
-        # leg fills (BUY=+, SELL=-) to recover the net; abs() to match the mid's
-        # magnitude regardless of debit/credit sign.
-        sign_by_conid = {
-            c.conId: (+1 if ls["action"].upper() == "BUY" else -1)
-            for ls, c in qualified_legs
-        }
-        net_fill = 0.0
-        for f in entry_trade.fills:
-            cid = getattr(getattr(f, "contract", None), "conId", None)
-            net_fill += sign_by_conid.get(cid, +1) * float(f.execution.price)
-        net_fill_price = round(abs(net_fill), 4) if entry_trade.fills else current_limit
+        net_fill_price = _net_fill_per_share(entry_trade) if entry_trade.fills else current_limit
 
         return {
             "order_id": parent_id,
             "status": entry_trade.orderStatus.status,
-            "fills": fills,
+            "fills": _fills_payload(),
             "entry_price": net_fill_price,       # net combo fill per share
             "net_fill_price": net_fill_price,    # explicit; used for slippage tracking
             "limit_at_fill": current_limit,      # the net limit when it filled
@@ -630,12 +754,10 @@ async def place_legs_individually(
 
     ib = IB()
     try:
-        await ib.connectAsync(host, port, clientId=client_id, timeout=10)
+        # M4: connect + M3 error monitor + market-data type, all via the shared helper.
+        await _connect_ibkr(ib, host=host, port=port, client_id=client_id,
+                            market_data_type=market_data_type, session_id=session_id)
         logger.info("[%s] Leg-by-leg order — connecting to %s:%d", session_id, host, port)
-        try:
-            ib.reqMarketDataType(market_data_type)
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.debug("[%s] reqMarketDataType(%d) failed: %s", session_id, market_data_type, exc)
 
         # ── Qualify each leg contract ─────────────────────────────────────────
         qualified: list[tuple[dict, Any]] = []
@@ -888,9 +1010,10 @@ async def close_position(
     port: int = 7497,
     client_id: int = 2,  # separate client_id from entry to avoid conflicts
     timeout: float = 20.0,
+    market_data_type: int = 1,
 ) -> dict[str, Any]:
     """
-    Close an open spread position at market (MOC-style limit at mid).
+    Close an open spread position with a bounded marketable-limit combo order (M2).
 
     Called by MonitorAgent when stop-loss, trailing stop, or thesis-break
     is triggered. Reverses all legs of the spread via a BAG market order.
@@ -904,7 +1027,9 @@ async def close_position(
     ib = IB()
 
     try:
-        await ib.connectAsync(host, port, clientId=client_id, timeout=10)
+        # M4: connect + M3 error monitor + market-data type via the shared helper.
+        await _connect_ibkr(ib, host=host, port=port, client_id=client_id,
+                            market_data_type=market_data_type)
         logger.info("[%s] Closing position %s x%d", session_id, ticker, contracts)
 
         qualified_legs: list[tuple[dict, Any]] = []
@@ -923,6 +1048,34 @@ async def close_position(
                 raise RuntimeError(f"Could not qualify closing leg: {ticker} {leg}")
             qualified_legs.append((leg, q))
 
+        # M2: derive the net cost to CLOSE at the marketable touch so we can place a bounded
+        # LIMIT instead of a pure MKT. Closing reverses every leg: an original BUY is sold at
+        # the bid (we receive), an original SELL is bought at the ask (we pay). The reversed
+        # BAG order action is fixed BUY below, so a HIGHER net limit is always more marketable
+        # — we set lmtPrice = close_net + buffer. None → fall back to MKT (guarantee the exit).
+        _close_mkt = [(ls, ib.reqMktData(c, "", False, False)) for ls, c in qualified_legs]
+        _loop = asyncio.get_event_loop()
+        _qdl = _loop.time() + 4.0
+        while _loop.time() < _qdl and not all(
+            _valid_quote(tk.bid) and _valid_quote(tk.ask) for _, tk in _close_mkt
+        ):
+            await asyncio.sleep(0.3)
+        close_net: float | None = 0.0
+        for ls, tk in _close_mkt:
+            if not (_valid_quote(tk.bid) and _valid_quote(tk.ask)):
+                close_net = None
+                break
+            ratio = ls.get("quantity", 1)
+            if ls["action"].upper() == "BUY":      # owned long → sell at bid (receive)
+                close_net -= float(tk.bid) * ratio
+            else:                                   # short → buy at ask (pay)
+                close_net += float(tk.ask) * ratio
+        for _, tk in _close_mkt:
+            try:
+                ib.cancelMktData(tk.contract)
+            except Exception:
+                pass
+
         bag = Contract()
         bag.symbol = ticker
         bag.secType = "BAG"
@@ -939,19 +1092,25 @@ async def close_position(
             for leg_spec, contract in qualified_legs
         ]
 
-        # Use a market order for guaranteed exit — stop hits require certainty
+        # M2: bounded marketable LIMIT (cross the touch by a buffer) with MKT fallback.
         close_order = Order()
-        close_order.action = "BUY"   # reversed relative to entry; BAG market order
-        close_order.orderType = "MKT"
+        close_order.action = "BUY"   # reversed relative to entry
         close_order.totalQuantity = contracts
         close_order.tif = "DAY"
         close_order.orderRef = f"CLOSE_{session_id[:30]}"
         close_order.transmit = True
+        if close_net is not None:
+            buffer = max(0.02, abs(close_net) * 0.05)
+            close_order.orderType = "LMT"
+            close_order.lmtPrice = round(close_net + buffer, 2)
+        else:
+            close_order.orderType = "MKT"   # no usable quote — guarantee the exit
 
         trade = ib.placeOrder(bag, close_order)
         logger.info(
-            "[%s] Close order submitted — orderId=%d",
+            "[%s] Close order submitted — orderId=%d %s",
             session_id, trade.order.orderId,
+            f"LMT {close_order.lmtPrice:.2f}" if close_order.orderType == "LMT" else "MKT",
         )
 
         deadline = asyncio.get_event_loop().time() + timeout
@@ -1008,15 +1167,20 @@ async def close_position_legs(
     port: int = 7497,
     client_id: int = 2,
     timeout: float = 25.0,
+    market_data_type: int = 1,
 ) -> dict[str, Any]:
     """
-    Close a spread LEG-BY-LEG with market orders.
+    Close a spread LEG-BY-LEG with bounded marketable-limit orders (M2).
 
     Used for CREDIT-spread positions: the closing BAG re-creates a combo that IBKR
     re-flags as a riskless/guaranteed-loss combination and rejects with Error 201 on
     the paper account, stranding the position (an unbounded risk on a stop-loss exit).
-    Individual market orders aren't combos, guarantee the exit, and fill both legs
-    immediately (no leg gap).
+    Individual orders aren't combos, guarantee the exit, and fill both legs immediately.
+
+    M2: each leg is closed with a BOUNDED marketable LIMIT (cross the touch by a small
+    buffer) instead of a pure MKT, so a thin/empty book can't fill the exit arbitrarily
+    far from the quote. If a leg has no usable quote we fall back to MKT for that leg —
+    a guaranteed exit beats no exit on a stop.
 
     `legs` carry the ORIGINAL entry actions; each is reversed here to flatten.
     """
@@ -1025,7 +1189,9 @@ async def close_position_legs(
 
     ib = IB()
     try:
-        await ib.connectAsync(host, port, clientId=client_id, timeout=10)
+        # M4: connect + M3 error monitor + market-data type via the shared helper.
+        await _connect_ibkr(ib, host=host, port=port, client_id=client_id,
+                            market_data_type=market_data_type)
         logger.info("[%s] Closing position LEG-BY-LEG %s x%d", session_id, ticker, contracts)
 
         qualified: list[tuple[dict, Any]] = []
@@ -1042,21 +1208,47 @@ async def close_position_legs(
                 raise RuntimeError(f"Could not qualify closing leg: {ticker} {leg}")
             qualified.append((leg, q))
 
+        # M2: snapshot each leg's bid/ask so we can price a bounded marketable LIMIT.
+        mkt = [(ls, ib.reqMktData(c, "", False, False)) for ls, c in qualified]
+        loop = asyncio.get_event_loop()
+        q_deadline = loop.time() + 4.0
+        while loop.time() < q_deadline and not all(
+            _valid_quote(tk.bid) and _valid_quote(tk.ask) for _, tk in mkt
+        ):
+            await asyncio.sleep(0.3)
+        leg_quote = {id(c): tk for (ls, c), (_, tk) in zip(qualified, mkt)}
+        for _, tk in mkt:
+            try:
+                ib.cancelMktData(tk.contract)
+            except Exception:
+                pass
+
         trades = []
         for i, (leg, contract) in enumerate(qualified):
             close_action = "SELL" if leg["action"].upper() == "BUY" else "BUY"  # reverse to flatten
+            tk = leg_quote.get(id(contract))
+            limit_px = (
+                _marketable_close_limit(close_action, getattr(tk, "bid", None),
+                                        getattr(tk, "ask", None))
+                if tk is not None else None
+            )
             o = Order()
             o.action = close_action
-            o.orderType = "MKT"
             o.totalQuantity = contracts * leg.get("quantity", 1)
             o.tif = "DAY"
             o.orderRef = f"CLOSE_{session_id[:26]}-L{i}"
             o.transmit = True
+            if limit_px is not None:
+                o.orderType = "LMT"
+                o.lmtPrice = limit_px
+            else:
+                o.orderType = "MKT"   # no usable quote — guarantee the exit
             trades.append(ib.placeOrder(contract, o))
             logger.info(
-                "[%s] Close leg %d/%d — %s %s %.0f %s MKT",
+                "[%s] Close leg %d/%d — %s %s %.0f %s %s",
                 session_id, i + 1, len(qualified), close_action, ticker,
                 leg["strike"], leg["option_type"].upper(),
+                f"LMT {limit_px:.2f}" if limit_px is not None else "MKT",
             )
 
         # Wait for all legs to fill (market orders fill fast).
@@ -1127,11 +1319,9 @@ async def fetch_leg_quotes(
 
     ib = IB()
     try:
-        await ib.connectAsync(host, port, clientId=client_id, timeout=10)
-        try:
-            ib.reqMarketDataType(market_data_type)
-        except Exception:
-            pass
+        # M4: connect + M3 error monitor + market-data type via the shared helper.
+        await _connect_ibkr(ib, host=host, port=port, client_id=client_id,
+                            market_data_type=market_data_type)
 
         qualified: list[tuple[dict, Any]] = []
         for leg in legs:
@@ -1205,11 +1395,9 @@ async def fetch_chain_quotes(
     ib = IB()
     out: dict[tuple[float, str], dict[str, float]] = {}
     try:
-        await ib.connectAsync(host, port, clientId=client_id, timeout=10)
-        try:
-            ib.reqMarketDataType(market_data_type)
-        except Exception:
-            pass
+        # M4: connect + M3 error monitor + market-data type via the shared helper.
+        await _connect_ibkr(ib, host=host, port=port, client_id=client_id,
+                            market_data_type=market_data_type)
 
         contracts: list[tuple[float, str, Any]] = []
         for right, strikes in (("C", call_strikes), ("P", put_strikes)):

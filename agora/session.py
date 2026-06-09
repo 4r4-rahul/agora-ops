@@ -703,6 +703,10 @@ class AgoraSession:
         # Prevents the same illiquid spread from consuming execution budget on every scan.
         self._exec_cooldowns: dict[str, datetime] = {}
         self._EXEC_COOLDOWN_SECS: int = 7200  # 2 hours after a timeout/reject
+        # M1 idempotency: tickers with a submission in flight RIGHT NOW. Guards against
+        # concurrent double-submit (two scan paths hitting the same ticker before either
+        # records an attempt / sets a cooldown). Added on entry, removed in a finally.
+        self._inflight_tickers: set[str] = set()
         # Tickers that got Error 201 in live mode (riskless combo limit exceeded).
         # In paper mode this won't fire since we use leg-by-leg submission.
         self._error_201_blocked: set[str] = set()
@@ -1687,7 +1691,20 @@ class AgoraSession:
                             "LongOptions order [%s]: status=%s order_id=%s",
                             ticker, order_status, order.get("order_id"),
                         )
-                        if order_status == "Filled":
+                        if order_status in ("Filled", "PartiallyFilled"):
+                            if order_status == "PartiallyFilled":
+                                _orig = max(1, int(rec.contracts))
+                                _fc = int(order.get("filled_contracts", _orig) or _orig)
+                                if 0 < _fc < _orig:
+                                    _scale = _fc / _orig
+                                    rec.entry_debit_credit *= _scale
+                                    for _attr in ("max_loss_dollars", "max_gain_dollars"):
+                                        _v = getattr(rec, _attr, None)
+                                        if isinstance(_v, (int, float)):
+                                            setattr(rec, _attr, _v * _scale)
+                                    rec.contracts = _fc
+                                    logger.warning("PARTIAL FILL recorded (long): %s at %d/%d",
+                                                   ticker, _fc, _orig)
                             fills      = order.get("fills", [])
                             fill_price = float(fills[0]["price"]) if fills else decision.premium
                             time_stop_date = _date.today() + timedelta(days=max_hold)
@@ -1920,10 +1937,37 @@ class AgoraSession:
                 # ── Intraday macro refresh check ───────────────────
                 await self._check_macro_refresh(close)
 
+                # ── M3: surface critical IBKR connectivity/session errors ──
+                await self._alert_ibkr_critical_errors()
+
             except Exception as exc:
                 logger.debug("Price monitor error: %s", exc)
 
             await asyncio.sleep(300)   # run every 5 minutes
+
+    async def _alert_ibkr_critical_errors(self) -> None:
+        """M3: drain critical IBKR errors (10197 competing session, farm/connectivity drops)
+        captured on the execution connections and escalate to the COO. Deduped by code so a
+        persistent condition alerts once per 5-min poll, not on every quote request."""
+        try:
+            from trading_platform.services.ibkr_client import drain_critical_errors
+            errs = drain_critical_errors()
+        except Exception:
+            return
+        if not errs:
+            return
+        seen: set[int] = set()
+        for e in errs:
+            code = e.get("code")
+            if code in seen:
+                continue
+            seen.add(code)
+            level = "critical" if code in (10197, 1100) else "warning"
+            msg = f"IBKR error {code}: {e.get('meaning')} — {e.get('raw', '')}".strip()
+            try:
+                await self._coo.receive_alert("execution", level, msg)
+            except Exception:
+                logger.warning("IBKR critical error (alert dispatch failed): %s", msg)
 
     _MACRO_REFRESH_SPY_THRESHOLD = 0.015   # SPY move ≥ 1.5% from last synthesis
     _MACRO_REFRESH_VIX_THRESHOLD = 0.03    # VIX move ≥ 3% from last synthesis
@@ -3205,6 +3249,28 @@ class AgoraSession:
         self,
         recommendation: Any,
         ticker: str,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """M1 idempotency wrapper around _submit_recommendation_inner.
+
+        Blocks a second concurrent submission of the same ticker while the first is
+        still in flight (network/LLM latency on the entry path is several seconds, a
+        window in which another scan trigger could otherwise fire a duplicate order).
+        """
+        if ticker in self._inflight_tickers:
+            logger.info("ENTRY SKIPPED: %s submission already in flight (M1 dedup)", ticker)
+            return
+        self._inflight_tickers.add(ticker)
+        try:
+            await self._submit_recommendation_inner(recommendation, ticker, *args, **kwargs)
+        finally:
+            self._inflight_tickers.discard(ticker)
+
+    async def _submit_recommendation_inner(
+        self,
+        recommendation: Any,
+        ticker: str,
         spot: float,
         earnings_date: Any = None,
         is_pre_earnings: bool = False,
@@ -3513,7 +3579,7 @@ class AgoraSession:
                     ticker, order_status, order.get("order_id"), order.get("fills"))
 
         _chain_outcome = (
-            "filled" if order_status == "Filled"
+            "filled" if order_status in ("Filled", "PartiallyFilled")
             else "rejected" if order_status in ("Cancelled", "ApiCancelled", "Inactive")
             else "pending"
         )
@@ -3553,7 +3619,23 @@ class AgoraSession:
                 self._error_201_blocked.add(ticker)
                 logger.info("Error 201 session block: %s will not be re-evaluated this session", ticker)
                 asyncio.create_task(self._orphan_reconciler.reconcile_now())
-        elif order_status == "Filled":
+        elif order_status in ("Filled", "PartiallyFilled"):
+            # Record the position on a full OR partial fill — a partially-filled BAG (M5)
+            # leaves a real, smaller position open at the broker that MUST be tracked.
+            if order_status == "PartiallyFilled":
+                _orig = max(1, int(recommendation.contracts))
+                _fc = int(order.get("filled_contracts", _orig) or _orig)
+                if 0 < _fc < _orig:
+                    _scale = _fc / _orig
+                    # Scale every per-position TOTAL to the filled size; per-share economics
+                    # (entry_debit_credit / (contracts*100)) are unchanged by the scaling.
+                    recommendation.entry_debit_credit *= _scale
+                    for _attr in ("max_loss_dollars", "max_gain_dollars"):
+                        _v = getattr(recommendation, _attr, None)
+                        if isinstance(_v, (int, float)):
+                            setattr(recommendation, _attr, _v * _scale)
+                    recommendation.contracts = _fc
+                    logger.warning("PARTIAL FILL recorded: %s at %d/%d contracts", ticker, _fc, _orig)
             # Only record the position on confirmed fill — not on Submitted/PreSubmitted
             fills = order.get("fills", [])
             # Use the NET combo fill (same units as the mid) for slippage; fall back

@@ -324,6 +324,7 @@ async def close_trade(pos: Any, settings: Any, session_id: str) -> dict:
         host=settings.ibkr_host,
         port=settings.ibkr_port,
         client_id=settings.ibkr_client_id + 1,
+        market_data_type=getattr(settings, "ibkr_market_data_type", 3),
     )
 
     # Mirror entry routing: a CREDIT-spread close on the paper account would re-trip the
