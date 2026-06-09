@@ -1670,6 +1670,13 @@ class AgoraSession:
                         logger.debug("LongOptions [%s] cap reached at submit (%d/%d) — skip",
                                      ticker, _live_longs, self._settings.long_options_max_positions)
                         return
+                    # #3: global exposure ceiling across BOTH pipelines (re-checked atomically
+                    # under the submit lock so concurrent long workers can't both pass a stale read).
+                    _gok, _greason = self._global_exposure_ok(
+                        new_risk_dollars=abs(getattr(rec, "max_loss_dollars", 0.0) or 0.0))
+                    if not _gok:
+                        logger.info("LongOptions [%s] BLOCKED by %s — skip", ticker, _greason)
+                        return
                     logger.info(
                         "LongOptions SUBMITTING [%s] %s strike=%.0f exp=%s prem=$%.2f "
                         "contracts=%d conviction=%d ptIVR=%.0f",
@@ -3259,6 +3266,25 @@ class AgoraSession:
         finally:
             self._inflight_tickers.discard(ticker)
 
+    def _global_exposure_ok(self, new_risk_dollars: float = 0.0) -> tuple[bool, str]:
+        """#3: single GLOBAL ceiling both pipelines consult before opening — bounds the SUM of
+        the spread + long-options books (count and deployed capital), which the per-pipeline
+        caps never did. Returns (ok, reason). Defaults are non-binding (data-collection posture).
+        """
+        positions = self._position_mgr.get_open_positions()
+        cap_n = self._settings.max_total_open_positions
+        if len(positions) >= cap_n:
+            return False, f"global position ceiling {len(positions)}/{cap_n}"
+        cap_pct = self._settings.max_total_capital_deployed_pct
+        if cap_pct < 1.0:
+            deployed = sum(abs(getattr(p, "max_loss_dollars", 0.0) or 0.0) for p in positions)
+            limit = self._settings.account_size * cap_pct
+            if deployed + max(0.0, new_risk_dollars) > limit:
+                return (False,
+                        f"global capital ceiling ${deployed + new_risk_dollars:.0f}/${limit:.0f} "
+                        f"({cap_pct:.0%} of ${self._settings.account_size:.0f})")
+        return True, ""
+
     async def _submit_recommendation_inner(
         self,
         recommendation: Any,
@@ -3310,6 +3336,16 @@ class AgoraSession:
             if chain_id:
                 _complete_chain(str(self._settings.db_path), chain_id, "rejected",
                                 gates_passed=["combo_limit"])
+            return
+
+        # #3: global exposure ceiling across BOTH pipelines (count + deployed capital).
+        _gok, _greason = self._global_exposure_ok(
+            new_risk_dollars=abs(getattr(recommendation, "max_loss_dollars", 0.0) or 0.0))
+        if not _gok:
+            logger.info("ENTRY BLOCKED by %s | %s", _greason, ticker)
+            if chain_id:
+                _complete_chain(str(self._settings.db_path), chain_id, "rejected",
+                                gates_passed=["global_exposure"])
             return
 
         # Sector rotation + valuation conviction adjustment (modulates conviction_score

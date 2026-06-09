@@ -47,6 +47,18 @@ class AgoraSettings(BaseSettings):
     max_position_size_pct: float = Field(default=0.02, ge=0.005, le=1.0)
     max_open_positions: int = Field(default=4, ge=1, le=1000)
     max_per_correlation_group: int = Field(default=1, ge=1, le=1000)
+    # Scanner review #3 — GLOBAL exposure ceiling across BOTH pipelines. The spread and
+    # long-options loops each had their own count cap (max_open_positions /
+    # long_options_max_positions) with no single bound on the SUM, so on a strong-signal day
+    # both could load up at once. These two knobs are the one ceiling both pipelines consult
+    # before submit. Defaults are intentionally non-binding (matches the current data-collection
+    # "caps lifted" posture); tighten max_total_capital_deployed_pct to bound real exposure.
+    max_total_open_positions: int = Field(default=1000, ge=1, le=10000)
+    max_total_capital_deployed_pct: float = Field(
+        default=1.0, ge=0.05, le=1.0,
+        description="Max fraction of account_size deployed (Σ max_loss across all open "
+                    "positions, both pipelines) before any new entry is blocked. 1.0 = off.",
+    )
     daily_loss_limit_pct: float = Field(default=0.02, ge=0.005, le=0.25)
     weekly_loss_limit_pct: float = Field(default=0.06, ge=0.01, le=0.20)
     min_rr_ratio: float = Field(default=1.3, ge=0.5)
