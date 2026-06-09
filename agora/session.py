@@ -534,6 +534,7 @@ class AgoraSession:
                 db_path=str(self._settings.db_path),
                 n_workers=self._settings.n_scan_workers,
                 shadow_mode=self._settings.shadow_scan_engine,
+                priority_fn=self._engine_priority,   # S1: Tier1 / market-interest → NORMAL sweep
             )
             logger.info(
                 "ScanEngine configured: workers=%d shadow=%s",
@@ -931,12 +932,18 @@ class AgoraSession:
                 if not self._synthesis_in_progress:
                     break
                 await asyncio.sleep(1)
-            try:
-                logger.info("Session loop: cold-start universe scan (immediate)")
-                await self._universe_scan()
-                self._last_universe_scan_et = datetime.now(tz=ET)
-            except Exception as exc:
-                logger.error("Cold-start universe scan failed: %s", exc)
+            # S4: skip the cold-start tiered scan when the live engine is driving — its
+            # scheduled sweeper enqueues the whole (stale) universe on start, so a separate
+            # _universe_scan here just double-scans with the now-fallback tiering path.
+            if self._scan_engine and not self._scan_engine.shadow_mode:
+                logger.info("Session loop: cold-start — live ScanEngine sweeps the universe; skipping tiered _universe_scan")
+            else:
+                try:
+                    logger.info("Session loop: cold-start universe scan (immediate)")
+                    await self._universe_scan()
+                    self._last_universe_scan_et = datetime.now(tz=ET)
+                except Exception as exc:
+                    logger.error("Cold-start universe scan failed: %s", exc)
 
         while self._running:
             now_et = datetime.now(tz=ET)
@@ -1965,6 +1972,10 @@ class AgoraSession:
                         trigger = f"vol spike {latest_vol/avg_vol:.1f}× avg"
 
                     if trigger and ticker not in self._tier1:
+                        # S1: live path = enqueue URGENT into the engine; the _priority_queue
+                        # branch is the fallback consumed only by _universe_scan when the engine
+                        # is absent. (Tier1 names are already swept at NORMAL by _engine_priority,
+                        # so they're excluded here to avoid redundant URGENT churn.)
                         if self._scan_engine:
                             asyncio.create_task(
                                 self._scan_engine.enqueue(
@@ -2095,6 +2106,13 @@ class AgoraSession:
 
     async def _universe_scan(self) -> None:
         """
+        FALLBACK tiered universe scan (S1). Used ONLY when the async UniverseScanEngine is
+        disabled (use_async_scan_engine=false) or in shadow_mode. In production the engine is
+        live and owns scheduling — it sweeps by staleness and now honors the Tier1 / market-
+        interest priorities via _engine_priority(), so this tiered rotation + the _priority_queue
+        it consumes do NOT run steady-state (only this fallback path and one cold-start, both
+        gated above). Kept as the resilient fallback; not dead, but not the live scheduler.
+
         Event-driven tiered universe scan.
 
         Cadence (time-of-day aware — see _scan_interval_seconds):
@@ -2160,6 +2178,31 @@ class AgoraSession:
                 await asyncio.sleep(1)
             except Exception as exc:
                 logger.error("Evaluate ticker %s failed: %s", ticker, exc, exc_info=True)
+
+    def _hot_interest_tickers(self) -> set[str]:
+        """S1: market-interest top names, cached ~60s so the per-ticker priority classifier
+        doesn't recompute the ranking on every sweep entry."""
+        import time as _t
+        now = _t.monotonic()
+        if now - getattr(self, "_hot_interest_ts", 0.0) > 60.0:
+            try:
+                self._hot_interest = {
+                    t for t, _ in self._market_interest.get_top_interest_tickers(n=5)
+                }
+            except Exception:
+                self._hot_interest = set()
+            self._hot_interest_ts = now
+        return getattr(self, "_hot_interest", set())
+
+    def _engine_priority(self, ticker: str) -> int:
+        """S1: per-ticker scheduled-sweep priority for the LIVE scan engine. Elevates the Tier1
+        always-hot set and current market-interest names to NORMAL so they sweep ahead of the
+        routine BACKGROUND universe — the prioritization that previously lived only in the
+        now-fallback _universe_scan tiering. URGENT/IMMEDIATE stay reserved for real-time
+        event enqueues (price moves, catalysts) from the price monitor and _on_catalyst."""
+        if ticker in self._tier1 or ticker in self._hot_interest_tickers():
+            return ScanPriority.NORMAL
+        return ScanPriority.BACKGROUND
 
     async def _evaluate_ticker(
         self,

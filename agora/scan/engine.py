@@ -25,7 +25,7 @@ import logging
 import sqlite3
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import IntEnum
 from typing import Awaitable, Callable
 from zoneinfo import ZoneInfo
@@ -123,12 +123,18 @@ class UniverseScanEngine:
         db_path:      str,
         n_workers:    int  = 4,
         shadow_mode:  bool = True,
+        priority_fn:  Callable[[str], int] | None = None,
     ) -> None:
         self._universe_fn  = universe_fn
         self._evaluator    = evaluator
         self._db_path      = db_path
         self._n_workers    = n_workers
         self._shadow_mode  = shadow_mode
+        # S1: per-ticker priority classifier for the scheduled sweep. Lets the LIVE engine
+        # honor the Tier1 "always-hot" set and market-interest names (which previously only
+        # the now-fallback _universe_scan tiering used) — Tier1 → NORMAL, top-interest →
+        # URGENT, the rest → BACKGROUND. None → everything sweeps at BACKGROUND (old behavior).
+        self._priority_fn  = priority_fn
 
         self._queue: asyncio.PriorityQueue[ScanRequest] = asyncio.PriorityQueue(
             maxsize=_MAX_QUEUE_SIZE
@@ -141,6 +147,14 @@ class UniverseScanEngine:
         self._tasks:  list[asyncio.Task] = []
 
         _ensure_table(db_path)
+        # S2: one persistent metrics connection (WAL), reused across all writes. The previous
+        # code opened a fresh sqlite3.connect() on EVERY ticker evaluation. All writes originate
+        # from the single event-loop thread, so one shared connection is safe.
+        self._metrics_conn = sqlite3.connect(db_path, check_same_thread=False)
+        try:
+            self._metrics_conn.execute("PRAGMA journal_mode=WAL")
+        except Exception:  # pragma: no cover - defensive
+            pass
         logger.info(
             "ScanEngine init: workers=%d shadow=%s db=%s",
             n_workers, shadow_mode, db_path
@@ -168,6 +182,10 @@ class UniverseScanEngine:
             t.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
+        try:
+            self._metrics_conn.close()   # S2: release the persistent metrics connection
+        except Exception:
+            pass
         logger.info("ScanEngine stopped")
 
     async def enqueue(
@@ -292,9 +310,15 @@ class UniverseScanEngine:
             for ticker in universe:
                 age = now_mono - self._last_evaluated.get(ticker, 0)
                 if age >= stale_threshold_s:
-                    queued = await self.enqueue(
-                        ScanPriority.BACKGROUND, ticker, reason="scheduled_sweep"
-                    )
+                    # S1: classify priority so Tier1 / market-interest names sweep ahead of the
+                    # routine background universe (defensive: any classifier error → BACKGROUND).
+                    prio = ScanPriority.BACKGROUND
+                    if self._priority_fn is not None:
+                        try:
+                            prio = self._priority_fn(ticker)
+                        except Exception:
+                            prio = ScanPriority.BACKGROUND
+                    queued = await self.enqueue(prio, ticker, reason="scheduled_sweep")
                     if queued:
                         enqueued += 1
 
@@ -368,27 +392,27 @@ class UniverseScanEngine:
         outcome:      str,
     ) -> None:
         try:
-            with sqlite3.connect(self._db_path) as conn:
-                conn.execute(
-                    """
-                    INSERT INTO scan_metrics
-                        (timestamp_utc, ticker, priority, reason,
-                         enqueue_time, dequeue_time, queue_wait_ms,
-                         worker_id, eval_ms, outcome)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        datetime.utcnow().isoformat(),
-                        req.ticker,
-                        req.priority,
-                        req.reason,
-                        req.enqueue_time,
-                        dequeue_time,
-                        queue_wait_ms,
-                        worker_id,
-                        eval_ms,
-                        outcome,
-                    ),
-                )
+            self._metrics_conn.execute(
+                """
+                INSERT INTO scan_metrics
+                    (timestamp_utc, ticker, priority, reason,
+                     enqueue_time, dequeue_time, queue_wait_ms,
+                     worker_id, eval_ms, outcome)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    datetime.now(timezone.utc).isoformat(),
+                    req.ticker,
+                    req.priority,
+                    req.reason,
+                    req.enqueue_time,
+                    dequeue_time,
+                    queue_wait_ms,
+                    worker_id,
+                    eval_ms,
+                    outcome,
+                ),
+            )
+            self._metrics_conn.commit()
         except Exception as exc:
             logger.debug("scan_metrics write error: %s", exc)
