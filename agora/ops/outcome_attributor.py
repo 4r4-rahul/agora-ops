@@ -220,6 +220,30 @@ def _attribute_advocate(conn: sqlite3.Connection) -> int:
         attributed += 1
         logger.info("OutcomeAttributor[advocate] %s jid=%d verdict=%s right=%d (decision_id)",
                     ticker, journal_id, verdict, was_right)
+
+    # L3: score LIVE BLOCKs from the shadow book — a blocked trade never fills, so its precision
+    # is only knowable from the counterfactual. advocate_was_right=1 iff the shadow trade LOST.
+    try:
+        shadow = conn.execute(
+            """SELECT a.journal_id, sb.hypothetical_win, sb.hypothetical_pnl, a.ticker
+               FROM advocate_journal a
+               JOIN shadow_book sb ON sb.decision_id = a.decision_id
+               WHERE a.trade_taken IS NULL AND a.verdict='BLOCK'
+                 AND sb.evaluated=1 AND sb.hypothetical_win IS NOT NULL""",
+        ).fetchall()
+        for journal_id, hyp_win, hyp_pnl, ticker in shadow:
+            was_right = 0 if hyp_win else 1   # right to BLOCK iff the shadow trade would have lost
+            conn.execute(
+                """UPDATE advocate_journal
+                   SET trade_taken=1, realized_pnl=?, advocate_was_right=?
+                   WHERE journal_id=?""",
+                (round(hyp_pnl or 0, 2), was_right, journal_id),
+            )
+            attributed += 1
+            logger.info("OutcomeAttributor[advocate-shadow] %s jid=%d BLOCK right=%d (counterfactual)",
+                        ticker, journal_id, was_right)
+    except Exception as exc:
+        logger.debug("advocate shadow attribution: %s", exc)
     return attributed
 
 
@@ -367,6 +391,15 @@ def attribute_closed_trades(db_path: str) -> dict:
     total: dict[str, int] = {
         "analyst": 0, "strategy": 0, "advocate": 0, "exit": 0
     }
+
+    # L3: evaluate any blocked-trade counterfactuals whose horizon has passed (own connection,
+    # committed) BEFORE the main attribution opens its transaction, so newly-resolved BLOCKs are
+    # scored this same cycle without two writers contending on the DB.
+    try:
+        from agora.ops.shadow_book import evaluate_due
+        evaluate_due(db_path)
+    except Exception as exc:
+        logger.debug("shadow_book.evaluate_due: %s", exc)
 
     try:
         with sqlite3.connect(db_path) as conn:

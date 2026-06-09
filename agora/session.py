@@ -3696,6 +3696,15 @@ class AgoraSession:
                         _advocate_verdict.failure_modes[0]["mode_name"]
                         if _advocate_verdict.failure_modes else "n/a",
                     )
+                    # L3 shadow book: record the blocked trade so its counterfactual outcome can
+                    # later score whether the advocate was RIGHT to block (a live BLOCK never fills,
+                    # so this is the only way BLOCK precision becomes measurable).
+                    try:
+                        from agora.ops.shadow_book import record_block
+                        record_block(str(self._settings.db_path), chain_id or "",
+                                     ticker, recommendation, _cur_spot)
+                    except Exception:
+                        pass
                     return
 
         # 4d. Discord DM approval gate — required for high-conviction trades when bot is configured
