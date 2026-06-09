@@ -78,6 +78,7 @@ from agora.signals.vol_regime import VolRegimeClassifier
 from agora.strategies.rules_engine import StrategyRulesEngine
 from agora.ops.dynamic_params import DynamicParams, compute_dynamic_params
 from agora.scan import ScanPriority, UniverseScanEngine
+from agora.scan.market_snapshot import get_market_snapshot
 from agora.agents.stock_analyst import StockAnalystAgent
 from agora.agents.strategy_selector import StrategySelectorAgent, StrategySelection
 from agora.agents.advocate_agent import AdvocateAgent
@@ -1285,8 +1286,8 @@ class AgoraSession:
           D. 50% profit target — take profit before trail activates (optional direct exit)
         """
         from datetime import time as _time, date as _date, timedelta
-        from trading_platform.services.market_data.yfinance_provider import _YF_OPTIONS_LOCK
-        import yfinance as yf
+        # Market data now comes from the shared snapshot (get_market_snapshot); the long loop
+        # no longer touches yfinance directly (#1/#2).
 
         # Entry-only loop. All exits (time/profit/trail/stop + LLM thesis check) are owned
         # by PositionManager — the single exit owner for every strategy.
@@ -1299,8 +1300,11 @@ class AgoraSession:
         # while the event loop is running. Harmless in sequential mode (uncontended).
         self._long_submit_lock = asyncio.Lock()
 
-        # Stagger: 210s after the spread pipeline to spread out IBKR load
-        await asyncio.sleep(210)
+        # #6: real backpressure is now the shared snapshot's token-bucket rate limiter, not a
+        # blind stagger. Keep a short 45s warmup so the spread cold-start scan populates the
+        # snapshot first — the long loop then gets cache HITS for the overlapping [14,30] expiries
+        # and shared spot/history instead of re-fetching (and reasons on the same prices, #2).
+        await asyncio.sleep(45)
 
         while self._running:
             now_et = datetime.now(tz=ET)
@@ -1389,44 +1393,31 @@ class AgoraSession:
                 # Options chain fetch — DTE window [14, 30] (matches the agent's selection window)
                 try:
                     def _fetch_long_chain(t: str) -> dict:
-                        chain_dict: dict = {}
-                        # Brackets MUST cover the agent's [14,30] selection window (_DTE_MIN/MAX).
-                        # The old [21,60] brackets overlapped the window only at 21-30, so the
-                        # 14-20 band (e.g. the expensive-IV→16d target) was never fetched and the
-                        # 36-60 expiries were wasted. Three buckets across 14-30 give _select_expiry
-                        # a real candidate near each IVR-scaled DTE target.
+                        # #1/#2: pull expiries + per-expiry chains from the SHARED snapshot so the
+                        # spread pipeline and this loop don't re-fetch the same data (and both see
+                        # identical prices). Brackets cover the agent's [14,30] selection window
+                        # (_DTE_MIN/MAX): three buckets give _select_expiry a candidate near each
+                        # IVR-scaled DTE target across the window.
                         _DTE_BRACKETS = [(14, 19), (20, 25), (26, 30)]
-                        for _attempt in range(2):
+                        ms = get_market_snapshot()
+                        chain_dict: dict = {}
+                        today_d = _date.today()
+                        filled: set[int] = set()
+                        for exp in ms.expiries(t):
                             try:
-                                with _YF_OPTIONS_LOCK:
-                                    tk   = yf.Ticker(t)
-                                    exps = tk.options or []
-                                    if not exps and _attempt == 0:
-                                        import time as _tm; _tm.sleep(0.5)
-                                        continue
-                                    today_d = _date.today()
-                                    filled: set[int] = set()
-                                    for exp in exps:
-                                        try:
-                                            exp_date = _date.fromisoformat(exp)
-                                        except ValueError:
-                                            continue
-                                        dte = (exp_date - today_d).days
-                                        for i, (lo, hi) in enumerate(_DTE_BRACKETS):
-                                            if i not in filled and lo <= dte <= hi:
-                                                try:
-                                                    c = tk.option_chain(exp)
-                                                    chain_dict[exp] = {"calls": c.calls, "puts": c.puts}
-                                                    filled.add(i)
-                                                except Exception:
-                                                    pass
-                                                break
-                                        if len(filled) == len(_DTE_BRACKETS):
-                                            break
+                                exp_date = _date.fromisoformat(exp)
+                            except ValueError:
+                                continue
+                            dte = (exp_date - today_d).days
+                            for i, (lo, hi) in enumerate(_DTE_BRACKETS):
+                                if i not in filled and lo <= dte <= hi:
+                                    c = ms.option_chain(t, exp)
+                                    if c is not None:
+                                        chain_dict[exp] = c
+                                        filled.add(i)
+                                    break
+                            if len(filled) == len(_DTE_BRACKETS):
                                 break
-                            except Exception:
-                                if _attempt == 0:
-                                    import time as _tm; _tm.sleep(1.0)
                         return chain_dict
 
                     chain_dict = await asyncio.wait_for(
@@ -1439,15 +1430,10 @@ class AgoraSession:
                 if not chain_dict:
                     return
 
-                # Spot price
+                # Spot price (shared snapshot — same value the spread pipeline sees, #2)
                 try:
                     spot = await asyncio.wait_for(
-                        asyncio.to_thread(
-                            lambda t=ticker: float(
-                                yf.Ticker(t).fast_info.get("lastPrice", 0) or
-                                yf.Ticker(t).fast_info.get("previousClose", 0)
-                            )
-                        ),
+                        asyncio.to_thread(lambda t=ticker: get_market_snapshot().spot(t)),
                         timeout=10.0,
                     )
                 except Exception:
@@ -1461,7 +1447,7 @@ class AgoraSession:
                 try:
                     def _compute_momentum(t: str, s: float) -> tuple[dict, Any]:
                         import pandas as pd
-                        hist = yf.Ticker(t).history(period="3mo", interval="1d")
+                        hist = get_market_snapshot().history(t, period="3mo", interval="1d")
                         if hist.empty or len(hist) < 22:
                             return {}, None
                         closes = hist["Close"].dropna()
@@ -2507,46 +2493,31 @@ class AgoraSession:
             # Get options chain and build recommendation.
             # Load one expiry per DTE bracket — wrapped in to_thread so the
             # blocking yfinance calls don't stall the event loop.
-            import yfinance as yf
             from datetime import date as _date
-            from trading_platform.services.market_data.yfinance_provider import _YF_OPTIONS_LOCK
             _DTE_BRACKETS = [(5, 22), (23, 37), (38, 65), (66, 90)]
 
             def _fetch_chains_sync(t: str) -> dict:
+                # #1/#2: shared snapshot — expiries in the spread window that overlap the long
+                # loop's [14,30] are served from one cache, and both pipelines see the same chain.
+                ms = get_market_snapshot()
                 chain_dict: dict = {}
-                for _attempt in range(2):  # retry once on 401 with fresh Ticker
+                today_d = _date.today()
+                filled: set[int] = set()
+                for exp in ms.expiries(t):
                     try:
-                        with _YF_OPTIONS_LOCK:
-                            tk = yf.Ticker(t)
-                            exps = tk.options or []
-                            if not exps and _attempt == 0:
-                                # Empty may mean crumb expired — force refresh by
-                                # re-creating Ticker with a new session implicitly
-                                import time as _tm; _tm.sleep(0.5)
-                                continue
-                            today_d = _date.today()
-                            filled: set[int] = set()
-                            for exp in exps:
-                                try:
-                                    exp_date = _date.fromisoformat(exp)
-                                except ValueError:
-                                    continue
-                                dte = (exp_date - today_d).days
-                                for i, (lo, hi) in enumerate(_DTE_BRACKETS):
-                                    if i not in filled and lo <= dte <= hi:
-                                        try:
-                                            c = tk.option_chain(exp)
-                                            chain_dict[exp] = {"calls": c.calls, "puts": c.puts}
-                                            filled.add(i)
-                                        except Exception:
-                                            pass
-                                        break
-                                if len(filled) == len(_DTE_BRACKETS):
-                                    break
-                        break  # success
-                    except Exception:
-                        if _attempt == 0:
-                            import time as _tm; _tm.sleep(1.0)
+                        exp_date = _date.fromisoformat(exp)
+                    except ValueError:
+                        continue
+                    dte = (exp_date - today_d).days
+                    for i, (lo, hi) in enumerate(_DTE_BRACKETS):
+                        if i not in filled and lo <= dte <= hi:
+                            c = ms.option_chain(t, exp)
+                            if c is not None:
+                                chain_dict[exp] = c
+                                filled.add(i)
+                            break
+                    if len(filled) == len(_DTE_BRACKETS):
+                        break
                 return chain_dict
 
             try:
