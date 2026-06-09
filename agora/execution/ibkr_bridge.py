@@ -24,7 +24,14 @@ logger = logging.getLogger(__name__)
 # inside uvicorn's asyncio loop. All IBKR calls are offloaded to a dedicated
 # single-threaded executor where each call gets a brand-new event loop via
 # _run_in_new_loop(), bypassing the "already running" asyncio.run() restriction.
+# Entry/selection IBKR work (enrich, reprice, submit) serializes on ONE thread — ib_insync
+# is not asyncio-safe, and one combo at a time is the safe pattern.
 _IBKR_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ibkr")
+
+# EXITS run on a SEPARATE executor (C1). A stop-loss / risk close is latency-critical and must
+# NEVER be queued behind a slow entry walk (~2.4 min) or chain enrich. Distinct thread + distinct
+# IBKR clientId (ibkr_client_id+1) → closes execute concurrently with entry work.
+_IBKR_EXIT_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ibkr-exit")
 
 
 def _run_in_new_loop(coro):
@@ -333,6 +340,6 @@ async def close_trade(pos: Any, settings: Any, session_id: str) -> dict:
 
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(
-        _IBKR_EXECUTOR,
+        _IBKR_EXIT_EXECUTOR,   # C1: exits never wait behind entry work
         lambda: _run_in_new_loop(close_fn(**kwargs)),
     )

@@ -716,52 +716,71 @@ async def place_legs_individually(
                     "reason": f"Illiquid: net bid-ask {rel_spread:.0%} of mid > {max_combo_spread_pct:.0%}",
                 }
 
-        # ── Submit each leg at its mid (the walk below moves it toward natural) ─
-        trades = []
-        orders = []
+        # ── C2: submit the protective LONG leg(s) FIRST, fill them, THEN the short(s) ──
+        # NEVER hold a naked short: a credit spread's short leg is only placed once the long
+        # (defined-risk) leg is filled. If the long can't fill, we abort before selling anything.
+        trades: list = [None] * len(qualified)
+        orders: list = [None] * len(qualified)
         limits = list(leg_mid)
-        for i, (leg_spec, contract) in enumerate(qualified):
-            action = leg_spec["action"].upper()
-            order = LimitOrder(
-                action=action,
-                totalQuantity=contracts * leg_spec.get("quantity", 1),
-                lmtPrice=max(_TICK, limits[i]),
-            )
-            order.orderRef = f"{session_id[:35]}-L{i}"
-            order.tif = "DAY"
-            order.transmit = True
-            trade = ib.placeOrder(contract, order)
-            trades.append(trade)
-            orders.append(order)
-            logger.info(
-                "[%s] Leg %d/%d submitted — %s %s %.0f %s @ %.2f (natural %.2f)",
-                session_id, i + 1, len(legs),
-                action, ticker, leg_spec["strike"], leg_spec["option_type"].upper(),
-                limits[i], leg_natural[i],
-            )
+        long_idx  = [i for i, (ls, _) in enumerate(qualified) if ls["action"].upper() == "BUY"]
+        short_idx = [i for i, (ls, _) in enumerate(qualified) if ls["action"].upper() == "SELL"]
 
-        # ── Per-leg walk: mid → marketable (natural) until filled ─────────────
-        for step in range(_MAX_PRICE_STEPS):
-            await asyncio.sleep(_PRICE_STEP_SEC)
-            if all(t.orderStatus.status == "Filled" for t in trades):
-                break
-            for i, (trade, order) in enumerate(zip(trades, orders)):
-                if trade.orderStatus.status == "Filled":
-                    continue
-                action = legs[i]["action"].upper()
-                step_dir = +1 if action == "BUY" else -1   # BUY walks up to ask, SELL down to bid
-                if abs(limits[i] - leg_natural[i]) < _TICK:
-                    continue  # already resting at the marketable price
-                nxt = round(limits[i] + step_dir * price_step_size, 2)
-                limits[i] = (min(nxt, leg_natural[i]) if step_dir > 0
-                             else max(nxt, leg_natural[i], _TICK))
-                order.lmtPrice = limits[i]
-                order.transmit = True
-                ib.placeOrder(qualified[i][1], order)
-                logger.info(
-                    "[%s] Leg %d step %d/%d → %.2f (natural %.2f)",
-                    session_id, i + 1, step + 1, _MAX_PRICE_STEPS, limits[i], leg_natural[i],
-                )
+        def _place_leg(i: int) -> None:
+            ls, contract = qualified[i]
+            o = LimitOrder(action=ls["action"].upper(),
+                           totalQuantity=contracts * ls.get("quantity", 1),
+                           lmtPrice=max(_TICK, limits[i]))
+            o.orderRef = f"{session_id[:35]}-L{i}"
+            o.tif = "DAY"
+            o.transmit = True
+            trades[i] = ib.placeOrder(contract, o)
+            orders[i] = o
+            logger.info("[%s] Leg %d/%d submitted — %s %s %.0f %s @ %.2f (natural %.2f)",
+                        session_id, i + 1, len(legs), ls["action"].upper(), ticker,
+                        ls["strike"], ls["option_type"].upper(), limits[i], leg_natural[i])
+
+        async def _walk(indices: list, max_steps: int) -> bool:
+            for step in range(max_steps):
+                await asyncio.sleep(_PRICE_STEP_SEC)
+                if all(trades[i].orderStatus.status == "Filled" for i in indices):
+                    return True
+                for i in indices:
+                    if trades[i].orderStatus.status == "Filled":
+                        continue
+                    step_dir = +1 if legs[i]["action"].upper() == "BUY" else -1
+                    if abs(limits[i] - leg_natural[i]) < _TICK:
+                        continue
+                    nxt = round(limits[i] + step_dir * price_step_size, 2)
+                    limits[i] = (min(nxt, leg_natural[i]) if step_dir > 0
+                                 else max(nxt, leg_natural[i], _TICK))
+                    orders[i].lmtPrice = limits[i]
+                    orders[i].transmit = True
+                    ib.placeOrder(qualified[i][1], orders[i])
+                    logger.info("[%s] Leg %d step %d/%d → %.2f (natural %.2f)",
+                                session_id, i + 1, step + 1, max_steps, limits[i], leg_natural[i])
+            return all(trades[i].orderStatus.status == "Filled" for i in indices)
+
+        if long_idx:
+            for i in long_idx:
+                _place_leg(i)
+            if not await _walk(long_idx, _MAX_PRICE_STEPS):
+                for i in long_idx:
+                    try:
+                        ib.cancelOrder(orders[i])
+                    except Exception:
+                        pass
+                logger.warning("[%s] %s: protective long leg unfilled — aborting (no naked short)",
+                               session_id, ticker)
+                return {
+                    "order_id": -1, "status": "Cancelled", "fills": [],
+                    "entry_price": entry_price, "profit_target": profit_target,
+                    "stop_loss": stop_loss,
+                    "reason": "protective long leg unfilled — aborted to avoid naked short",
+                }
+
+        for i in short_idx:
+            _place_leg(i)
+        await _walk(short_idx, _MAX_PRICE_STEPS)
 
         # ── Evaluate final fill state ─────────────────────────────────────────
         filled = [t for t in trades if t.orderStatus.status == "Filled"]

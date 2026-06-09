@@ -849,9 +849,18 @@ class PositionManager:
                               source: str = "lifecycle") -> None:
         if self._on_close:
             try:
-                await self._on_close(position, reason)
+                _ok = await self._on_close(position, reason)
             except Exception as exc:
                 logger.error("Close order failed for %s: %s", position.ticker, exc)
+                _ok = False
+            # C3: only record the close if it actually flattened. A failed close (the callback
+            # returns False, or raised) leaves the position OPEN in IBKR — marking it closed here
+            # would strand it unmanaged (an unbounded loss). Keep it OPEN to retry next cycle;
+            # the session has already escalated to the CRO.
+            if _ok is False:
+                logger.error("Close NOT recorded for %s — order failed; position kept OPEN for retry",
+                             position.ticker)
+                return
 
         self._db.execute(
             "UPDATE positions SET status=?, close_date=?, close_price=?, close_source=?, "

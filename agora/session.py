@@ -3914,40 +3914,69 @@ class AgoraSession:
         except Exception as exc:
             logger.error("Partial close failed for %s: %s", position.ticker, exc, exc_info=True)
 
-    async def _execute_close(self, position: Any, reason: str) -> None:
+    async def _execute_close(self, position: Any, reason: str) -> bool:
+        """Flatten a position. Returns True ONLY if it actually closed (filled).
+
+        C3: retries before giving up; on persistent failure it ESCALATES to the CRO and
+        returns False so the caller leaves the position OPEN (managed/retried next cycle)
+        rather than silently marking a still-open position closed (a stranded, unbounded loss).
+        """
         logger.info("Closing %s | reason=%s", position.ticker, reason)
+        last_err = "?"
+        for attempt in range(1, 4):  # up to 3 attempts on the dedicated EXIT executor
+            try:
+                order = await close_trade(position, self._settings, self._session_id)
+                status = (order or {}).get("status", "")
+                if status in ("Filled", "PartiallyClosed"):
+                    fills = order.get("fills", [])
+                    close_price = float(
+                        order.get("avg_price")
+                        or (fills[0]["price"] if fills else position.current_price)
+                    )
+                    realized_pnl = round(
+                        (close_price - position.entry_price) * 100 * position.contracts
+                        * (-1 if position.direction == "bearish" else 1),
+                        2,
+                    )
+                    self._position_mgr.mark_position_closed(
+                        position_id=position.position_id,
+                        realized_pnl=realized_pnl,
+                        close_price=close_price,
+                        source=f"session:{reason[:40]}",
+                    )
+                    self._compliance.record_close(
+                        ticker=position.ticker,
+                        realized_pnl=realized_pnl,
+                        strategy=str(position.strategy),
+                    )
+                    logger.info(
+                        "CLOSE CONFIRMED: %s | fill=$%.4f | realized=$%.2f | reason=%s (attempt %d)",
+                        position.ticker, close_price, realized_pnl, reason, attempt,
+                    )
+                    if getattr(position, "is_pre_earnings", False):
+                        self._pre_earnings_tickers.pop(position.ticker, None)
+                    return True
+                last_err = f"status={status} {(order or {}).get('reason', '')}"
+                logger.warning("Close attempt %d/3 for %s did not fill: %s",
+                               attempt, position.ticker, last_err)
+            except Exception as exc:
+                last_err = str(exc)
+                logger.error("Close attempt %d/3 failed for %s: %s", attempt, position.ticker, exc)
+            await asyncio.sleep(2)
+
+        # All attempts failed — escalate; leave the position OPEN (do NOT mark closed).
+        msg = (f"🚨 CLOSE FAILED for {position.ticker} after 3 attempts ({reason}) — position is "
+               f"STILL OPEN in IBKR and was NOT marked closed. Last error: {last_err}. "
+               f"Manual intervention may be required.")
+        logger.critical(msg)
         try:
-            order = await close_trade(position, self._settings, self._session_id)
-            # Extract actual fill price from order result if available
-            fills = order.get("fills", []) if order else []
-            close_price = float(fills[0]["price"]) if fills else position.current_price
-            realized_pnl = round(
-                (close_price - position.entry_price) * 100 * position.contracts
-                * (-1 if position.direction == "bearish" else 1),
-                2,
-            )
-            # Update DB with close data (close_date, close_price, realized_pnl, source)
-            self._position_mgr.mark_position_closed(
-                position_id=position.position_id,
-                realized_pnl=realized_pnl,
-                close_price=close_price,
-                source=f"session:{reason[:40]}",
-            )
-            # Record for wash sale tracking
-            self._compliance.record_close(
-                ticker=position.ticker,
-                realized_pnl=realized_pnl,
-                strategy=str(position.strategy),
-            )
-            logger.info(
-                "CLOSE CONFIRMED: %s | fill=$%.4f | realized=$%.2f | reason=%s",
-                position.ticker, close_price, realized_pnl, reason,
-            )
-            # Release pre-earnings dedup lock so future setups can re-enter after earnings
-            if getattr(position, "is_pre_earnings", False):
-                self._pre_earnings_tickers.pop(position.ticker, None)
-        except Exception as exc:
-            logger.error("Close failed for %s: %s", position.ticker, exc)
+            if getattr(self, "_cro", None):
+                await self._cro.receive_alert("PositionManager", "critical", msg)
+            elif getattr(self, "_ceo", None):
+                await self._ceo.dispatch_alert("critical", msg)
+        except Exception as _alert_exc:
+            logger.error("Close-failure alert dispatch failed for %s: %s", position.ticker, _alert_exc)
+        return False
 
     async def _execute_roll(self, position: Any, new_expiry: Any) -> None:
         logger.info("Rolling %s → expiry %s", position.ticker, new_expiry)
