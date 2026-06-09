@@ -178,6 +178,34 @@ async def submit_trade(rec: Any, settings: Any, session_id: str) -> dict:
     )
 
 
+async def reprice_legs(rec: Any, settings: Any) -> list[dict] | None:
+    """
+    Fetch real IBKR per-leg quotes for the CHOSEN recommendation's legs (precision pricing
+    before submission). Runs in the dedicated single-threaded IBKR executor (so it never
+    races the entry/close calls). Returns a list aligned with rec.legs, or None if IBKR has
+    no quote for any leg — in which case the caller keeps the yfinance economics and lets
+    the execution-layer gates be the backstop.
+    """
+    try:
+        from trading_platform.services.ibkr_client import fetch_leg_quotes
+    except ImportError:
+        return None
+
+    kwargs = dict(
+        ticker=rec.ticker,
+        legs=_rec_to_legs(rec),
+        market_data_type=getattr(settings, "ibkr_market_data_type", 3),
+        host=settings.ibkr_host,
+        port=settings.ibkr_port,
+        client_id=getattr(settings, "ibkr_client_id", 2) + 5,  # dedicated id (entry=2, close=3)
+    )
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        _IBKR_EXECUTOR,
+        lambda: _run_in_new_loop(fetch_leg_quotes(**kwargs)),
+    )
+
+
 async def close_trade(pos: Any, settings: Any, session_id: str) -> dict:
     """
     Close an existing open position at market (MOC limit).

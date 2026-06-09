@@ -44,7 +44,7 @@ from agora.discovery.market_interest import MarketInterestAgent
 from agora.discovery.smart_money import SmartMoneyAgent
 from agora.discovery.universe_discovery import UniverseDiscoveryAgent
 from agora.lifecycle.position_manager import PositionManager
-from agora.execution.ibkr_bridge import close_trade, submit_trade
+from agora.execution.ibkr_bridge import close_trade, reprice_legs, submit_trade
 from agora.ops.agent_performance import AgentPerformanceMonitor
 from agora.ops.attribution import PnlAttributor, PsiMonitor
 from agora.ops.system_health import SystemHealthAgent
@@ -3277,6 +3277,33 @@ class AgoraSession:
         if not _gate_ok:
             logger.info("ENTRY BLOCKED by gate: %s | %s", ticker, _gate_why)
             return
+
+        # ── Reprice & re-gate the chosen structure on REAL IBKR quotes (Option 2, Phase A) ──
+        # The rules engine built this on yfinance mids, which are sometimes badly stale
+        # (COST 2026-06-08: yfinance 1.85 vs real fill 8.55). Verify actual prices here —
+        # BEFORE the expensive debate-LLM and record_attempt — so the decision economics
+        # (R/R, credit, liquidity) are real and bad-data entries die at the decision. A
+        # missing IBKR quote keeps the yfinance rec; the execution-layer gates are the backstop.
+        try:
+            _leg_quotes = await reprice_legs(recommendation, self._settings)
+        except Exception as _rq_exc:
+            _leg_quotes = None
+            logger.warning("IBKR reprice failed for %s (%s) — proceeding on yfinance", ticker, _rq_exc)
+        if _leg_quotes:
+            _ok, _repriced, _reason = self._strategy.reprice_and_revalidate(recommendation, _leg_quotes)
+            if not _ok:
+                logger.info("REPRICE REJECT %s: %s", ticker, _reason)
+                if chain_id:
+                    _complete_chain(str(self._settings.db_path), chain_id, "rejected",
+                                    strategy=str(strategy_str), gates_passed=["reprice"])
+                return
+            if _repriced is not None and _repriced is not recommendation:
+                logger.info("REPRICED %s on IBKR: entry %+.2f→%+.2f rr→%.2f",
+                            ticker, recommendation.entry_debit_credit,
+                            _repriced.entry_debit_credit, _repriced.reward_risk_ratio)
+                recommendation = _repriced
+                # Keep the slippage baseline consistent with the repriced (real) entry.
+                mid_price = abs(recommendation.entry_debit_credit / max(1, recommendation.contracts * 100))
 
         # Record the execution attempt now that the trade has cleared every deterministic
         # gate — fill-rate denominator = trades that actually reach submission.

@@ -177,6 +177,91 @@ class StrategyRulesEngine:
             reasoning=conviction.reasoning,
         )
 
+    def reprice_and_revalidate(
+        self,
+        rec: Any,
+        leg_quotes: list[dict],
+    ) -> tuple[bool, Any, str]:
+        """
+        Recompute a recommendation's economics on REAL IBKR per-leg quotes and re-run the
+        gates BEFORE submission. The rules engine builds on yfinance mids, which are
+        sometimes badly stale (COST 2026-06-08: yfinance 1.85 vs real 8.55) — this verifies
+        the actual prices so the decision (R/R, credit, liquidity) is real, not fantasy.
+
+        leg_quotes: list ALIGNED with rec.legs, each {"mid","bid","ask","action", ...}.
+        Returns (ok, updated_rec_or_None, reason). On ok the rec carries corrected
+        entry_debit_credit / max_loss_dollars / max_gain_dollars / reward_risk_ratio.
+        A missing/short quote list keeps the yfinance rec (execution gates are the backstop).
+        """
+        if not leg_quotes or len(leg_quotes) != len(rec.legs):
+            return True, rec, "no IBKR quotes — kept yfinance"
+
+        contracts = max(1, rec.contracts)
+        # Net debit(+)/credit(-) per share, signed by each leg's OWN action.
+        dc_ps = sum(
+            (q["mid"] if rec.legs[i].action == "buy" else -q["mid"])
+            for i, q in enumerate(leg_quotes)
+        )
+        debit_credit = dc_ps * 100.0  # per contract
+        width = abs(rec.legs[0].strike - rec.legs[1].strike) if len(rec.legs) >= 2 else 0.0
+
+        # 1) Pricing sanity vs the yfinance economics the rec was built on.
+        orig_total = rec.entry_debit_credit            # yfinance, per-contract × contracts
+        new_total = debit_credit * contracts
+        if orig_total and abs(new_total) > 1e-9:
+            ratio = abs(new_total) / abs(orig_total)
+            x = float(self._settings.pricing_sanity_max_ratio)
+            if not (1.0 / x <= ratio <= x):
+                return False, None, (
+                    f"pricing_sanity: IBKR {new_total:+.0f} vs yfinance {orig_total:+.0f} ({ratio:.1f}x)"
+                )
+            if (new_total < 0) != (orig_total < 0):
+                return False, None, f"sign flip: IBKR {new_total:+.0f} vs yfinance {orig_total:+.0f}"
+
+        max_loss = self._max_loss(rec.strategy, debit_credit, width)
+        max_gain = self._max_gain(rec.strategy, debit_credit, width)
+        rr = abs(max_gain / max_loss) if max_loss != 0 else 0.0
+
+        # 2) Re-gate on real prices. Use the MOST-LENIENT R/R floor (thin-credit bucket):
+        # we don't have iv_rank/vix here, and the trade already cleared its dynamic floor at
+        # build time — so this only catches a genuinely collapsed R/R, never false-rejects a
+        # valid lean setup. The pricing-sanity + credit + liquidity checks do the real work.
+        rr_floor = self._dynamic_rr_floor(0.0, None)   # ivr<30 → 0.08, the lowest floor
+        if rr < rr_floor:
+            return False, None, f"R/R {rr:.2f} < floor {rr_floor:.2f} on IBKR prices"
+        if debit_credit < 0:
+            cps = abs(debit_credit) / 100.0
+            if cps < self._settings.min_credit_per_share:
+                return False, None, (
+                    f"credit {cps:.2f}/sh < {self._settings.min_credit_per_share:.2f} on IBKR prices"
+                )
+        if width > 0 and debit_credit > 0:
+            if debit_credit / (width * 100.0) > self._settings.max_debit_to_width_ratio:
+                return False, None, "debit/width too high on IBKR prices"
+
+        # 3) Liquidity: net combo bid-ask vs mid (BUY legs at ask, SELL legs at bid).
+        net_nat = sum(
+            (q["ask"] if rec.legs[i].action == "buy" else -q["bid"])
+            for i, q in enumerate(leg_quotes)
+        )
+        if abs(dc_ps) > 1e-9:
+            rel = 2.0 * abs(dc_ps - net_nat) / abs(dc_ps)
+            cap = float(getattr(self._settings, "max_combo_spread_pct", 0.50))
+            if rel > cap:
+                return False, None, f"illiquid: net bid-ask {rel:.0%} of mid > {cap:.0%}"
+
+        # Passed — return a copy with the REAL economics.
+        new_legs = [rec.legs[i].model_copy(update={"mid_price": q["mid"]})
+                    for i, q in enumerate(leg_quotes)]
+        updated = rec.model_copy(update={
+            "legs": new_legs,
+            "entry_debit_credit": round(debit_credit * contracts, 2),
+            "max_loss_dollars":   round(max_loss * contracts, 2),
+            "max_gain_dollars":   round(max_gain * contracts, 2),
+            "reward_risk_ratio":  round(rr, 3),
+        })
+        return True, updated, "ok"
+
     # ── Strategy selection ─────────────────────────────────────────
 
     def _infer_direction(

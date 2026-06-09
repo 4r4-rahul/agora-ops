@@ -1048,3 +1048,79 @@ async def close_position_legs(
         if ib.isConnected():
             ib.disconnect()
         logger.debug("[%s] Leg-by-leg close connection closed", session_id)
+
+
+async def fetch_leg_quotes(
+    *,
+    ticker: str,
+    legs: list[dict[str, Any]],
+    market_data_type: int = 3,
+    host: str = "127.0.0.1",
+    port: int = 7497,
+    client_id: int = 6,
+    timeout: float = 6.0,
+) -> list[dict[str, Any]] | None:
+    """
+    Precision-price the CHOSEN structure: fetch per-leg bid/ask/mid from IBKR for the
+    specific legs the rules engine picked (NOT a full chain). Used by the pre-submission
+    reprice/re-gate pass so the trade decision runs on real prices, not stale yfinance.
+
+    Returns a list ALIGNED with `legs`:
+      [{"strike","right","action","bid","ask","mid"}, ...]
+    or None if ANY leg has no valid quote (don't reprice on partial data — keep yfinance).
+    """
+    if not _IB_AVAILABLE:
+        return None
+
+    ib = IB()
+    try:
+        await ib.connectAsync(host, port, clientId=client_id, timeout=10)
+        try:
+            ib.reqMarketDataType(market_data_type)
+        except Exception:
+            pass
+
+        qualified: list[tuple[dict, Any]] = []
+        for leg in legs:
+            opt = Option(
+                symbol=ticker,
+                lastTradeDateOrContractMonth=_next_expiry(leg["expiration_dte"]),
+                strike=float(leg["strike"]),
+                right="C" if leg["option_type"].lower() == "call" else "P",
+                exchange="SMART", currency="USD", multiplier="100",
+            )
+            q = await ib.qualifyContractsAsync(opt)
+            if not q:
+                return None
+            qualified.append((leg, q[0]))
+
+        tickers = [(ls, ib.reqMktData(c, "", False, False)) for ls, c in qualified]
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout
+
+        def _ready() -> bool:
+            return all(_valid_quote(tk.bid) and _valid_quote(tk.ask) for _, tk in tickers)
+
+        while loop.time() < deadline and not _ready():
+            await asyncio.sleep(0.3)
+
+        ok = _ready()
+        out: list[dict[str, Any]] = []
+        for ls, tk in tickers:
+            if ok:
+                out.append({
+                    "strike": float(ls["strike"]),
+                    "right": "C" if ls["option_type"].lower() == "call" else "P",
+                    "action": ls["action"].upper(),
+                    "bid": float(tk.bid), "ask": float(tk.ask),
+                    "mid": round((tk.bid + tk.ask) / 2.0, 4),
+                })
+            try:
+                ib.cancelMktData(tk.contract)
+            except Exception:
+                pass
+
+        return out if ok else None
+    finally:
+        if ib.isConnected():
+            ib.disconnect()
