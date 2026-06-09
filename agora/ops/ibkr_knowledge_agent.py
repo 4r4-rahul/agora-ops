@@ -160,8 +160,9 @@ Entry structure (AGORA's CURRENT setup — single standalone DAY limit):
   entry = LimitOrder(action=..., lmtPrice=net_mid, totalQuantity=contracts)
   entry.tif = "DAY"
   entry.transmit = True
-  entry.nonGuaranteedFill = True   ← required for SMART-routed combos
   entry.orderRef = session_id[:40]
+  (BAG kept GUARANTEED/atomic — no naked-short leg gap. The old nonGuaranteedFill flag was
+   a no-op and is removed; non-guaranteed routing does NOT clear the credit-spread Error 201.)
 
   NO GTC profit-target child is submitted. (GTC children persisted across sessions
   and consumed the riskless-combination counter → Error 201 storms. Removed.)
@@ -436,26 +437,30 @@ Complete execution path for a new trade:
      d. RiskCouncil.approve_trade() (max positions=4, delta limits, loss limits)
      e. exec_quality.record_attempt()
      f. ibkr_bridge.submit_trade() → IBKR_EXECUTOR → _run_in_new_loop → place_bracket_order
-  4. place_bracket_order() — the default for BOTH paper and live (paper_use_bag_combo):
+  4. ENTRY routing is SPREAD-TYPE-AWARE (ibkr_bridge.submit_trade):
+       • paper CREDIT spread (entry<0) → place_legs_individually (riskless-combo 201 on a BAG)
+       • debit spreads + ALL live      → place_bracket_order (atomic BAG)
+     place_bracket_order():
      a. ib.connectAsync(host, port, clientId=ibkr_client_id, timeout=10)
-     b. Qualify all option legs via qualifyContractsAsync()
-     c. Build BAG contract with ComboLegs; compute strike width
+     b. Qualify all option legs; build BAG with ComboLegs; compute strike width
+     c. Price off IBKR market data (config.ibkr_market_data_type 1=live/3=delayed): net_mid +
+        net_natural (per-leg, signed). Pricing-sanity + liquidity gates abort here too.
      d. Single entry LimitOrder at the NET MID (no GTC child, no Adaptive on a BAG)
-     e. ib.placeOrder(bag, entry_order)
-     f. Repricing walk: step the net limit mid → natural every ~20s, capped at
-        max_slippage_pct_of_width × width
-     g. On Filled: return net_fill_price (signed sum of leg fills) + raw leg fills
-     h. On unfilled at natural: cancelOrder() → status="Cancelled" (session arms 2h cooldown)
-     i. On Error 201: return status="Cancelled", error_code="201" (NO leg fallback —
-        legging would leave a naked short). Session blocks the ticker for the session.
+     e. Repricing walk: step the net limit from the mid THROUGH the natural to the
+        slippage-budget cap (max_slippage_pct_of_width × width) every ~12s, filling at the
+        FIRST crossing (the combo "natural" alone often isn't a real combo-book price).
+     f. On Filled: return net_fill_price (signed sum of leg fills)
+     g. On unfilled at the budget cap: cancelOrder() → "Cancelled" (session arms 2h cooldown)
+     h. On Error 201: "Cancelled" + error_code="201" (NO leg fallback in the BAG path).
   5. Session records outcome:
      - Filled: record_fill(net_fill_price, mid) + _record_position() + journal
      - Cancelled/Rejected: record_reject(); arm exec cooldown; reconcile if code=201
 
-Leg-by-leg fallback: place_legs_individually()
-  ONLY used when paper_use_bag_combo=False (explicit opt-out). NOT auto-invoked on
-  Error 201. It mis-prices legs without a per-leg market-data subscription (it stamps
-  the net spread value onto every leg) and risks leg gaps — avoid unless debugging.
+Leg-by-leg: place_legs_individually()
+  Used for paper CREDIT spreads (a credit-spread BAG is hard-rejected with riskless-combo
+  Error 201, not bypassable). Prices EACH leg off IBKR per-leg quotes (delayed/live) and
+  walks each toward its marketable side; skips if a leg has no IBKR quote (it no longer
+  stamps the net spread value onto every leg). Brief leg-gap risk is acceptable in paper.
 
 ━━━ SECTION 12: FILL RATE AND SLIPPAGE BENCHMARKS ━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

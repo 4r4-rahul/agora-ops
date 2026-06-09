@@ -315,15 +315,9 @@ class AgoraSettings(BaseSettings):
                     "Only applied when IBKR quotes are available (best-effort last line of defense "
                     "below the upstream conviction/OI gates). 0.50 = skip if the combo is >50%% wide.",
     )
-    paper_use_bag_combo: bool = Field(
-        default=True,
-        description="In paper mode, route entries as atomic BAG combo orders priced at the net "
-                    "mid (the only price we have without a per-leg market-data subscription) "
-                    "instead of leg-by-leg. Leg-by-leg mis-prices every leg at the net spread "
-                    "value (no per-leg quotes) and risks naked shorts; BAG needs only the net "
-                    "price. Error 201 (riskless-combo limit) no longer fires now that GTC "
-                    "profit-target children are removed. Set False to revert to leg-by-leg.",
-    )
+    # NOTE: entry routing is spread-type-aware (ibkr_bridge.submit_trade), not a flag —
+    # paper CREDIT spreads go leg-by-leg (riskless-combo Error 201 on a BAG), everything
+    # else goes atomic BAG. The old paper_use_bag_combo flag was removed 2026-06-09.
 
     # ── Paths ──────────────────────────────────────────────────────
     iv_cache_dir: Path = Field(default=Path(".agora/iv_cache"))

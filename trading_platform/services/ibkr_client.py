@@ -418,28 +418,26 @@ async def place_bracket_order(
         entry_trade = ib.placeOrder(bag, entry_order)
         parent_id = entry_trade.order.orderId
 
-        # Walk target = the NATURAL (marketable) price. Prefer IBKR's real natural;
-        # else a width heuristic. Always bound by the slippage budget and structural
-        # limits (debit ≤ width, credit ≥ half the mid, ≥ 1 tick).
+        # Walk TARGET = the slippage-budget cap, NOT merely the natural. The combo "natural"
+        # (sum of leg marketable sides) often isn't a real combo-book price, so a limit that
+        # only REACHES it doesn't cross and the order sits unfilled (observed 2026-06-09: walked
+        # to natural=12.60 and cancelled). Walking THROUGH the natural up to the budget crosses
+        # the real market — it still fills at the FIRST crossing (so liquid spreads pay little),
+        # and only pays the full budget when it must. ibkr_natural is logged above for reference.
         step_dir = +1 if order_action == "BUY" else -1
         if order_action == "BUY":
-            natural = ibkr_natural if ibkr_natural is not None else mid_limit + slippage_budget
-            natural = min(natural, mid_limit + slippage_budget)      # budget cap
+            target = mid_limit + slippage_budget
             if width > 0:
-                natural = min(natural, width * 0.99)                 # ≤ max value
-            natural = max(natural, mid_limit)                        # debit walks up, not down
+                target = min(target, width * 0.99)                   # ≤ the spread's max value
         else:
-            natural = ibkr_natural if ibkr_natural is not None else max(
-                mid_limit - slippage_budget, mid_limit * 0.5, _TICK)
-            natural = max(natural, mid_limit - slippage_budget, _TICK)  # budget cap
-            natural = min(natural, mid_limit)                        # credit walks down, not up
-        natural = round(natural, 2)
+            target = max(mid_limit - slippage_budget, mid_limit * 0.5, _TICK)
+        natural = round(target, 2)   # the walk loop + logs key off `natural`
         walk_room = abs(natural - mid_limit)
         # Bound the walk to a fixed number of reprices so a wide spread can't hog the
-        # single-threaded IBKR executor for 10+ min. Size each step to cover the whole
-        # budget within _MAX_WALK_STEPS (so the per-step move grows with width).
+        # single-threaded IBKR executor; faster cadence so the market doesn't drift off the
+        # target mid-walk (20s/4min was too slow — orders reached the natural after it moved).
         _MAX_WALK_STEPS = 12
-        _PRICE_STEP_SEC = 20  # seconds the limit rests before the next reprice (~4 min max)
+        _PRICE_STEP_SEC = 12  # ~2.4 min max walk
         max_steps = max(1, min(_MAX_WALK_STEPS, int(round(walk_room / max(price_step_size, _TICK)))))
         eff_step = (max(price_step_size, round(walk_room / max_steps, 2))
                     if walk_room > 0 else price_step_size)
@@ -605,7 +603,7 @@ async def place_legs_individually(
     if not _IB_AVAILABLE:
         raise RuntimeError("ib_insync not installed")
 
-    _PRICE_STEP_SEC  = 20
+    _PRICE_STEP_SEC  = 12   # faster cadence so the per-leg marketable price doesn't drift off
     _MAX_PRICE_STEPS = 8
     _TICK = 0.01
 
