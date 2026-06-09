@@ -2248,7 +2248,22 @@ class AgoraSession:
             from trading_platform.services.options_flow import get_gex
 
             provider = YFinanceProvider()
-            snap = await provider.get_snapshot(ticker)
+            # get_snapshot has no internal retry, so a single yfinance throttle skipped the
+            # ticker for the whole cycle (25 such skips 2026-06-09, spiking during restarts).
+            # One short backoff-retry recovers transient rate-limit blips before we give up.
+            snap = None
+            for _snap_try in range(2):
+                try:
+                    snap = await provider.get_snapshot(ticker)
+                    if snap and snap.price:
+                        break
+                except Exception as _snap_exc:
+                    if _snap_try == 0:
+                        await asyncio.sleep(1.0)
+                        continue
+                    raise
+                if _snap_try == 0:
+                    await asyncio.sleep(1.0)
             if not snap or not snap.price:
                 return
 

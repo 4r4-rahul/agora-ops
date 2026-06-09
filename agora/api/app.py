@@ -46,7 +46,13 @@ async def lifespan(app: FastAPI):
     # ib_insync logs harmless IBKR subscription codes at ERROR level.
     # Filter them so they don't drown out real errors.
     class _IBKRNoiseFilter(logging.Filter):
-        _HARMLESS = {"10197", "10090", "10089", "10168", "2104", "2106", "2158", "2103", "2109"}
+        # 10091 = "market data requires additional subscription" for the UNDERLYING equity that
+        # IBKR needs for option greeks — we only subscribe OPRA (options) and use yfinance for
+        # equity data, so it's expected and was flooding the log (~17k lines/day, 2026-06-09).
+        # Option OPRA pricing is unaffected (reprice/enrich still function); if OPRA itself
+        # lapsed it would surface as missing pricing, not this code.
+        _HARMLESS = {"10197", "10090", "10089", "10168", "10091",
+                     "2104", "2106", "2158", "2103", "2109"}
         def filter(self, record: logging.LogRecord) -> bool:
             msg = record.getMessage()
             return not any(f"Error {c}" in msg or f"Error {c}," in msg

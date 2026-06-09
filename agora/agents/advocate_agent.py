@@ -302,14 +302,40 @@ class AdvocateAgent:
             try:
                 raw_output = _parse_json_robust(raw_text)
             except ValueError:
-                # DIAGNOSTIC: surface what the model actually returned so we can fix the
-                # real format issue rather than guess.
+                # Parse-fail REGEN: the model occasionally ends its turn with prose analysis and
+                # no JSON object (stop=end_turn, 7 cases on 2026-06-09), which fail-closes a valid
+                # trade. A fresh generation almost always emits parseable JSON — retry ONCE; only
+                # fail-close if the second attempt also can't be parsed.
                 logger.warning(
-                    "Advocate parse FAIL [%s]: stop=%s blocks=%s text_len=%d raw=%r",
+                    "Advocate parse FAIL [%s] — regenerating | stop=%s blocks=%s text_len=%d raw=%r",
                     ticker, getattr(response, "stop_reason", "?"),
-                    [b.type for b in response.content], len(raw_text), raw_text[:600],
+                    [b.type for b in response.content], len(raw_text), raw_text[:300],
                 )
-                raise
+                response = await _with_retry(lambda: run_with_tools(
+                    client=self._client,
+                    model=_MODEL,
+                    system=_cached_system,
+                    messages=[{"role": "user", "content": _compress(payload)}],
+                    tools=_tools,
+                    handlers=_handlers,
+                    max_turns=3,
+                    max_tokens=4000,
+                    thinking={"type": "disabled"},
+                    output_config={"effort": "medium"},
+                    timeout=anthropic.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0),
+                ), ticker=ticker)
+                _rtb = [b for b in response.content if b.type == "text"]
+                raw_text = _rtb[-1].text.strip() if _rtb else "{}"
+                if raw_text.startswith("```"):
+                    raw_text = raw_text.split("```")[1].lstrip("json").strip()
+                try:
+                    raw_output = _parse_json_robust(raw_text)
+                except ValueError:
+                    logger.warning(
+                        "Advocate parse FAIL [%s] AFTER regen — fail-closed | raw=%r",
+                        ticker, raw_text[:600],
+                    )
+                    raise
             # Enforce deterministic verdict from failure mode analysis
             raw_output["verdict"] = _compute_verdict(
                 raw_output.get("failure_modes", []),
