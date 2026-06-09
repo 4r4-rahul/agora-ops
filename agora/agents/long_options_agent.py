@@ -5,10 +5,13 @@ Directional swing trader. Buys calls (bullish) or puts (bearish) with a hard
 5-day time stop. Zero LLM calls. Independent 15-minute scan cycle.
 
 Strategy: Momentum Burst + Flow Confirmation  (classic prop-desk flow-momentum confluence)
-  • Buy 21-60 DTE options at 35Δ — moves with the stock, affordable premium
+  • Buy 14-30 DTE options at ~0.42Δ (conviction-scaled) — gamma-responsive over the
+    ~5-day hold without overpaying for theta the time stop would discard
   • Per-ticker IVR preferred (≤ IVR cap) — buy cheap before IV expands, not after
   • 2+ confirming signals required (see Signal Stack below)
-  • Exit: 50% gain  OR  50% loss  OR  trailing stop  OR  5-day time stop
+  • Exit: profit target OR conviction-scaled trailing stop OR 50% flat stop OR 5-day time stop
+    (winners run via the trailing stop — the floor widens with conviction to keep the
+    convex right tail; see PositionManager._check_long_options_targets)
 
 Why 35Δ for 5-day swings:
   On a 3% underlying move a 35Δ option captures ~35bp × 3% ≈ 105% of
@@ -601,6 +604,9 @@ class LongOptionsAgent:
                 else round(strike - premium_per_sh, 2)
             ),
             stop_loss_pct=self._settings.long_options_stop_loss_pct,
+            # Long options exit on the 5-day time stop (entry + max_hold), not a DTE-remaining
+            # rule; the session sets target_close_date = entry + max_hold. 21 here is a spread
+            # convention carried for schema compatibility and is not the governing exit.
             target_dte_close=21,
             conviction_score=float(min(conviction * 20, 100)),
             size_multiplier=float(contracts),

@@ -1609,6 +1609,10 @@ class AgoraSession:
                     return
 
                 # ── Opus 4.8 quality vetter (shadow or live) ─────────────────
+                # L2: track a LIVE vetter approval so the redundant general advocate doesn't
+                # fail-CLOSE a trade the purpose-built long-options gate already cleared (the
+                # vetter PROCEED → advocate-transient-fail → block SPOF observed live).
+                _vetter_approved = False
                 if self._long_vetter is not None:
                     try:
                         verdict = await asyncio.wait_for(
@@ -1616,6 +1620,8 @@ class AgoraSession:
                             timeout=60.0,
                         )
                         if verdict is not None:
+                            if not verdict.shadow_mode and verdict.verdict in ("proceed", "reduce"):
+                                _vetter_approved = True
                             self._long_vetter.journal(
                                 decision, verdict, str(self._settings.db_path)
                             )
@@ -1654,7 +1660,8 @@ class AgoraSession:
                 # Shared heavy gates — long options now faces the same review as the main
                 # (spread) pipeline: timing / kill-switch / macro-cal / compliance / risk
                 # council / correlation / devils-advocate / LLM advocate.
-                if not await self._long_options_risk_gates(rec, ticker, spot, earnings_date):
+                if not await self._long_options_risk_gates(
+                    rec, ticker, spot, earnings_date, vetter_approved=_vetter_approved):
                     return
 
                 # ── Submit — ATOMIC cap safeguard ────────────────────────────────
@@ -3198,6 +3205,7 @@ class AgoraSession:
 
     async def _long_options_risk_gates(
         self, rec: Any, ticker: str, spot: float, earnings_date: Any = None,
+        vetter_approved: bool = False,
     ) -> bool:
         """Run the shared heavy gates on a long-options entry so it faces the SAME
         review as the main (spread) pipeline — previously it bypassed all of these:
@@ -3235,8 +3243,16 @@ class AgoraSession:
                 logger.debug("LongOptions advocate error [%s]: %s", ticker, _aex)
             live = not self._advocate.shadow_mode
             if verdict is None and live and self._settings.advocate_fail_closed:
-                logger.warning("LongOptions BLOCKED (fail-closed): advocate unavailable [%s]", ticker)
-                return False
+                # L2: the general advocate is REDUNDANT with the dedicated long-options vetter.
+                # If the live vetter already cleared this trade, a transient advocate outage
+                # (None) falls OPEN instead of killing a gate-passed trade — the vetter IS the
+                # LLM review here. Conviction-2 trades (no vetter) still fail closed.
+                if vetter_approved:
+                    logger.info("LongOptions advocate unavailable [%s] — vetter already "
+                                "approved, falling open (L2)", ticker)
+                else:
+                    logger.warning("LongOptions BLOCKED (fail-closed): advocate unavailable [%s]", ticker)
+                    return False
             if verdict is not None and live and verdict.is_block:
                 logger.info("LongOptions BLOCKED by advocate [%s]: %s",
                             ticker, (verdict.verdict_reasoning or "")[:80])

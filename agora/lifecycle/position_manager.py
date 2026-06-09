@@ -746,7 +746,13 @@ class PositionManager:
             dte_mult = 0.75
         else:
             dte_mult = 1.0
-        eff_trail_floor = trail_floor * min(dte_mult, 0.5 if urgent else 1.0)
+        # L1 "let winners run": scale the trailing floor by conviction (via its profit target)
+        # so a high-conviction CONVEX winner gets room to run instead of being stopped on
+        # intraday noise at peak-15%, while a weak (scalp) signal stays tight and locks fast.
+        # Long options pay off through the fat right tail — a too-tight uniform trail clips it.
+        #   conviction 2/3/4/5  →  base floor ≈ 0.12 / 0.15 / 0.22 / 0.30  (pre DTE/urgency).
+        conv_floor = trail_floor * (pos_profit_tgt / 0.50)
+        eff_trail_floor = conv_floor * min(dte_mult, 0.5 if urgent else 1.0)
 
         # A2. Scale-out: lock HALF of a high-conviction winner (target > 50%) once it
         # reaches +50%, and let the rest run to its higher target under the trailing stop.
