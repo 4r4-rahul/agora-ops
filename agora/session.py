@@ -504,6 +504,12 @@ class AgoraSession:
         # Priority queue: tickers promoted by price monitor (move/volume triggers)
         self._priority_queue: list[str] = []
         self._priority_reasons: dict[str, str] = {}       # ticker → trigger reason
+        # #4 event-driven long options: the spread engine CONSUMES _priority_queue, so long
+        # options gets its own promotion signal. The price monitor adds momentum/flow/sector
+        # promotions here; the long loop drains it on a fast tick and evaluates immediately,
+        # instead of waiting up to a full 15-min sweep — momentum bursts are exactly when a
+        # directional long should fire. {ticker → trigger reason}.
+        self._long_event_tickers: dict[str, str] = {}
         # Rotation index for Tier 2 (the remaining tickers)
         self._scan_index: int = 0
         # Last known prices for move detection
@@ -1306,6 +1312,14 @@ class AgoraSession:
         # and shared spot/history instead of re-fetching (and reasons on the same prices, #2).
         await asyncio.sleep(45)
 
+        # #4: tick FAST (event cadence) but run the full-universe sweep only every
+        # interval_secs. Between sweeps, evaluate only tickers the price monitor just promoted
+        # (momentum/flow/sector) — a directional long fires within ~60s of the burst instead of
+        # waiting up to a full sweep. The full sweep remains the catch-all for un-triggered names.
+        _LONG_TICK_SECS = 60
+        _loop = asyncio.get_event_loop()
+        _last_full_sweep = -1e9   # force a full sweep on the first iteration
+
         while self._running:
             now_et = datetime.now(tz=ET)
             if now_et.weekday() >= 5 or not (_time(9, 30) <= now_et.time() <= _time(15, 30)):
@@ -1320,7 +1334,8 @@ class AgoraSession:
             if in_price_discovery or too_late_for_entry:
                 reason = "price_discovery" if in_price_discovery else "eod_window"
                 logger.debug("LongOptions entry gate: %s — skipping scan", reason)
-                await asyncio.sleep(interval_secs)
+                self._long_event_tickers.clear()   # don't act on stale promotions when re-opened
+                await asyncio.sleep(_LONG_TICK_SECS)
                 continue
 
             # ── D. Entry scan ─────────────────────────────────────────────────────
@@ -1330,21 +1345,34 @@ class AgoraSession:
                 if str(getattr(p.strategy, "value", p.strategy)) in ("long_call", "long_put")
             )
             if long_count >= self._settings.long_options_max_positions:
-                logger.debug(
-                    "LongOptions: cap reached (%d/%d) — sleeping %ds",
-                    long_count, self._settings.long_options_max_positions, interval_secs,
-                )
-                await asyncio.sleep(interval_secs)
+                logger.debug("LongOptions: cap reached (%d/%d) — tick",
+                             long_count, self._settings.long_options_max_positions)
+                await asyncio.sleep(_LONG_TICK_SECS)
                 continue
 
-            universe = list(dict.fromkeys(
+            _full_universe = list(dict.fromkeys(
                 self._settings.etf_universe
                 + (self._universe_disc.get_dynamic_tickers()
                    if hasattr(self, "_universe_disc") else [])
             ))
+            # Full sweep on cadence; otherwise drain just-promoted tickers (event-driven).
+            if (_loop.time() - _last_full_sweep) >= interval_secs:
+                universe = _full_universe
+                _last_full_sweep = _loop.time()
+                self._long_event_tickers.clear()   # full sweep supersedes pending events
+                _scan_kind = "full"
+            else:
+                _full_set = set(_full_universe)
+                _events = self._long_event_tickers
+                self._long_event_tickers = {}      # drain
+                universe = [t for t in _events if t in _full_set]
+                _scan_kind = "event"
+                if not universe:
+                    await asyncio.sleep(_LONG_TICK_SECS)
+                    continue
 
-            logger.info("LongOptions scan: %d tickers | long_pos=%d/%d",
-                        len(universe), long_count, self._settings.long_options_max_positions)
+            logger.info("LongOptions %s scan: %d tickers | long_pos=%d/%d",
+                        _scan_kind, len(universe), long_count, self._settings.long_options_max_positions)
 
             # Per-cycle dedupe: prevents duplicate orders when overlapping scan cycles
             # evaluate the same ticker (observed with FLNC at 13:13/13:14, MU 3× same session)
@@ -1771,7 +1799,7 @@ class AgoraSession:
                         logger.error("LongOptions worker [%s]: %r", ticker, _wexc, exc_info=True)
                     await asyncio.sleep(2)   # inter-ticker pacing (sequential only)
 
-            await asyncio.sleep(interval_secs)
+            await asyncio.sleep(_LONG_TICK_SECS)   # #4: fast tick; full sweep gated by elapsed time
 
     async def _news_watch_loop(self) -> None:
         """
@@ -1920,6 +1948,9 @@ class AgoraSession:
                         elif ticker not in self._priority_queue:
                             self._priority_queue.append(ticker)
                             self._priority_reasons[ticker] = trigger
+                        # #4: also wake the long-options loop on this momentum/flow promotion.
+                        if self._long_options_agent is not None:
+                            self._long_event_tickers[ticker] = trigger
                         promoted.append(f"{ticker}({trigger})")
 
                     self._last_prices[ticker] = current_price
@@ -1931,10 +1962,13 @@ class AgoraSession:
                         for peer in _SECTOR_MAP.get(sm_sig.sector, []):
                             if peer in self._settings.etf_universe and peer not in self._priority_queue:
                                 self._priority_queue.append(peer)
-                                self._priority_reasons[peer] = (
+                                _sector_trigger = (
                                     f"sector_momentum:{sm_sig.sector}:{sm_sig.direction}"
                                     f"({sm_sig.avg_move_pct:+.1f}%)"
                                 )
+                                self._priority_reasons[peer] = _sector_trigger
+                                if self._long_options_agent is not None:  # #4
+                                    self._long_event_tickers[peer] = _sector_trigger
 
                 if promoted:
                     logger.info("Price monitor promoted: %s", ", ".join(promoted))
