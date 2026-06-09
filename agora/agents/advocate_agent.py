@@ -374,9 +374,49 @@ class AdvocateAgent:
 
         except Exception as exc:
             latency_ms = int((time.monotonic() - t0) * 1000)
-            logger.warning("AdvocateAgent failed for %s: %s", ticker, exc)
-            self._write_journal(decision_id, ticker, None, {"error": str(exc)},
-                                0, 0, 0.0, latency_ms)
+            # Cost-efficient degraded review (2026-06-09): a Sonnet-specific failure (overload,
+            # timeout, rate limit) should NOT fail-close a trade when a cheap Haiku pass can still
+            # review it. This keeps the gate alive (and far cheaper) through model-specific blips.
+            # CAVEAT: an account-wide spend cap / zero-credit state blocks ALL models, so this
+            # cannot recover that class (~94% of historical errors) — keep the account funded.
+            try:
+                _fb_model = getattr(self._settings, "claude_fast_model", "claude-haiku-4-5-20251001")
+                response = await run_with_tools(
+                    client=self._client,
+                    model=_fb_model,
+                    system=_cached_system,
+                    messages=[{"role": "user", "content": _compress(payload)}],
+                    tools=_tools,
+                    handlers=_handlers,
+                    max_turns=2,
+                    max_tokens=3000,
+                    thinking={"type": "disabled"},
+                    output_config={"effort": "low"},
+                    timeout=anthropic.Timeout(connect=20.0, read=90.0, write=20.0, pool=20.0),
+                )
+                _fb = [b for b in response.content if b.type == "text"]
+                raw_text = _fb[-1].text.strip() if _fb else "{}"
+                if raw_text.startswith("```"):
+                    raw_text = raw_text.split("```")[1].lstrip("json").strip()
+                raw_output = _parse_json_robust(raw_text)
+                raw_output["verdict"] = _compute_verdict(
+                    raw_output.get("failure_modes", []),
+                    [c for c in (getattr(thesis, "kill_conditions", []) or [])],
+                )
+                verdict = _parse_verdict(raw_output)
+                self._write_journal(
+                    decision_id, ticker, verdict, raw_output,
+                    response.usage.input_tokens if response.usage else 0,
+                    response.usage.output_tokens if response.usage else 0,
+                    0.0, latency_ms,
+                )
+                logger.info("Advocate [%s] %s via HAIKU fallback (Sonnet failed: %s)",
+                            ticker, verdict.verdict, str(exc)[:70])
+            except Exception as fexc:
+                logger.warning("AdvocateAgent failed for %s (Sonnet: %s | Haiku fb: %s)",
+                               ticker, str(exc)[:60], str(fexc)[:60])
+                self._write_journal(decision_id, ticker, None, {"error": str(exc)},
+                                    0, 0, 0.0, latency_ms)
 
         return verdict
 
