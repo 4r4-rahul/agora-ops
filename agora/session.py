@@ -2769,6 +2769,17 @@ class AgoraSession:
         logger.info("Processing catalyst: %s | %s | %s",
                     catalyst.ticker, catalyst.catalyst_type, catalyst.direction)
 
+        # #4 (extended): wake the long-options loop on DIRECTIONAL discovery events. This single
+        # convergence point carries SmartMoney institutional FLOW sweeps, IBKR news, and analyst
+        # revisions — exactly the bursts a directional long wants, and ones that may not fit a
+        # spread structure the catalyst pillar builds. We only promote (the long loop re-scores
+        # independently within ~60s); all of _on_catalyst's gates above (ETF-skip, pre-earnings &
+        # open-position dedup, cooldown) plus the long loop's earnings-blackout already filter.
+        if (self._long_options_agent is not None
+                and str(getattr(catalyst, "direction", "")).lower() in ("bullish", "bearish")):
+            self._long_event_tickers[catalyst.ticker] = (
+                f"catalyst:{catalyst.catalyst_type}:{catalyst.direction}")
+
         # Record catalyst pillar as alive
         self._pillar_health.record_pillar_signal(
             "catalyst", catalyst.direction, ticker=catalyst.ticker,
