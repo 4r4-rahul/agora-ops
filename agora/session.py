@@ -821,12 +821,21 @@ class AgoraSession:
         cooperatively scheduling; the watchdog trusts a FRESH heartbeat over a transient HTTP
         timeout, and only restarts when the heartbeat ALSO goes stale (a genuine hang)."""
         hb_path = "agora/logs/heartbeat"   # next to the logs the watchdog already reads
+        _beat = 0
         while self._running:
             try:
                 with open(hb_path, "w") as fh:
                     fh.write(str(int(datetime.now(tz=timezone.utc).timestamp())))
             except Exception as exc:
                 logger.debug("heartbeat write failed: %s", exc)
+            # Every ~5 min, surface the shared-snapshot cache effectiveness (#1/#2): a high hit
+            # rate means the two pipelines are sharing fetches instead of duplicating them.
+            _beat += 1
+            if _beat % 30 == 0:
+                try:
+                    logger.info("MarketSnapshot cache %s", get_market_snapshot().stats())
+                except Exception:
+                    pass
             await asyncio.sleep(10)
 
     async def stop(self) -> None:
