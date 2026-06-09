@@ -106,3 +106,4 @@ def _store(conn: sqlite3.Connection, n: int, brier, prec, thr, cov, note: str) -
            VALUES ('advocate', ?, ?, ?, ?, ?, ?, ?)""",
         (datetime.now(tz=timezone.utc).isoformat(), n, brier, prec, thr, cov, note),
     )
+    conn.commit()   # bare connection (no `with`) — must commit or the row is rolled back on close
