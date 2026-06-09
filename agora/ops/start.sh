@@ -14,6 +14,28 @@ PID_FILE="$LOG_DIR/agora.pid"
 mkdir -p "$LOG_DIR"
 mkdir -p "$REPO/.agora"
 
+# ── Single-instance guard (deploy-race fix) ──────────────────────────────────
+# A manual deploy and the launchd watchdog can invoke start.sh concurrently; both
+# `pkill -f "uvicorn agora.api.app"` then start, and interleaved pkills can leave
+# NOTHING running (observed 2026-06-09 — engine down post-deploy). mkdir is atomic, so a
+# second concurrent invocation skips the kill+start critical section entirely. The trap
+# releases the lock when this script exits (uvicorn is already backgrounded by then).
+LOCK_DIR="$LOG_DIR/start.lock"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  LOCK_AGE=$(( $(date +%s) - $(stat -f %m "$LOCK_DIR" 2>/dev/null || echo 0) ))
+  if (( LOCK_AGE < 120 )); then
+    echo "[start.sh] another start.sh in progress (lock ${LOCK_AGE}s) — skipping $(date)" \
+      >> "$LOG_DIR/launchd-start.log"
+    exit 0
+  fi
+  # Lock older than 120s ⇒ a prior run died holding it; take over.
+  echo "[start.sh] stale lock (${LOCK_AGE}s) — taking over $(date)" >> "$LOG_DIR/launchd-start.log"
+  rm -rf "$LOCK_DIR"
+  mkdir "$LOCK_DIR" 2>/dev/null || { echo "[start.sh] lock race lost — skipping" \
+    >> "$LOG_DIR/launchd-start.log"; exit 0; }
+fi
+trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
+
 # ── Kill any stale instance ────────────────────────────────────────────────────
 if [[ -f "$PID_FILE" ]]; then
   OLD_PID=$(cat "$PID_FILE")

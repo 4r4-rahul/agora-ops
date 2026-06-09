@@ -874,19 +874,23 @@ class LongOptionsAgent:
         """
         reasons = []
 
-        # Factor 1: IVR base
+        # Factor 1: IVR base — scaled to the ACTUAL [14,30] DTE window (v2 gamma swing).
+        # The old 45-60d bases were vestigial: a 5-day-hold option exits at the time stop
+        # with most of its DTE unused, and every base > 30 simply clamped to _DTE_MAX, so the
+        # IVR nuance was silently flattened. Keep the read — cheap IV → top of the window (buy
+        # the most time we'll actually use); expensive IV → bottom (minimise theta/vega bleed).
         if ivr < 20:
-            base = 60
-            reasons.append(f"IVR={ivr:.0f}<20→60d(cheap_vega)")
-        elif ivr < 35:
-            base = 45
-            reasons.append(f"IVR={ivr:.0f}<35→45d(normal)")
-        elif ivr < 50:
             base = 30
-            reasons.append(f"IVR={ivr:.0f}<50→30d(elevated)")
-        else:
+            reasons.append(f"IVR={ivr:.0f}<20→30d(cheap_vega)")
+        elif ivr < 35:
+            base = 26
+            reasons.append(f"IVR={ivr:.0f}<35→26d(normal)")
+        elif ivr < 50:
             base = 21
-            reasons.append(f"IVR={ivr:.0f}≥50→21d(expensive)")
+            reasons.append(f"IVR={ivr:.0f}<50→21d(elevated)")
+        else:
+            base = 16
+            reasons.append(f"IVR={ivr:.0f}≥50→16d(expensive)")
 
         # Factor 2: Beta compression
         beta = _BETA_MAP.get(ticker.upper(), 1.0)
