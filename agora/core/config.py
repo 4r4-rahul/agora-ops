@@ -56,6 +56,18 @@ class AgoraSettings(BaseSettings):
                     "Matches the rules_engine floor; credit spreads structurally have R/R < 1. "
                     "TLT at 11.5% IV yields R/R≈0.12; debit-spread threshold of 1.3 blocks all vol-premium trades.",
     )
+    min_long_option_rr_ratio: float = Field(
+        default=0.8,
+        ge=0.4,
+        description="Minimum R/R for LONG options (single-leg debit). For a long option, "
+                    "reward_risk_ratio = exit profit-target%% ÷ stop%% — NOT a spread's reward-vs-"
+                    "defined-risk. With a 50%% stop, conviction-2/3 setups yield 0.80/1.00, so the "
+                    "spread floor of 1.30 (only reachable at conviction ≥4) categorically blocked "
+                    "every long option after gate-parity was added 2026-06-03. The real long-option "
+                    "edge is directional win-rate × unbounded asymmetric payoff, already gated by "
+                    "conviction/delta/IVR/devils-advocate — so this floor only screens out the "
+                    "weakest exit-policy skew, not the trade thesis.",
+    )
     max_debit_to_width_ratio: float = Field(
         default=0.40,
         description="Max fraction of spread width acceptable as net debit (e.g. 0.40 = 40%). "

@@ -41,6 +41,15 @@ _CREDIT_STRATEGIES = frozenset({
     StrategyType.CASH_SECURED_PUT,
 })
 
+# Long (single-leg debit) options: reward_risk_ratio = exit profit-target% ÷ stop% — a
+# different quantity from a spread's reward-vs-defined-risk. The 1.3 debit-spread floor is
+# unreachable below conviction 4 and categorically blocked every long option; they get their
+# own floor (min_long_option_rr_ratio).
+_LONG_OPTION_STRATEGIES = frozenset({
+    StrategyType.LONG_CALL,
+    StrategyType.LONG_PUT,
+})
+
 logger = logging.getLogger(__name__)
 
 # Correlation groups — positions in same group count against each other
@@ -214,9 +223,12 @@ class RiskCouncil:
         if not group_ok:
             return {"approved": False, "reason": group_msg, "checks": checks}
 
-        # 9. Reward/risk minimum — credit and debit spreads have different structural R/R
+        # 9. Reward/risk minimum — credit spreads, long options, and debit spreads each have
+        #    a structurally different R/R, so each gets its own floor.
         if recommendation.strategy in _CREDIT_STRATEGIES:
             min_rr = self._settings.min_credit_spread_rr_ratio
+        elif recommendation.strategy in _LONG_OPTION_STRATEGIES:
+            min_rr = self._settings.min_long_option_rr_ratio
         else:
             min_rr = self._settings.min_rr_ratio
         checks["reward_risk"] = recommendation.reward_risk_ratio >= min_rr
