@@ -806,11 +806,28 @@ class AgoraSession:
             self._ctech.start(),
             self._session_loop(),
             self._price_monitor_loop(),
+            self._heartbeat_loop(),          # #5: liveness signal decoupled from the HTTP path
             *(([self._scan_engine.start()]) if self._scan_engine else []),
             # Exit intelligence is no longer a separate loop — PositionManager (the single
             # exit owner) runs the ExitIntelligenceAgent itself for every position.
             *(([self._long_options_loop()]) if self._long_options_agent else []),
         )
+
+    async def _heartbeat_loop(self) -> None:
+        """#5: write a heartbeat file every few seconds so liveness is decoupled from the busy
+        HTTP path. When the scan saturates the single event loop, /agora/health can't be
+        scheduled and returns 000 — which previously read as 'dead' and churned the engine. A
+        lightweight always-running task that only touches a file proves the loop is still
+        cooperatively scheduling; the watchdog trusts a FRESH heartbeat over a transient HTTP
+        timeout, and only restarts when the heartbeat ALSO goes stale (a genuine hang)."""
+        hb_path = "agora/logs/heartbeat"   # next to the logs the watchdog already reads
+        while self._running:
+            try:
+                with open(hb_path, "w") as fh:
+                    fh.write(str(int(datetime.now(tz=timezone.utc).timestamp())))
+            except Exception as exc:
+                logger.debug("heartbeat write failed: %s", exc)
+            await asyncio.sleep(10)
 
     async def stop(self) -> None:
         self._running = False

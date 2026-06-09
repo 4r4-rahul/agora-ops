@@ -38,6 +38,22 @@ if [[ "$CODE" == "200" ]]; then
   exit 0
 fi
 
+# ── #5: heartbeat override — trust a FRESH heartbeat over a transient HTTP timeout ──
+# The engine writes agora/logs/heartbeat every ~10s from a lightweight task. If HTTP is 000
+# but the heartbeat is fresh, the loop is alive and merely busy (scan saturating it), NOT
+# hung — do not restart. Only when the heartbeat ALSO goes stale is it a genuine freeze.
+HEARTBEAT_FILE="$LOG_DIR/heartbeat"
+HEARTBEAT_STALE_SECS=90
+if [[ -f "$HEARTBEAT_FILE" ]]; then
+  HB_MTIME="$(stat -f %m "$HEARTBEAT_FILE" 2>/dev/null || echo 0)"
+  HB_AGE=$(( $(date +%s) - HB_MTIME ))
+  if [[ "$HB_AGE" -ge 0 && "$HB_AGE" -lt "$HEARTBEAT_STALE_SECS" ]]; then
+    rm -f "$FAILCOUNT_FILE"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] watchdog: HTTP $CODE but heartbeat fresh (${HB_AGE}s) — engine alive/busy, not restarting" >> "$WLOG"
+    exit 0
+  fi
+fi
+
 # ── Startup grace period ──────────────────────────────────────────────────────
 # The engine's startup reconciliation (position sync of all open IBKR positions)
 # blocks the event loop, so /health returns non-200 for a minute or two AT LAUNCH.
