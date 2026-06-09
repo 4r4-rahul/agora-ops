@@ -501,8 +501,8 @@ def _parse_json_robust(text: str) -> dict:
     # 2. The model commonly wraps the verdict in prose and/or a ```json fence
     #    ("Here is my verdict:\n```json\n{...}\n```"). Extract the first balanced {...}
     #    object embedded ANYWHERE in the text (brace-counting, string-aware).
-    obj = _extract_balanced_object(text)
-    if _valid(obj):
+    obj = _extract_balanced_object(text, _valid)
+    if obj is not None:
         return obj
     # 3. Truncation recovery: from the first '{', longest prefix ending in '}' that parses.
     start = text.find("{")
@@ -518,37 +518,44 @@ def _parse_json_robust(text: str) -> dict:
     raise ValueError("advocate output not parseable into a verdict object with failure_modes")
 
 
-def _extract_balanced_object(text: str) -> dict | None:
-    """Return the first complete, balanced {...} JSON object embedded in text (handles
-    prose preamble and ```json fences), or None. Brace counting ignores braces inside
-    JSON strings so nested object/array braces don't confuse the match."""
-    start = text.find("{")
-    if start == -1:
-        return None
-    depth = 0
-    in_str = False
-    esc = False
-    for i in range(start, len(text)):
-        c = text[i]
-        if in_str:
-            if esc:
-                esc = False
-            elif c == "\\":
-                esc = True
+def _extract_balanced_object(text: str, validator=None) -> dict | None:
+    """Return the first complete, balanced {...} JSON object embedded in text that satisfies
+    `validator` (or any object if validator is None), else None. Brace counting ignores braces
+    inside JSON strings. Scans ALL '{' positions — so a literal `{}` in the prose (e.g. the
+    model writing "macro thesis object is empty `{}`") BEFORE the real verdict no longer traps
+    the match on the wrong object (the 2026-06-09 advocate parse-FAIL class)."""
+    i = 0
+    while True:
+        start = text.find("{", i)
+        if start == -1:
+            return None
+        depth = 0
+        in_str = False
+        esc = False
+        for j in range(start, len(text)):
+            c = text[j]
+            if in_str:
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif c == '"':
+                    in_str = False
             elif c == '"':
-                in_str = False
-        elif c == '"':
-            in_str = True
-        elif c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                try:
-                    return json.loads(text[start:i + 1])
-                except json.JSONDecodeError:
-                    return None
-    return None
+                in_str = True
+            elif c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        obj = json.loads(text[start:j + 1])
+                        if validator is None or validator(obj):
+                            return obj
+                    except json.JSONDecodeError:
+                        pass
+                    break  # this balanced block is parsed-invalid/undecodable — try the next '{'
+        i = start + 1
 
 
 def _compute_verdict(failure_modes: list[dict], kill_conditions: list[str]) -> str:
