@@ -1386,11 +1386,16 @@ class AgoraSession:
                 except Exception:
                     pass
 
-                # Options chain fetch — DTE window [21, 60]
+                # Options chain fetch — DTE window [14, 30] (matches the agent's selection window)
                 try:
                     def _fetch_long_chain(t: str) -> dict:
                         chain_dict: dict = {}
-                        _DTE_BRACKETS = [(21, 35), (36, 50), (51, 60)]
+                        # Brackets MUST cover the agent's [14,30] selection window (_DTE_MIN/MAX).
+                        # The old [21,60] brackets overlapped the window only at 21-30, so the
+                        # 14-20 band (e.g. the expensive-IV→16d target) was never fetched and the
+                        # 36-60 expiries were wasted. Three buckets across 14-30 give _select_expiry
+                        # a real candidate near each IVR-scaled DTE target.
+                        _DTE_BRACKETS = [(14, 19), (20, 25), (26, 30)]
                         for _attempt in range(2):
                             try:
                                 with _YF_OPTIONS_LOCK:
