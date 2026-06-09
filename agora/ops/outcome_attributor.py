@@ -247,6 +247,55 @@ def _attribute_advocate(conn: sqlite3.Connection) -> int:
     return attributed
 
 
+# ── Long-options vetter attribution ───────────────────────────────────────────
+
+def _attribute_vetter(conn: sqlite3.Connection) -> int:
+    """Revive the vetter's dead learning loop. Long options bypass decision_chains (no exact key),
+    so match long_vetter_log → long-option positions on ticker + strike (near-unique) + entry near
+    the vet timestamp, and backfill outcome (win/loss) + realized_pnl. SKIP verdicts never fill,
+    so they stay unattributed (like live BLOCKs)."""
+    import json
+    try:
+        pos = []
+        for ticker, legs_json, entry_date, pnl in conn.execute(
+            """SELECT ticker, legs_json, entry_date, realized_pnl FROM positions
+               WHERE strategy IN ('long_call','long_put') AND realized_pnl IS NOT NULL"""):
+            try:
+                strike = float(json.loads(legs_json)[0]["strike"])
+            except Exception:
+                continue
+            pos.append((ticker, strike, str(entry_date or "")[:10], pnl))
+
+        attributed = 0
+        for vid, vticker, vstrike, vts in conn.execute(
+            "SELECT id, ticker, strike, ts_utc FROM long_vetter_log WHERE outcome IS NULL OR outcome=''"):
+            match_pnl = None
+            for (ticker, strike, entry_date, pnl) in pos:
+                if ticker != vticker or vstrike is None or abs(strike - float(vstrike)) > 0.5:
+                    continue
+                # entry within ±3 days of the vet
+                try:
+                    if abs((datetime.fromisoformat(entry_date) - datetime.fromisoformat(vts[:10])).days) > 3:
+                        continue
+                except Exception:
+                    pass
+                match_pnl = pnl
+                break
+            if match_pnl is None:
+                continue
+            conn.execute(
+                "UPDATE long_vetter_log SET outcome=?, realized_pnl=? WHERE id=?",
+                ("win" if match_pnl > 0 else "loss", round(match_pnl, 2), vid),
+            )
+            attributed += 1
+        if attributed:
+            logger.info("OutcomeAttributor[vetter] backfilled %d long-options outcomes", attributed)
+        return attributed
+    except Exception as exc:
+        logger.debug("vetter attribution: %s", exc)
+        return 0
+
+
 # ── Exit agent attribution ────────────────────────────────────────────────────
 
 def _attribute_exit(conn: sqlite3.Connection, trades: list[tuple]) -> int:
@@ -389,7 +438,7 @@ def attribute_closed_trades(db_path: str) -> dict:
         return {"attributed": 0, "skipped_no_match": 0, "already_done": 0}
 
     total: dict[str, int] = {
-        "analyst": 0, "strategy": 0, "advocate": 0, "exit": 0
+        "analyst": 0, "strategy": 0, "advocate": 0, "vetter": 0, "exit": 0
     }
 
     # L3: evaluate any blocked-trade counterfactuals whose horizon has passed (own connection,
@@ -413,6 +462,8 @@ def attribute_closed_trades(db_path: str) -> dict:
                 total["strategy"] = _attribute_strategy(conn)
             if _table_exists(db_path, "advocate_journal"):
                 total["advocate"] = _attribute_advocate(conn)
+            if _table_exists(db_path, "long_vetter_log"):
+                total["vetter"] = _attribute_vetter(conn)
             # Exit attribution still keys off closed-trade fills.
             trades = _fetch_closed_trades(conn)
             if trades and _table_exists(db_path, "exit_journal"):
