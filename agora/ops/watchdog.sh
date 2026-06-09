@@ -48,7 +48,9 @@ fi
 GRACE_SECS=300
 PID_FILE="$LOG_DIR/agora.pid"
 ENGINE_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
+ENGINE_ALIVE=0
 if [[ -n "${ENGINE_PID:-}" ]] && kill -0 "$ENGINE_PID" 2>/dev/null; then
+  ENGINE_ALIVE=1
   PID_MTIME="$(stat -f %m "$PID_FILE" 2>/dev/null || echo 0)"
   AGE=$(( $(date +%s) - PID_MTIME ))
   if [[ "$AGE" -ge 0 && "$AGE" -lt "$GRACE_SECS" ]]; then
@@ -58,11 +60,22 @@ if [[ -n "${ENGINE_PID:-}" ]] && kill -0 "$ENGINE_PID" 2>/dev/null; then
   fi
 fi
 
+# A genuinely DEAD process (no PID alive) is restarted IMMEDIATELY — the debounce only
+# guards the alive-but-unhealthy case (a busy scan that outlasts the in-run probes), where
+# a needless restart would interrupt work. A dead engine has no work to interrupt.
+if [[ "$ENGINE_ALIVE" -eq 0 ]]; then
+  rm -f "$FAILCOUNT_FILE"
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] watchdog: no live engine process — restarting immediately" >> "$WLOG"
+  /bin/bash "$REPO/agora/ops/start.sh" >> "$WLOG" 2>&1
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] watchdog: start.sh invoked" >> "$WLOG"
+  exit 0
+fi
+
 # ── Debounce: require 2 consecutive unhealthy runs before restarting ───────────
 # One unhealthy run (a scan burst that outlasts all 3 in-run probes) is not proof of a
 # hang. Restart only after TWO consecutive 5-min checks fail (~10 min unresponsive) — a
 # genuine freeze, not a busy moment. Prevents the restart churn that never let a full
-# long-options scan cycle complete.
+# long-options scan cycle complete. (ALIVE-but-hung only; dead engines handled above.)
 FAILS="$(cat "$FAILCOUNT_FILE" 2>/dev/null || echo 0)"
 case "$FAILS" in ''|*[!0-9]*) FAILS=0 ;; esac
 FAILS=$(( FAILS + 1 ))
