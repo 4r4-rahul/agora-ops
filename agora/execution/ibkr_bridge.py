@@ -206,6 +206,89 @@ async def reprice_legs(rec: Any, settings: Any) -> list[dict] | None:
     )
 
 
+async def enrich_chain(ticker: str, chain_dict: dict, spot: float, settings: Any) -> dict:
+    """
+    Phase B: override the yfinance chain's bid/ask/IV with REAL IBKR quotes for the OTM
+    strikes of ONE target-DTE expiry, so the rules engine selects strikes (credit-per-delta)
+    on real prices. yfinance still supplies the strike grid + open interest (cheap reference).
+
+    Bounded to a single expiry (nearest the credit-spread target DTE) and ±range_pct around
+    spot to cap the per-candidate fetch (~20 strikes, ~5s). HARD FALLBACK: any error returns
+    chain_dict unchanged — this must never break the scan.
+    """
+    if not chain_dict or spot <= 0:
+        return chain_dict
+    try:
+        from trading_platform.services.ibkr_client import fetch_chain_quotes
+        from datetime import date as _date
+
+        range_pct = float(getattr(settings, "ibkr_chain_range_pct", 0.15))
+        dte_lo = int(getattr(settings, "ibkr_chain_dte_lo", 18))
+        dte_hi = int(getattr(settings, "ibkr_chain_dte_hi", 66))
+        md_type = int(getattr(settings, "ibkr_market_data_type", 3))
+        lo_k, hi_k = spot * (1.0 - range_pct), spot * (1.0 + range_pct)
+        today = _date.today()
+        target_dte = (dte_lo + dte_hi) // 2
+
+        # Pick the ONE expiry in-band nearest the target DTE.
+        cands = []
+        for exp in chain_dict:
+            try:
+                dte = (_date.fromisoformat(exp) - today).days
+            except Exception:
+                continue
+            if dte_lo <= dte <= dte_hi:
+                cands.append((abs(dte - target_dte), exp))
+        if not cands:
+            return chain_dict
+        cands.sort()
+        best_exp = cands[0][1]
+        data = chain_dict[best_exp]
+        calls, puts = data.get("calls"), data.get("puts")
+
+        call_ks = sorted(float(s) for s in (calls["strike"] if calls is not None else [])
+                         if spot < float(s) <= hi_k)[:20]
+        put_ks = sorted((float(s) for s in (puts["strike"] if puts is not None else [])
+                         if lo_k <= float(s) < spot), reverse=True)[:20]
+        if not call_ks and not put_ks:
+            return chain_dict
+
+        loop = asyncio.get_event_loop()
+        quotes = await loop.run_in_executor(
+            _IBKR_EXECUTOR,
+            lambda: _run_in_new_loop(fetch_chain_quotes(
+                ticker=ticker, expiry=best_exp.replace("-", ""),
+                call_strikes=call_ks, put_strikes=put_ks, market_data_type=md_type,
+                host=settings.ibkr_host, port=settings.ibkr_port,
+                client_id=getattr(settings, "ibkr_client_id", 2) + 6,
+            )),
+        )
+        if not quotes:
+            return chain_dict
+
+        overridden = 0
+        for df, right in ((calls, "C"), (puts, "P")):
+            if df is None or "strike" not in getattr(df, "columns", []):
+                continue
+            for (k, r), q in quotes.items():
+                if r != right:
+                    continue
+                mask = df["strike"].astype(float) == k
+                if mask.any():
+                    df.loc[mask, "bid"] = q["bid"]
+                    df.loc[mask, "ask"] = q["ask"]
+                    if q["iv"] > 0 and "impliedVolatility" in df.columns:
+                        df.loc[mask, "impliedVolatility"] = q["iv"]
+                    overridden += 1
+        if overridden:
+            logger.info("IBKR chain enrich: %s %s — overrode %d strike-quotes (Phase B)",
+                        ticker, best_exp, overridden)
+        return chain_dict
+    except Exception as exc:
+        logger.warning("IBKR chain enrich failed for %s (%s) — keeping yfinance chain", ticker, exc)
+        return chain_dict
+
+
 async def close_trade(pos: Any, settings: Any, session_id: str) -> dict:
     """
     Close an existing open position at market (MOC limit).

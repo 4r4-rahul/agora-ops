@@ -44,7 +44,7 @@ from agora.discovery.market_interest import MarketInterestAgent
 from agora.discovery.smart_money import SmartMoneyAgent
 from agora.discovery.universe_discovery import UniverseDiscoveryAgent
 from agora.lifecycle.position_manager import PositionManager
-from agora.execution.ibkr_bridge import close_trade, reprice_legs, submit_trade
+from agora.execution.ibkr_bridge import close_trade, enrich_chain, reprice_legs, submit_trade
 from agora.ops.agent_performance import AgentPerformanceMonitor
 from agora.ops.attribution import PnlAttributor, PsiMonitor
 from agora.ops.system_health import SystemHealthAgent
@@ -2508,6 +2508,17 @@ class AgoraSession:
 
             logger.info("Options chain loaded for %s: %d expiries %s",
                         ticker, len(chain_dict), list(chain_dict.keys()))
+
+            # ── Phase B: enrich the chain with REAL IBKR prices for strike selection ──
+            # Override yfinance bid/ask/IV on the target-DTE OTM strikes so the rules engine
+            # picks strikes (credit-per-delta) on real prices, not stale yfinance. enrich_chain
+            # has a hard internal fallback; this outer guard is belt-and-suspenders so a chain-
+            # enrich problem can NEVER break the scan.
+            if getattr(self._settings, "use_ibkr_chain_pricing", False):
+                try:
+                    chain_dict = await enrich_chain(ticker, chain_dict, snap.price, self._settings)
+                except Exception as _ec_exc:
+                    logger.warning("Chain enrich error for %s (%s) — using yfinance", ticker, _ec_exc)
 
             # ── Rules engine (always runs as primary/fallback) ────────
             # direction_override priority: analyst thesis (live) > sector momentum > None

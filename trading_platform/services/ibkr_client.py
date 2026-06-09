@@ -1124,3 +1124,82 @@ async def fetch_leg_quotes(
     finally:
         if ib.isConnected():
             ib.disconnect()
+
+
+async def fetch_chain_quotes(
+    *,
+    ticker: str,
+    expiry: str,                      # YYYYMMDD
+    call_strikes: list[float],
+    put_strikes: list[float],
+    market_data_type: int = 3,
+    host: str = "127.0.0.1",
+    port: int = 7497,
+    client_id: int = 8,
+    timeout: float = 7.0,
+) -> dict[tuple[float, str], dict[str, float]]:
+    """
+    Fetch real IBKR bid/ask/IV for a RANGE of option strikes (one expiry) — Phase B uses
+    this to override the yfinance chain's prices before strike selection. IV (modelGreeks)
+    trails the bid/ask, so we wait a touch longer once bid/ask coverage is good.
+
+    Returns {(strike, "C"|"P"): {"bid","ask","iv"}} for the strikes that priced; strikes
+    that never populate are simply absent (caller keeps yfinance for those).
+    """
+    if not _IB_AVAILABLE:
+        return {}
+
+    ib = IB()
+    out: dict[tuple[float, str], dict[str, float]] = {}
+    try:
+        await ib.connectAsync(host, port, clientId=client_id, timeout=10)
+        try:
+            ib.reqMarketDataType(market_data_type)
+        except Exception:
+            pass
+
+        contracts: list[tuple[float, str, Any]] = []
+        for right, strikes in (("C", call_strikes), ("P", put_strikes)):
+            for k in strikes:
+                opt = Option(symbol=ticker, lastTradeDateOrContractMonth=expiry,
+                             strike=float(k), right=right, exchange="SMART",
+                             currency="USD", multiplier="100")
+                contracts.append((float(k), right, opt))
+        if not contracts:
+            return {}
+        try:
+            await ib.qualifyContractsAsync(*[c[2] for c in contracts])
+        except Exception:
+            pass
+
+        tickers = [(k, right, ib.reqMktData(opt, "", False, False))
+                   for k, right, opt in contracts if getattr(opt, "conId", 0)]
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout
+        target = max(1, int(len(tickers) * 0.8))
+
+        def _coverage() -> int:
+            return sum(1 for _, _, tk in tickers if _valid_quote(tk.bid) and _valid_quote(tk.ask))
+
+        while loop.time() < deadline:
+            await asyncio.sleep(0.4)
+            if _coverage() >= target:
+                await asyncio.sleep(1.0)   # let IV/greeks catch up to the bid/ask
+                break
+
+        for k, right, tk in tickers:
+            if _valid_quote(tk.bid) and _valid_quote(tk.ask):
+                g = getattr(tk, "modelGreeks", None)
+                iv = getattr(g, "impliedVol", None) if g else None
+                out[(k, right)] = {
+                    "bid": float(tk.bid), "ask": float(tk.ask),
+                    "iv": float(iv) if iv and iv > 0 else 0.0,
+                }
+            try:
+                ib.cancelMktData(tk.contract)
+            except Exception:
+                pass
+        return out
+    finally:
+        if ib.isConnected():
+            ib.disconnect()

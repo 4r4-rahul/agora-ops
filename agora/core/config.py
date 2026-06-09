@@ -267,6 +267,23 @@ class AgoraSettings(BaseSettings):
                     "to cross. Owner-chosen 2026-06-05. The execution advisor tunes this from "
                     "observed fill rates.",
     )
+    use_ibkr_chain_pricing: bool = Field(
+        default=True,
+        description="Phase B: before strike selection, OVERRIDE the yfinance chain's bid/ask/IV "
+                    "with real IBKR quotes for the OTM strikes of the target-DTE expiries, so the "
+                    "rules engine selects strikes (credit-per-delta) on real prices, not stale "
+                    "yfinance. yfinance still supplies the strike grid + OI (cheap reference). "
+                    "Hard fallback: any failure keeps the yfinance chain — never breaks the scan. "
+                    "Runs only for conviction+analyst-passing candidates (a handful/scan). Set False "
+                    "to revert to pure yfinance selection (Phase A still reprices the chosen legs).",
+    )
+    ibkr_chain_range_pct: float = Field(
+        default=0.15,
+        description="Phase B: enrich OTM strikes within ±this fraction of spot (e.g. 0.15 = strikes "
+                    "from 0.85×spot to 1.15×spot). Bounds the per-candidate IBKR fetch (~20-30 strikes).",
+    )
+    ibkr_chain_dte_lo: int = Field(default=18, description="Phase B: enrich expiries with DTE ≥ this.")
+    ibkr_chain_dte_hi: int = Field(default=66, description="Phase B: enrich expiries with DTE ≤ this (credit-spread target band).")
     ibkr_market_data_type: int = Field(
         default=3,
         description="IBKR market-data type for execution pricing: 1=live (real-time, needs an "
