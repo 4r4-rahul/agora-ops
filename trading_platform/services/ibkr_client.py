@@ -133,6 +133,27 @@ def _valid_quote(x: Any) -> bool:
     return x is not None and isinstance(x, (int, float)) and not math.isnan(x) and x > 0
 
 
+# H1: cache resolved option conIds (global, immutable per contract) so the SAME legs aren't
+# re-qualified on every call — the chosen legs get qualified across reprice → submit → close,
+# and a qualify round-trip is ~1.5s each. conIds never change, so the cache is always valid.
+_CONID_CACHE: dict[tuple, int] = {}
+
+
+async def _qualify(ib: Any, opt: Any) -> Any | None:
+    """Resolve an Option's conId, skipping the qualify round-trip when already cached.
+    Returns the conId-set Option, or None if it can't be resolved."""
+    key = (opt.symbol, opt.lastTradeDateOrContractMonth, float(opt.strike), opt.right)
+    cid = _CONID_CACHE.get(key)
+    if cid:
+        opt.conId = cid
+        return opt
+    q = await ib.qualifyContractsAsync(opt)
+    if not q or not getattr(q[0], "conId", 0):
+        return None
+    _CONID_CACHE[key] = q[0].conId
+    return q[0]
+
+
 async def _fetch_ibkr_combo_pricing(
     ib: Any,
     qualified_legs: list[tuple[dict, Any]],
@@ -292,10 +313,10 @@ async def place_bracket_order(
                 currency="USD",
                 multiplier="100",
             )
-            qualified = await ib.qualifyContractsAsync(opt)
-            if not qualified:
+            q = await _qualify(ib, opt)
+            if q is None:
                 raise RuntimeError(f"Could not qualify {ticker} {leg['option_type']} {leg['strike']}")
-            qualified_legs.append((leg, qualified[0]))
+            qualified_legs.append((leg, q))
 
         bag = Contract()
         bag.symbol = ticker
@@ -628,10 +649,10 @@ async def place_legs_individually(
                 currency="USD",
                 multiplier="100",
             )
-            q = await ib.qualifyContractsAsync(opt)
-            if not q:
+            q = await _qualify(ib, opt)
+            if q is None:
                 raise RuntimeError(f"Could not qualify {ticker} {leg['option_type']} {leg['strike']}")
-            qualified.append((leg, q[0]))
+            qualified.append((leg, q))
 
         # ── Per-leg pricing from IBKR market data (delayed/live) ──────────────
         # Stream each leg's bid/ask and wait for it to populate. Price at the leg mid;
@@ -716,6 +737,18 @@ async def place_legs_individually(
                     "reason": f"Illiquid: net bid-ask {rel_spread:.0%} of mid > {max_combo_spread_pct:.0%}",
                 }
 
+        # ── H2: per-leg walk crosses slightly THROUGH the natural ──────────────
+        # The leg "natural" (bid/ask at fetch time) can go stale over the ~1.6-min walk. Walk a
+        # small buffer past it (BUY a touch above ask / SELL a touch below bid) so a moved market
+        # still crosses — the leg-path analog of the BAG budget-cap walk. Bounded (~3% of leg mid).
+        leg_cross: list[float] = []
+        for i, m in enumerate(leg_mid):
+            buf = max(2 * _TICK, round(0.03 * m, 2))
+            if legs[i]["action"].upper() == "BUY":
+                leg_cross.append(round(leg_natural[i] + buf, 2))
+            else:
+                leg_cross.append(max(_TICK, round(leg_natural[i] - buf, 2)))
+
         # ── C2: submit the protective LONG leg(s) FIRST, fill them, THEN the short(s) ──
         # NEVER hold a naked short: a credit spread's short leg is only placed once the long
         # (defined-risk) leg is filled. If the long can't fill, we abort before selling anything.
@@ -741,18 +774,21 @@ async def place_legs_individually(
 
         async def _walk(indices: list, max_steps: int) -> bool:
             for step in range(max_steps):
-                await asyncio.sleep(_PRICE_STEP_SEC)
-                if all(trades[i].orderStatus.status == "Filled" for i in indices):
-                    return True
+                # H3: fine-grained wait — ib_insync fires fill events on the loop, so poll every
+                # 1s and react to a fill within ~1s instead of sleeping the whole step interval.
+                for _ in range(_PRICE_STEP_SEC):
+                    await asyncio.sleep(1)
+                    if all(trades[i].orderStatus.status == "Filled" for i in indices):
+                        return True
                 for i in indices:
                     if trades[i].orderStatus.status == "Filled":
                         continue
                     step_dir = +1 if legs[i]["action"].upper() == "BUY" else -1
-                    if abs(limits[i] - leg_natural[i]) < _TICK:
+                    if abs(limits[i] - leg_cross[i]) < _TICK:
                         continue
                     nxt = round(limits[i] + step_dir * price_step_size, 2)
-                    limits[i] = (min(nxt, leg_natural[i]) if step_dir > 0
-                                 else max(nxt, leg_natural[i], _TICK))
+                    limits[i] = (min(nxt, leg_cross[i]) if step_dir > 0
+                                 else max(nxt, leg_cross[i], _TICK))
                     orders[i].lmtPrice = limits[i]
                     orders[i].transmit = True
                     ib.placeOrder(qualified[i][1], orders[i])
@@ -882,10 +918,10 @@ async def close_position(
                 currency="USD",
                 multiplier="100",
             )
-            qualified = await ib.qualifyContractsAsync(opt)
-            if not qualified:
+            q = await _qualify(ib, opt)
+            if q is None:
                 raise RuntimeError(f"Could not qualify closing leg: {ticker} {leg}")
-            qualified_legs.append((leg, qualified[0]))
+            qualified_legs.append((leg, q))
 
         bag = Contract()
         bag.symbol = ticker
@@ -1001,10 +1037,10 @@ async def close_position_legs(
                 right="C" if leg["option_type"].lower() == "call" else "P",
                 exchange="SMART", currency="USD", multiplier="100",
             )
-            q = await ib.qualifyContractsAsync(opt)
-            if not q:
+            q = await _qualify(ib, opt)
+            if q is None:
                 raise RuntimeError(f"Could not qualify closing leg: {ticker} {leg}")
-            qualified.append((leg, q[0]))
+            qualified.append((leg, q))
 
         trades = []
         for i, (leg, contract) in enumerate(qualified):
@@ -1106,10 +1142,10 @@ async def fetch_leg_quotes(
                 right="C" if leg["option_type"].lower() == "call" else "P",
                 exchange="SMART", currency="USD", multiplier="100",
             )
-            q = await ib.qualifyContractsAsync(opt)
-            if not q:
+            q = await _qualify(ib, opt)
+            if q is None:
                 return None
-            qualified.append((leg, q[0]))
+            qualified.append((leg, q))
 
         tickers = [(ls, ib.reqMktData(c, "", False, False)) for ls, c in qualified]
         loop = asyncio.get_event_loop()
