@@ -174,8 +174,16 @@ class StockAnalystAgent:
                 tools=_tools,
                 handlers=_handlers,
                 max_turns=3,
-                max_tokens=1024,
-                thinking={"type": "adaptive"},
+                # CRITICAL FIX (2026-06-09): was max_tokens=1024 + adaptive thinking. Adaptive
+                # thinking consumed the ENTIRE 1024 budget (97% of real calls hit exactly 1024
+                # output tokens), leaving zero tokens for the JSON answer → empty output → parsed
+                # as no_thesis on 1438/1438 calls. Because the analyst runs LIVE and no_thesis
+                # blocks the candidate (only at conviction ≥60), this silently killed EVERY
+                # high-conviction spread setup AND fed an empty thesis to advocate/defender/selector.
+                # Match the AdvocateAgent's proven config (run_with_tools + thinking disabled +
+                # ample tokens) so the structured thesis is actually produced.
+                max_tokens=3000,
+                thinking={"type": "disabled"},
                 timeout=anthropic.Timeout(connect=30.0, read=90.0, write=30.0, pool=30.0),
             )
 
