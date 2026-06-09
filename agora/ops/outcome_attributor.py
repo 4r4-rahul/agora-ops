@@ -397,6 +397,14 @@ def attribute_closed_trades(db_path: str) -> dict:
         logger.error("OutcomeAttributor failed: %s", exc)
         return {"error": str(exc)}
 
+    # Per-agent value-vs-cost reevaluation (the "every penny" loop) — logs a scorecard and
+    # flags retire candidates each cycle, using the freshly-attributed outcomes above.
+    try:
+        from agora.ops.agent_value_monitor import log_agent_value
+        log_agent_value(db_path)
+    except Exception as exc:
+        logger.debug("agent_value_monitor: %s", exc)
+
     grand_total = sum(total.values())
     if grand_total > 0:
         logger.info("OutcomeAttributor pass: %s", total)
