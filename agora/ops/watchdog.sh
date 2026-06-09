@@ -21,9 +21,21 @@ if [[ "$DOW" -gt 5 ]]; then exit 0; fi
 if [[ "$HHMM" < "0825" || "$HHMM" > "1505" ]]; then exit 0; fi
 
 # ── Alive check: health endpoint must return HTTP 200 ─────────────────────────
-CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 8 "$HEALTH_URL" 2>/dev/null || echo "000")
+# The scan loop can saturate the single event loop for several seconds, so ONE probe
+# can time out on a perfectly healthy engine (observed 2026-06-09: 000,000,000,000,200,200
+# over ~25s — busy, not hung). Probe up to 3× before declaring unhealthy; a real hang
+# fails all three. Combined with the consecutive-failure debounce below, this stopped a
+# ~15-min restart churn that was interrupting the (15-min) long-options scan cycle.
+FAILCOUNT_FILE="$LOG_DIR/watchdog.failcount"
+CODE="000"
+for _try in 1 2 3; do
+  CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 8 "$HEALTH_URL" 2>/dev/null || echo "000")
+  if [[ "$CODE" == "200" ]]; then break; fi
+  sleep 3
+done
 if [[ "$CODE" == "200" ]]; then
-  exit 0   # healthy — nothing to do
+  rm -f "$FAILCOUNT_FILE"   # healthy — reset the debounce streak, nothing to do
+  exit 0
 fi
 
 # ── Startup grace period ──────────────────────────────────────────────────────
@@ -40,11 +52,27 @@ if [[ -n "${ENGINE_PID:-}" ]] && kill -0 "$ENGINE_PID" 2>/dev/null; then
   PID_MTIME="$(stat -f %m "$PID_FILE" 2>/dev/null || echo 0)"
   AGE=$(( $(date +%s) - PID_MTIME ))
   if [[ "$AGE" -ge 0 && "$AGE" -lt "$GRACE_SECS" ]]; then
+    rm -f "$FAILCOUNT_FILE"   # fresh engine still starting — not a hang; clear the streak
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] watchdog: PID $ENGINE_PID unhealthy (HTTP $CODE) but only ${AGE}s old (<${GRACE_SECS}s grace) — skipping restart (likely startup)" >> "$WLOG"
     exit 0
   fi
 fi
 
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] watchdog: engine unhealthy (HTTP $CODE) during trading hours — restarting" >> "$WLOG"
+# ── Debounce: require 2 consecutive unhealthy runs before restarting ───────────
+# One unhealthy run (a scan burst that outlasts all 3 in-run probes) is not proof of a
+# hang. Restart only after TWO consecutive 5-min checks fail (~10 min unresponsive) — a
+# genuine freeze, not a busy moment. Prevents the restart churn that never let a full
+# long-options scan cycle complete.
+FAILS="$(cat "$FAILCOUNT_FILE" 2>/dev/null || echo 0)"
+case "$FAILS" in ''|*[!0-9]*) FAILS=0 ;; esac
+FAILS=$(( FAILS + 1 ))
+echo "$FAILS" > "$FAILCOUNT_FILE"
+if [[ "$FAILS" -lt 2 ]]; then
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] watchdog: unhealthy (HTTP $CODE) strike ${FAILS}/2 — deferring restart" >> "$WLOG"
+  exit 0
+fi
+
+rm -f "$FAILCOUNT_FILE"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] watchdog: engine unhealthy (HTTP $CODE) ${FAILS} consecutive checks during trading hours — restarting" >> "$WLOG"
 /bin/bash "$REPO/agora/ops/start.sh" >> "$WLOG" 2>&1
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] watchdog: start.sh invoked" >> "$WLOG"
