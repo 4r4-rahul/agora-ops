@@ -67,6 +67,10 @@ def _rec_to_legs(rec: Any) -> list[dict]:
             "action":         leg.action.upper(),     # "BUY" | "SELL"
             "quantity":       1,                      # contracts multiplied at order level
             "expiration_dte": max(1, (leg.expiration - today).days),
+            # Exact chain-selected expiry — IBKR uses this verbatim instead of re-deriving a
+            # 'nearest Friday' from DTE, which shifted weekly expiries to a non-existent
+            # contract and failed qualification (long-option submits erroring out).
+            "expiration_date": leg.expiration.strftime("%Y%m%d"),
         }
         for leg in rec.legs
     ]
@@ -86,6 +90,7 @@ def _pos_to_close_legs(pos: Any) -> list[dict]:
             "action":         leg.action.upper(),     # ORIGINAL entry action (BUY/SELL)
             "quantity":       1,
             "expiration_dte": max(1, (leg.expiration - today).days),
+            "expiration_date": leg.expiration.strftime("%Y%m%d"),  # exact expiry (see _rec_to_legs)
         }
         for leg in pos.legs
     ]

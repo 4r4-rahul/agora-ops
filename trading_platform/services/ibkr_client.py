@@ -327,6 +327,19 @@ def _next_expiry(dte: int) -> str:
     return expiry.strftime("%Y%m%d")
 
 
+def _leg_expiry(leg: dict) -> str:
+    """IBKR expiry (YYYYMMDD) for a leg. PREFER the exact date the strategy selected from a
+    real chain (expiration_date) over re-deriving the 'nearest Friday' from DTE: the latter
+    silently shifts the date (e.g. a Thursday weekly → the next Friday) and can land on a
+    contract that doesn't exist, failing qualification — the cause of long-option submits
+    erroring 'Could not qualify ... 48.0'. Fall back to the DTE→Friday heuristic only when no
+    exact date is carried (legacy callers / older position rows)."""
+    exact = leg.get("expiration_date")
+    if exact:
+        return str(exact).replace("-", "")
+    return _next_expiry(leg.get("expiration_dte", 0))
+
+
 
 async def place_bracket_order(
     *,
@@ -394,7 +407,7 @@ async def place_bracket_order(
         for leg in legs:
             opt = Option(
                 symbol=ticker,
-                lastTradeDateOrContractMonth=_next_expiry(leg["expiration_dte"]),
+                lastTradeDateOrContractMonth=_leg_expiry(leg),
                 strike=float(leg["strike"]),
                 right="C" if leg["option_type"].lower() == "call" else "P",
                 exchange="SMART",
@@ -764,7 +777,7 @@ async def place_legs_individually(
         for leg in legs:
             opt = Option(
                 symbol=ticker,
-                lastTradeDateOrContractMonth=_next_expiry(leg["expiration_dte"]),
+                lastTradeDateOrContractMonth=_leg_expiry(leg),
                 strike=float(leg["strike"]),
                 right="C" if leg["option_type"].lower() == "call" else "P",
                 exchange="SMART",
@@ -1036,7 +1049,7 @@ async def close_position(
         for leg in legs:
             opt = Option(
                 symbol=ticker,
-                lastTradeDateOrContractMonth=_next_expiry(leg.get("expiration_dte", 0)),
+                lastTradeDateOrContractMonth=_leg_expiry(leg),
                 strike=float(leg["strike"]),
                 right="C" if leg["option_type"].lower() == "call" else "P",
                 exchange="SMART",
@@ -1198,7 +1211,7 @@ async def close_position_legs(
         for leg in legs:
             opt = Option(
                 symbol=ticker,
-                lastTradeDateOrContractMonth=_next_expiry(leg.get("expiration_dte", 0)),
+                lastTradeDateOrContractMonth=_leg_expiry(leg),
                 strike=float(leg["strike"]),
                 right="C" if leg["option_type"].lower() == "call" else "P",
                 exchange="SMART", currency="USD", multiplier="100",
@@ -1327,7 +1340,7 @@ async def fetch_leg_quotes(
         for leg in legs:
             opt = Option(
                 symbol=ticker,
-                lastTradeDateOrContractMonth=_next_expiry(leg["expiration_dte"]),
+                lastTradeDateOrContractMonth=_leg_expiry(leg),
                 strike=float(leg["strike"]),
                 right="C" if leg["option_type"].lower() == "call" else "P",
                 exchange="SMART", currency="USD", multiplier="100",
