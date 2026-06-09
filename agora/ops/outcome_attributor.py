@@ -489,6 +489,14 @@ def attribute_closed_trades(db_path: str) -> dict:
     except Exception as exc:
         logger.debug("agent_value_monitor: %s", exc)
 
+    # Advocate recalibration + risk-coverage threshold recommendation (gated on sample size;
+    # recommends only, never auto-mutates the live gate).
+    try:
+        from agora.ops.recalibrate import recalibrate_advocate
+        recalibrate_advocate(db_path)
+    except Exception as exc:
+        logger.debug("recalibrate: %s", exc)
+
     grand_total = sum(total.values())
     if grand_total > 0:
         logger.info("OutcomeAttributor pass: %s", total)
