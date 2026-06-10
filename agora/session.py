@@ -2227,6 +2227,18 @@ class AgoraSession:
                 )
                 return
 
+            # Cost gate (2026-06-09): the spread pipeline below (StockAnalyst + StrategySelector
+            # LLM calls, IBKR chain enrich) only yields a trade when an entry is actually permitted.
+            # Outside the entry window (pre-market, after-hours, weekend, open/EOD buffers) the trade
+            # is blocked downstream at _entry_gate anyway — so short-circuit HERE instead of burning
+            # LLM + IBKR cost on un-tradeable recommendations. (The scan engine sweeps after hours;
+            # observed 128 after-hours StrategySelector calls in one day, all un-tradeable. The
+            # advocate was already safe — it runs after the entry gate.)
+            _entry_ok, _entry_why = self._entry_timing.is_entry_permitted()
+            if not _entry_ok:
+                logger.debug("Skip %s: entry window closed — %s", ticker, _entry_why)
+                return
+
             # Earnings blackout gate: block new vol-premium entries within N days of earnings.
             # Uses IBKR CalendarReport (primary) / yfinance (fallback) via _get_next_earnings.
             # Pre-earnings plays are exempted — they are intentionally entered before earnings.
