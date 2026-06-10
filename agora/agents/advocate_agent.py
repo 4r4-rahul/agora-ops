@@ -169,6 +169,12 @@ When strategy_type is BULL_PUT_SPREAD, BEAR_CALL_SPREAD, or IRON_CONDOR, the R/R
   • Credit collected < 8% of spread width (degenerate structure, e.g. $0.40 on $10-wide spread)
 For these structures, evaluate the trade on probability-of-profit, expected value (credit × POP - max_loss × (1-POP)), and DTE-theta match, not on raw risk:reward ratio.
 
+ITM DIRECTIONAL DEBIT — MANDATORY CALIBRATION:
+This applies ONLY to a single-leg long debit (LONG_CALL / LONG_PUT) whose leg is deep in-the-money: |delta| >= 0.70. Such premium is mostly INTRINSIC and largely vega-immune.
+  • Do NOT flag "IV crush kills debit" or "overpaying for direction in high vol" at HIGH severity for these — an IV crush hits only the small extrinsic sleeve (an ~0.80-delta put loses ~5-7% to a vol crush vs ~35% for an ATM debit). Judge it on the DIRECTIONAL thesis and the underlying move required, not on the IV level.
+  • INSTEAD scrutinize these ITM-specific risks (any can be HIGH): (1) REVERSAL/NOTIONAL — |delta| 0.70-0.85 moves ~1:1 with a large notional, so a counter-trend bounce loses fast; treat buying into an already-extended/oversold move (e.g. a put when RSI<35, or a call when RSI>65) as HIGH. (2) FILL QUALITY — deep-ITM strikes have wider bid-ask / lower OI; if bid-ask > 10% of mid or OI is thin, slippage erases the directional edge (HIGH). (3) DOLLARS-AT-RISK — max loss is the full (large) premium; size must be small.
+  • An ATM/OTM debit (|delta| < 0.55) keeps the FULL normal IV-crush scrutiny — do NOT relax it there.
+
 DTE CALIBRATION — MANDATORY:
 The payload includes "today_date" and each leg includes "dte" (days to expiry, pre-computed). USE THESE FIELDS — do not compute DTE yourself. Common target DTE for credit spreads is 30-60 days.
 
