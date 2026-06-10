@@ -506,15 +506,20 @@ class AdvocateAgent:
 
         thesis_summary = {}
         if thesis:
+            # Defensive getattr — _build_payload runs OUTSIDE review()'s try block, so any missing
+            # attribute here raises straight out of review() → caller sees None → fail-closed BLOCK
+            # with no journal row. The long-options path passes a lightweight SimpleNamespace thesis
+            # that lacks scorecard_critique/reasoning_trace; accessing them directly silently blocked
+            # every score-2 long-options entry (~110/day). Never hard-fail the gate on a thin thesis.
             thesis_summary = {
-                "direction":       thesis.direction,
-                "magnitude_pct":   thesis.magnitude_pct,
-                "horizon_days":    thesis.horizon_days,
-                "confidence_pct":  thesis.confidence_pct,
-                "strategy_family": thesis.strategy_family,
-                "kill_conditions": thesis.kill_conditions,
-                "scorecard_critique": thesis.scorecard_critique,
-                "reasoning_trace": thesis.reasoning_trace,
+                "direction":       getattr(thesis, "direction", None),
+                "magnitude_pct":   getattr(thesis, "magnitude_pct", None),
+                "horizon_days":    getattr(thesis, "horizon_days", None),
+                "confidence_pct":  getattr(thesis, "confidence_pct", None),
+                "strategy_family": getattr(thesis, "strategy_family", None),
+                "kill_conditions": getattr(thesis, "kill_conditions", []),
+                "scorecard_critique": getattr(thesis, "scorecard_critique", None),
+                "reasoning_trace": getattr(thesis, "reasoning_trace", None),
             }
 
         return {

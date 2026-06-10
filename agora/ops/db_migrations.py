@@ -21,6 +21,7 @@ def run_all(db_path: str) -> None:
         _m002_uw_alerts_table,
         _m004_long_journal,
         _m005_signal_stats,
+        _m006_add_long_options_lesson,
     ]:
         try:
             fn(db_path)
@@ -75,6 +76,53 @@ def _m001_expand_agent_lessons_check(db_path: str) -> None:
             ALTER TABLE agent_lessons_m001 RENAME TO agent_lessons;
         """)
         logger.info("m001 applied: agent_lessons now accepts swing_judge/defender/system")
+
+
+def _m006_add_long_options_lesson(db_path: str) -> None:
+    """
+    Expand agent_lessons CHECK constraint to include 'long_options'.
+    LessonsGenerator and PerformanceAnalyst synthesize long_options lessons (the long-options
+    learning loop), but the constraint only allowed analyst|strategy|advocate|exit|swing_judge|
+    defender|system — so every long_options lesson hit 'CHECK constraint failed' and was silently
+    dropped, breaking that loop's ability to persist what it learns.
+    """
+    with sqlite3.connect(db_path, timeout=15) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='agent_lessons'"
+        ).fetchone()
+        if row is None:
+            return  # created correctly on first run
+        if "long_options" in (row[0] or ""):
+            return  # already migrated
+        logger.info("Applying m006: adding 'long_options' to agent_lessons CHECK")
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS agent_lessons_m006 (
+                lesson_id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_name             TEXT    NOT NULL,
+                lesson_text            TEXT    NOT NULL,
+                derived_from_chain_ids TEXT,
+                confidence_in_lesson   REAL,
+                sample_size            INTEGER,
+                created_at_utc         TEXT    NOT NULL,
+                last_reinforced_at_utc TEXT,
+                times_reinforced       INTEGER DEFAULT 1,
+                active                 INTEGER DEFAULT 1,
+                human_approved         INTEGER,
+                approved_at_utc        TEXT,
+                approved_by            TEXT,
+                rejected_at_utc        TEXT,
+                rejected_reason        TEXT,
+                CHECK (agent_name IN (
+                    'analyst', 'strategy', 'advocate', 'exit',
+                    'swing_judge', 'defender', 'system', 'long_options'
+                ))
+            );
+            INSERT INTO agent_lessons_m006 SELECT * FROM agent_lessons;
+            DROP TABLE agent_lessons;
+            ALTER TABLE agent_lessons_m006 RENAME TO agent_lessons;
+        """)
+        logger.info("m006 applied: agent_lessons now accepts long_options")
 
 
 def _m002_uw_alerts_table(db_path: str) -> None:
