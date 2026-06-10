@@ -4187,7 +4187,17 @@ class AgoraSession:
             try:
                 order = await close_trade(position, self._settings, self._session_id)
                 status = (order or {}).get("status", "")
-                if status in ("Filled", "PartiallyClosed"):
+                # A position is only CLOSED if it actually flattened. "PartiallyClosed" means a leg
+                # is stranded at the broker — do NOT mark closed (orphan) and do NOT blindly retry
+                # (would over-close the already-flat leg); escalate and leave OPEN for recon. Any
+                # other non-Filled status (Failed/Cancelled — nothing flattened) is safe to retry.
+                if status == "PartiallyClosed":
+                    last_err = (f"PARTIAL close — {order.get('n_filled','?')}/{order.get('n_legs','?')} "
+                                f"legs flattened, remainder stranded")
+                    logger.error("PARTIAL close for %s — %s; escalating, leaving OPEN",
+                                 position.ticker, last_err)
+                    break  # skip remaining retries → fall through to escalation below
+                if status == "Filled":
                     fills = order.get("fills", [])
                     close_price = float(
                         order.get("avg_price")

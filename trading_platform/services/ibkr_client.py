@@ -1295,11 +1295,27 @@ async def close_position_legs(
             "[%s] Position closed leg-by-leg — %d/%d legs filled net=%.2f",
             session_id, n_filled, len(trades), avg_price or 0,
         )
+        # 3-way status so the caller can tell a TRUE flatten from a no-op. The old code returned
+        # "PartiallyClosed" for n_filled==0, which the session treated as success → it marked the
+        # position closed while ALL legs were still open at the broker → orphan + fictitious P&L
+        # (root cause of the 33 stranded legs found 2026-06-10).
+        #   Filled          = every leg flattened (position is flat)
+        #   Failed          = ZERO legs filled (position fully still open — safe to retry whole close)
+        #   PartiallyClosed = some legs flat, some stranded (a naked leg remains — needs recon, NOT a
+        #                     blind re-close which would over-trade the already-flat leg)
+        if trades and n_filled == len(trades):
+            _close_status = "Filled"
+        elif n_filled == 0:
+            _close_status = "Failed"
+        else:
+            _close_status = "PartiallyClosed"
         return {
             "order_id": trades[0].order.orderId if trades else -1,
-            "status": "Filled" if (trades and n_filled == len(trades)) else "PartiallyClosed",
+            "status": _close_status,
             "fills": fills,
             "avg_price": avg_price,
+            "n_filled": n_filled,
+            "n_legs": len(trades),
         }
 
     finally:
