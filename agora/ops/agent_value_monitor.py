@@ -70,13 +70,20 @@ def compute_agent_value(db_path: str) -> dict[str, Any]:
         calls, usd = _spend(conn, "StrategySelectorAgent")
         _has_honored = "override_honored" in {r[1] for r in conn.execute("PRAGMA table_info(strategy_journal)")}
         if _has_honored:
+            # A TRUE structural override = honored AND the executed type actually differs from the
+            # displaced rules-engine type. A 'honored' override to the SAME type the engine already
+            # chose changed nothing, so it belongs in the rules-engine baseline, not the override
+            # bucket — otherwise the selector gets credit/blame for structures it never changed.
+            _true_override = ("override_honored=1 AND "
+                              "json_extract(output_full_json,'$.rules_engine_displaced') IS NOT NULL AND "
+                              "json_extract(output_full_json,'$.rules_engine_displaced') <> strategy_type")
             hrow = conn.execute(
-                """SELECT
-                     COALESCE(SUM(CASE WHEN override_honored=1 THEN 1 END),0),
-                     COALESCE(AVG(CASE WHEN override_honored=1 THEN realized_pnl END),0),
-                     COALESCE(SUM(CASE WHEN override_honored=1 AND realized_pnl>0 THEN 1 END),0),
-                     COALESCE(SUM(CASE WHEN COALESCE(override_honored,0)<>1 THEN 1 END),0),
-                     COALESCE(AVG(CASE WHEN COALESCE(override_honored,0)<>1 THEN realized_pnl END),0)
+                f"""SELECT
+                     COALESCE(SUM(CASE WHEN {_true_override} THEN 1 END),0),
+                     COALESCE(AVG(CASE WHEN {_true_override} THEN realized_pnl END),0),
+                     COALESCE(SUM(CASE WHEN {_true_override} AND realized_pnl>0 THEN 1 END),0),
+                     COALESCE(SUM(CASE WHEN COALESCE(({_true_override}),0)=0 THEN 1 END),0),
+                     COALESCE(AVG(CASE WHEN COALESCE(({_true_override}),0)=0 THEN realized_pnl END),0)
                    FROM strategy_journal WHERE structure_used=1""",
             ).fetchone()
             n_ov, avg_ov, win_ov, n_base, avg_base = (

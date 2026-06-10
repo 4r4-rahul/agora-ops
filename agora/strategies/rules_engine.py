@@ -114,7 +114,7 @@ class StrategyRulesEngine:
                             getattr(force_strategy_type, "value", force_strategy_type),
                             strategy_type.value)
                 return None
-            logger.info("Strategy override honored for %s: %s → %s",
+            logger.info("Applying strategy override for %s: %s → %s (subject to leg/gate validation)",
                         conviction.ticker, strategy_type.value, force_strategy_type.value)
             strategy_type = force_strategy_type
         target_dte = max(7, base_dte + eff_dte_adj)

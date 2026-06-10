@@ -2808,8 +2808,14 @@ class AgoraSession:
             logger.info("StrategySelector OVERRIDE honored [%s]: %s → %s (executed)",
                         ticker, displaced, selection.strategy_type)
             return rebuilt
-        logger.info("StrategySelector override [%s] %s→%s NOT honored (unbuildable) — "
-                    "executing rules-engine structure", ticker, displaced, selection.strategy_type)
+        # Not honored: either the type is not constructible by the engine, or the overridden
+        # structure was built but failed the engine's own R/R / credit / liquidity / max_loss
+        # gates. Either way we fall back to the engine's validated structure rather than lose the
+        # trade (the selector's override is a preference, not a veto — 'no_structure' is the veto).
+        _why = "type not constructible" if forced is None else "override structure failed engine gates"
+        logger.info("StrategySelector override [%s] %s→%s NOT honored (%s) — "
+                    "executing rules-engine structure",
+                    ticker, displaced, selection.strategy_type, _why)
         return rules_recommendation
 
     # ── Catalyst callback ──────────────────────────────────────────
