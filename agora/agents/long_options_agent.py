@@ -199,6 +199,35 @@ class LongOptionsAgent:
         shrunk   = (wins + k * baseline) / (n + k)
         return max(0.6, min(1.4, shrunk / baseline))
 
+    # Signal quality weights — must match the additive weights used in _score_direction.
+    _SIGNAL_WEIGHTS = {"flow": 2.0, "rel_strength": 1.0, "momentum": 0.8,
+                       "vol_surge": 0.7, "macro": 0.6, "gex": 0.5, "news": 0.3}
+
+    @staticmethod
+    def _score2_dominant_loser(
+        direction: str, stack: dict, signal_perf: dict | None,
+        floor: float, min_n: int = 8,
+    ) -> str | None:
+        """Deterministic auto-skip for minimum-conviction (score-2) longs (expert Call A).
+        Returns the dominant signal's name when the highest-weight FIRING signal on the winning
+        side is a proven loser (win_rate < floor at n>=min_n), else None. Pure math, no LLM —
+        this only ever removes a low-conviction entry whose own track record says it loses, and
+        it lies dormant until signal_stats shows such a signal."""
+        if not signal_perf or floor <= 0:
+            return None
+        fired = [
+            (w, name) for name, w in LongOptionsAgent._SIGNAL_WEIGHTS.items()
+            if direction in str(stack.get(name, ""))   # stack annotates 'bullish'/'bearish'
+        ]
+        if not fired:
+            return None
+        fired.sort(reverse=True)
+        dom = fired[0][1]
+        rec = signal_perf.get((dom, direction))
+        if rec and rec[1] >= min_n and rec[0] < floor:
+            return dom
+        return None
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     def evaluate(
@@ -384,6 +413,7 @@ class LongOptionsAgent:
         direction, strategy, signal_stack, conviction, flow_dir, quality = self._score_direction(
             macro_context, flow_signals, momentum, gex_regime, rsi_ob, rsi_os, min_conv,
             news_flag=_news_flag, signal_perf=signal_perf,
+            score2_floor=getattr(self._settings, "long_options_score2_min_signal_winrate", 0.0),
         )
         if _is_drift and direction is not None:
             signal_stack["pre_earnings_drift"] = f"floor→1(dtc={days_to_catalyst}d,rs={_ret_10d:.1%})"
@@ -668,6 +698,7 @@ class LongOptionsAgent:
         min_conviction: int = 2,
         news_flag:      str | None = None,
         signal_perf:    dict | None = None,
+        score2_floor:   float = 0.0,
     ) -> tuple[str | None, StrategyType | None, dict, int, str, float]:
         """
         Returns (direction, strategy, signal_stack, net_score, flow_dir, quality_score).
@@ -833,10 +864,18 @@ class LongOptionsAgent:
             if rsi > rsi_overbought:
                 stack["rsi_filter"] = f"BLOCK_CALL(RSI={rsi:.0f}>{rsi_overbought})"
                 return None, None, stack, bull, flow_dir, qual_bull
+            if bull <= 2 and (_dom := LongOptionsAgent._score2_dominant_loser(
+                    "bullish", stack, signal_perf, score2_floor)):
+                stack["score2_floor"] = f"SKIP(dominant '{_dom}' winrate<{score2_floor:.0%}@n>=8)"
+                return None, None, stack, bull, flow_dir, qual_bull
             return "bullish", StrategyType.LONG_CALL, stack, bull, flow_dir, qual_bull
         if bear >= min_conviction and bear > bull:
             if rsi < rsi_oversold:
                 stack["rsi_filter"] = f"BLOCK_PUT(RSI={rsi:.0f}<{rsi_oversold})"
+                return None, None, stack, bear, flow_dir, qual_bear
+            if bear <= 2 and (_dom := LongOptionsAgent._score2_dominant_loser(
+                    "bearish", stack, signal_perf, score2_floor)):
+                stack["score2_floor"] = f"SKIP(dominant '{_dom}' winrate<{score2_floor:.0%}@n>=8)"
                 return None, None, stack, bear, flow_dir, qual_bear
             return "bearish", StrategyType.LONG_PUT, stack, bear, flow_dir, qual_bear
         return None, None, stack, max(bull, bear), flow_dir, max(qual_bull, qual_bear)

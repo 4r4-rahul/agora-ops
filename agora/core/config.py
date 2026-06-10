@@ -443,6 +443,19 @@ class AgoraSettings(BaseSettings):
         description="Minimum hours between evaluations of the same position.",
         ge=0.25, le=24.0,
     )
+    long_exit_llm_min_hold_days: int = Field(
+        default=2, ge=1, le=4,
+        description="Min calendar days held before the LLM may thesis-exit a LONG. Longs are "
+                    "5-day swings; the deterministic stops own days 0..N-1. Was effectively 1 "
+                    "(day-0-only guard), which let the LLM close 100% of longs on day 1.",
+    )
+    long_exit_llm_winner_lock: bool = Field(
+        default=True,
+        description="When True, the LLM may NEVER close a GREEN long — the conviction-scaled "
+                    "trailing stop owns winners (it was built to let them run). The LLM only "
+                    "adjudicates RED longs (thesis-break vs noise). Stops the day-1 churn that "
+                    "cut e.g. META +$1,435 / ORCL +$1,325 on entry day.",
+    )
 
     # ── Scan engine ───────────────────────────────────────────────────────────
     use_async_scan_engine: bool = Field(
@@ -552,6 +565,14 @@ class AgoraSettings(BaseSettings):
         description="Minimum signal score (out of 5 possible) to enter a trade. "
                     "Score 2 = 2 confirming signals; 3+ = high conviction.",
         ge=1, le=5,
+    )
+    long_options_score2_min_signal_winrate: float = Field(
+        default=0.35, ge=0.0, le=0.6,
+        description="Deterministic auto-skip floor for minimum-conviction (score-2) longs: if the "
+                    "dominant firing signal on the winning side has a historical win-rate below "
+                    "this at n>=8 closes, skip the entry. Pure math (no LLM) — score-2 is the "
+                    "cheapest/highest-volume bucket and is left advisory-only otherwise. Floor "
+                    "self-tightens as signal_stats fills; at current data no signal trips it.",
     )
     long_options_min_oi: int = Field(
         default=200,

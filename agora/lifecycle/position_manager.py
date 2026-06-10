@@ -605,10 +605,20 @@ class PositionManager:
         agent = self._exit_agent
         if agent is None:
             return False
-        # Min-hold guard: never thesis-exit on the entry day. The thesis needs room to
-        # play out (longs are 5-day swings); same-day LLM churn cut winners before. The
-        # deterministic stops still protect downside on day 0.
-        if (date.today() - position.entry_date).days < 1:
+        # Min-hold guard: the thesis needs room to play out. For LONGS this was effectively
+        # day-0-only, which let the LLM close 100% of longs on day 1 (cutting winners). Longs
+        # now hold long_exit_llm_min_hold_days (default 2); the deterministic stops own the
+        # downside until then. Shorts/spreads keep the day-0 guard.
+        _min_hold = getattr(self._settings, "long_exit_llm_min_hold_days", 2) if is_long else 1
+        if (date.today() - position.entry_date).days < _min_hold:
+            return False
+        # Winner-lock (longs): a GREEN long belongs to the conviction-scaled trailing stop, which
+        # was built to let winners run. Don't even evaluate it — never spend a token to (and never
+        # let the LLM) cut a winner. The LLM only adjudicates RED longs (genuine thesis-break vs
+        # intraday noise). This is the fix for the day-1 churn that closed META +$1,435 / ORCL
+        # +$1,325 on their entry day. Toggle via long_exit_llm_winner_lock.
+        _winner_lock = is_long and getattr(self._settings, "long_exit_llm_winner_lock", True)
+        if _winner_lock and (position.unrealized_pnl or 0) >= 0:
             return False
         try:
             interval = getattr(self._settings, "exit_intelligence_interval_hours", 1.0)
@@ -618,7 +628,13 @@ class PositionManager:
             rec = await agent.evaluate(position, self._macro_ctx, thesis_override=thesis, act=False)
             if rec is None or agent.shadow_mode:
                 return False
-            strong = rec.kill_triggered or rec.thesis_validity == "INVALIDATED"
+            # RED longs under winner-lock require a HARD kill-condition trigger — not a soft
+            # "INVALIDATED" read, which the LLM fires too readily on intraday noise. Shorts/spreads
+            # keep the original kill-or-invalidated rule.
+            if _winner_lock:
+                strong = rec.kill_triggered
+            else:
+                strong = rec.kill_triggered or rec.thesis_validity == "INVALIDATED"
             if rec.should_close and strong:
                 reason = f"LLM thesis-exit: {rec.thesis_validity}/{rec.kill_condition_status} | " \
                          f"{(rec.recommendation_reasoning or '')[:60]}"
