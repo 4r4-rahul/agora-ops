@@ -37,6 +37,17 @@ from ..core.models import (
 
 logger = logging.getLogger(__name__)
 
+# The only structures _build_legs can actually construct. A selector override to any other type
+# (long_call, long_put, iron_butterfly, calendar_spread, cash_secured_put, …) cannot be honored by
+# the rules engine, so the caller keeps the engine's own recommendation rather than lose the trade.
+_BUILDABLE_STRATEGIES = frozenset({
+    StrategyType.BULL_CALL_SPREAD,
+    StrategyType.BEAR_PUT_SPREAD,
+    StrategyType.BULL_PUT_SPREAD,
+    StrategyType.BEAR_CALL_SPREAD,
+    StrategyType.IRON_CONDOR,
+})
+
 
 class StrategyRulesEngine:
     """
@@ -69,10 +80,16 @@ class StrategyRulesEngine:
         iv_rank: float | None = None,
         vix: float | None = None,
         dynamic_params: Any | None = None,  # DynamicParams — overrides config defaults
+        force_strategy_type: "StrategyType | None" = None,  # bypass _select_strategy (selector override)
     ) -> TradeRecommendation | None:
         """
         Select strategy and strikes based on conviction and market state.
         Returns None if no suitable chain found or conviction < threshold.
+
+        force_strategy_type: when the StrategySelectorAgent overrides the engine's structure
+        choice (live mode), the caller re-runs with the corrected type. Only the structures
+        _build_legs can actually construct are honorable; an unbuildable type yields no legs and
+        returns None, and the caller falls back to the engine's own recommendation.
         """
         if conviction.gate == "no_trade":
             return None
@@ -91,6 +108,15 @@ class StrategyRulesEngine:
 
         direction = direction_override or self._infer_direction(conviction, gex)
         strategy_type, base_dte = self._select_strategy(conviction, direction, gex)
+        if force_strategy_type is not None and force_strategy_type != strategy_type:
+            if force_strategy_type not in _BUILDABLE_STRATEGIES:
+                logger.info("Override to %s not constructible by rules engine — leaving %s",
+                            getattr(force_strategy_type, "value", force_strategy_type),
+                            strategy_type.value)
+                return None
+            logger.info("Strategy override honored for %s: %s → %s",
+                        conviction.ticker, strategy_type.value, force_strategy_type.value)
+            strategy_type = force_strategy_type
         target_dte = max(7, base_dte + eff_dte_adj)
 
         # Find the right expiry
@@ -107,15 +133,34 @@ class StrategyRulesEngine:
                         conviction.ticker, strategy_type.value, expiry, spot)
             return None
 
+        # Liquidity guard: a leg with mid_price<=0 has no bid AND no ask — it distorts the net
+        # debit/credit (counted as $0) and, in the yfinance-only path where the IBKR reprice gate
+        # is skipped, would sail straight into a real order on an untradeable strike.
+        _bad = [lg for lg in legs if (lg.mid_price or 0) <= 0]
+        if _bad:
+            logger.info("Rejecting %s %s: %d leg(s) with no quote (mid<=0) — illiquid strike",
+                        conviction.ticker, strategy_type.value, len(_bad))
+            return None
+
         # Compute P&L metrics
         debit_credit = sum(
             (leg.mid_price if leg.action == "buy" else -leg.mid_price) * 100
             for leg in legs
         )
-        width = abs(legs[0].strike - legs[1].strike) if len(legs) >= 2 else 0.0
+        width = self._structure_width(strategy_type, legs)
         max_loss   = self._max_loss(strategy_type, debit_credit, width)
         max_gain   = self._max_gain(strategy_type, debit_credit, width)
-        rr_ratio   = abs(max_gain / max_loss) if max_loss != 0 else 0.0
+
+        # Defined-risk guard: a non-positive max_loss is structurally impossible for a real
+        # spread (credit ≥ width means inverted/ITM legs or a bad chain). Reject outright —
+        # otherwise abs() below masks the negative sign, the R/R gate passes, and _size_contracts
+        # falls to its `<=0 → 1 contract` branch and submits a broken trade.
+        if max_loss <= 0:
+            logger.info("Rejecting %s %s: non-positive max_loss=%.0f (width=%.1f credit/debit=%.0f) "
+                        "— structurally invalid", conviction.ticker, strategy_type.value,
+                        max_loss, width, debit_credit)
+            return None
+        rr_ratio   = abs(max_gain / max_loss)
 
         rr_floor = self._dynamic_rr_floor(iv_rank, vix)
         if rr_ratio < rr_floor:
@@ -203,7 +248,7 @@ class StrategyRulesEngine:
             for i, q in enumerate(leg_quotes)
         )
         debit_credit = dc_ps * 100.0  # per contract
-        width = abs(rec.legs[0].strike - rec.legs[1].strike) if len(rec.legs) >= 2 else 0.0
+        width = self._structure_width(rec.strategy, rec.legs)   # worst-wing for condors (H2)
 
         # 1) Pricing sanity vs the yfinance economics the rec was built on.
         orig_total = rec.entry_debit_credit            # yfinance, per-contract × contracts
@@ -220,7 +265,9 @@ class StrategyRulesEngine:
 
         max_loss = self._max_loss(rec.strategy, debit_credit, width)
         max_gain = self._max_gain(rec.strategy, debit_credit, width)
-        rr = abs(max_gain / max_loss) if max_loss != 0 else 0.0
+        if max_loss <= 0:
+            return False, None, f"non-positive max_loss {max_loss:.0f} on IBKR prices (width={width:.1f})"
+        rr = abs(max_gain / max_loss)
 
         # 2) Re-gate on real prices. Use the MOST-LENIENT R/R floor (thin-credit bucket):
         # we don't have iv_rank/vix here, and the trade already cleared its dynamic floor at
@@ -296,7 +343,14 @@ class StrategyRulesEngine:
             return StrategyType.BULL_CALL_SPREAD, 7
 
         if pillar == StrategyPillar.POST_EARNINGS:
-            return StrategyType.BULL_PUT_SPREAD, 21   # sell elevated put skew
+            # Sell elevated post-earnings skew on the side the thesis supports. Previously this
+            # hard-coded BULL_PUT_SPREAD regardless of direction, so a bearish post-earnings thesis
+            # was submitted as a BULLISH credit spread — a wrong-direction, negative-edge trade.
+            if direction == "bearish":
+                return StrategyType.BEAR_CALL_SPREAD, 21   # sell elevated call skew
+            if direction == "neutral":
+                return StrategyType.IRON_CONDOR, 21
+            return StrategyType.BULL_PUT_SPREAD, 21        # bullish: sell elevated put skew
 
         if pillar in (StrategyPillar.CATALYST, StrategyPillar.SMART_MONEY):
             if direction == "bullish":
@@ -701,6 +755,20 @@ class StrategyRulesEngine:
             )
 
     # ── P&L helpers ────────────────────────────────────────────────
+
+    @staticmethod
+    def _structure_width(strategy: StrategyType, legs: list[SpreadLeg]) -> float:
+        """Strike width that defines max risk. For a 2-leg spread it is the gap between the legs.
+        For an IRON_CONDOR the legs are [short_put, long_put, short_call, long_call] and only ONE
+        side can be breached, so the defining width is the WIDER wing — taking only legs[0]-legs[1]
+        (the put wing) understates max_loss on an asymmetric condor and oversizes the position."""
+        if len(legs) < 2:
+            return 0.0
+        if strategy == StrategyType.IRON_CONDOR and len(legs) >= 4:
+            put_wing  = abs(legs[0].strike - legs[1].strike)
+            call_wing = abs(legs[2].strike - legs[3].strike)
+            return max(put_wing, call_wing)
+        return abs(legs[0].strike - legs[1].strike)
 
     def _max_loss(self, strategy: StrategyType, debit_credit: float, width: float) -> float:
         # debit_credit is already in per-contract dollar terms (×100 applied by caller).

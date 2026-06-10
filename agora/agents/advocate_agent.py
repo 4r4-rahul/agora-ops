@@ -337,23 +337,17 @@ class AdvocateAgent:
                     )
                     raise
             # Enforce deterministic verdict from failure mode analysis
+            _kill_conditions = [c for c in (getattr(thesis, "kill_conditions", []) or [])]
             raw_output["verdict"] = _compute_verdict(
-                raw_output.get("failure_modes", []),
-                [c for c in (getattr(thesis, "kill_conditions", []) or [])],
+                raw_output.get("failure_modes", []), _kill_conditions,
             )
             verdict = _parse_verdict(raw_output)
 
-            # Fact-grounding monitor — verify the advocate's stated event claims against the
-            # macro calendar (catches the "FOMC tomorrow" hallucination class independently).
-            try:
-                from agora.ops.fact_grounding import scan as _fact_scan
-                _claim_text = (raw_output.get("most_likely_loss_scenario", "") or "") + " " + \
-                    (getattr(verdict, "verdict_reasoning", "") or "") + " " + " ".join(
-                        f"{fm.get('mode_name','')} {fm.get('trigger_conditions','')}"
-                        for fm in (raw_output.get("failure_modes") or []) if isinstance(fm, dict))
-                _fact_scan(_claim_text, str(self._settings.db_path), source="advocate", ticker=ticker)
-            except Exception:
-                pass
+            # Fact-grounding GATE — verify the advocate's stated event claims against the macro
+            # calendar and, if it fabricated an imminent event (the "FOMC tomorrow" class), strip
+            # the failure mode(s) built on that lie and recompute the verdict. A BLOCK manufactured
+            # purely by a phantom event downgrades; genuine risks still block.
+            verdict = self._apply_fact_gate(raw_output, verdict, _kill_conditions, ticker)
 
             try:
                 _log_msg(str(self._settings.db_path), "AdvocateAgent", _MODEL,
@@ -399,11 +393,12 @@ class AdvocateAgent:
                 if raw_text.startswith("```"):
                     raw_text = raw_text.split("```")[1].lstrip("json").strip()
                 raw_output = _parse_json_robust(raw_text)
+                _kill_conditions = [c for c in (getattr(thesis, "kill_conditions", []) or [])]
                 raw_output["verdict"] = _compute_verdict(
-                    raw_output.get("failure_modes", []),
-                    [c for c in (getattr(thesis, "kill_conditions", []) or [])],
+                    raw_output.get("failure_modes", []), _kill_conditions,
                 )
                 verdict = _parse_verdict(raw_output)
+                verdict = self._apply_fact_gate(raw_output, verdict, _kill_conditions, ticker)
                 self._write_journal(
                     decision_id, ticker, verdict, raw_output,
                     response.usage.input_tokens if response.usage else 0,
@@ -421,6 +416,46 @@ class AdvocateAgent:
         return verdict
 
     # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _apply_fact_gate(self, raw_output: dict, verdict: "AdvocateVerdict",
+                         kill_conditions: list, ticker: str) -> "AdvocateVerdict":
+        """Run the fact-grounding scan; if the advocate fabricated an imminent macro event,
+        neutralize the failure mode(s) built on it and recompute the deterministic verdict.
+        Only ever relaxes a verdict (a lie can only manufacture risk, never hide it). Never
+        raises — a guardrail must not break the path it guards."""
+        try:
+            from agora.ops.fact_grounding import scan as _fact_scan, neutralize_fabricated_modes
+            modes = raw_output.get("failure_modes") or []
+            _claim_text = (raw_output.get("most_likely_loss_scenario", "") or "") + " " + \
+                (getattr(verdict, "verdict_reasoning", "") or "") + " " + " ".join(
+                    f"{fm.get('mode_name','')} {fm.get('trigger_conditions','')}"
+                    for fm in modes if isinstance(fm, dict))
+            divs = _fact_scan(_claim_text, str(self._settings.db_path),
+                              source="advocate", ticker=ticker)
+            if not divs:
+                return verdict
+            clean_modes, removed = neutralize_fabricated_modes(modes, divs)
+            if not removed:
+                return verdict
+            regrounded = _compute_verdict(clean_modes, kill_conditions)
+            if regrounded != verdict.verdict:
+                logger.critical(
+                    "Advocate FACT-GATE [%s]: %s → %s — dropped fabricated-event failure mode(s) %s",
+                    ticker, verdict.verdict, regrounded, removed,
+                )
+                raw_output["verdict"] = regrounded
+                raw_output["fact_gate"] = {
+                    "from": verdict.verdict, "to": regrounded,
+                    "removed_modes": removed,
+                    "reason": "; ".join(d.get("issue", "") for d in divs)[:300],
+                }
+                return _parse_verdict(raw_output)
+            # Fabricated mode found but verdict unchanged (other genuine risks stand) — record it.
+            raw_output["fact_gate"] = {"from": verdict.verdict, "to": verdict.verdict,
+                                       "removed_modes": removed, "verdict_held": True}
+        except Exception as exc:
+            logger.debug("advocate fact-gate skipped [%s]: %s", ticker, exc)
+        return verdict
 
     def _build_payload(
         self,

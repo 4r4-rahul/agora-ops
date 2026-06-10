@@ -63,20 +63,42 @@ def compute_agent_value(db_path: str) -> dict[str, Any]:
             "pass": passes, "block": blocks, "discrimination_pnl": discr, "verdict": verdict,
         }
 
-        # ── StrategySelector: realized P&L of overrides; counterfactual vs rules engine ──
+        # ── StrategySelector: now that the override is WIRED, measure the only honest signal —
+        # the realized P&L of structures the selector ACTUALLY changed (override_honored=1)
+        # against the rules-engine population it left alone. Before wiring, override_honored did
+        # not exist and every 'override' metric measured a structure that never traded.
         calls, usd = _spend(conn, "StrategySelectorAgent")
-        srow = conn.execute(
-            """SELECT count(*), COALESCE(avg(realized_pnl),0),
-                      COALESCE(sum(CASE WHEN vs_rules_engine_pnl IS NOT NULL THEN 1 END),0)
-               FROM strategy_journal WHERE structure_used=1""",
-        ).fetchone()
-        n_sel, avg_sel, n_cf = int(srow[0]), round(srow[1], 1), int(srow[2])
-        out["strategy_selector"] = {
-            "spend_usd": usd, "calls": calls, "attributed": n_sel, "avg_pnl": avg_sel,
-            "counterfactual_measured": n_cf,
-            "verdict": (f"UNVALIDATED — vs_rules_engine_pnl backfilled {n_cf}/{n_sel}; "
-                        f"cannot prove the ${usd} of overrides beat the free rules engine"),
-        }
+        _has_honored = "override_honored" in {r[1] for r in conn.execute("PRAGMA table_info(strategy_journal)")}
+        if _has_honored:
+            hrow = conn.execute(
+                """SELECT
+                     COALESCE(SUM(CASE WHEN override_honored=1 THEN 1 END),0),
+                     COALESCE(AVG(CASE WHEN override_honored=1 THEN realized_pnl END),0),
+                     COALESCE(SUM(CASE WHEN override_honored=1 AND realized_pnl>0 THEN 1 END),0),
+                     COALESCE(SUM(CASE WHEN COALESCE(override_honored,0)<>1 THEN 1 END),0),
+                     COALESCE(AVG(CASE WHEN COALESCE(override_honored,0)<>1 THEN realized_pnl END),0)
+                   FROM strategy_journal WHERE structure_used=1""",
+            ).fetchone()
+            n_ov, avg_ov, win_ov, n_base, avg_base = (
+                int(hrow[0]), round(hrow[1], 1), int(hrow[2]), int(hrow[3]), round(hrow[4], 1))
+            if n_ov < _MIN_SAMPLE:
+                verdict = (f"UNVALIDATED (honored overrides n={n_ov}<{_MIN_SAMPLE}); "
+                           f"baseline rules-engine n={n_base} avg=${avg_base}")
+            else:
+                edge = round(avg_ov - avg_base, 1)
+                verdict = (f"override avg=${avg_ov} ({win_ov}/{n_ov} win) vs rules-engine "
+                           f"avg=${avg_base} (n={n_base}) → edge ${edge}"
+                           + (" — adds value" if edge > 0 else " — NOT adding value, review"))
+            out["strategy_selector"] = {
+                "spend_usd": usd, "calls": calls, "honored_overrides": n_ov,
+                "override_avg_pnl": avg_ov, "rules_baseline_avg_pnl": avg_base,
+                "baseline_n": n_base, "verdict": verdict,
+            }
+        else:
+            out["strategy_selector"] = {
+                "spend_usd": usd, "calls": calls,
+                "verdict": "override wiring just deployed — no honored overrides closed yet",
+            }
 
         # ── Analyst: thesis hit-rate (now accruing post token-fix) ──
         calls, usd = _spend(conn, "StockAnalystAgent")

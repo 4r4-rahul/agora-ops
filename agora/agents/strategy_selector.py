@@ -10,8 +10,12 @@ Shadow mode (default):
   journaled to strategy_journal but does NOT affect execution.
 
 Live mode:
-  Selector drives strategy type selection. Rules engine executes strike placement
-  for the selected strategy type (it remains as fallback on timeout/failure).
+  Selector drives strategy type selection. On an 'override' the caller
+  (AgoraSession._apply_selector_override) re-runs the rules engine forced to the selected type;
+  buildable types execute, anything the engine cannot construct falls back to the engine's own
+  structure so a trade is never lost. 'no_structure' vetoes the trade. The executed structure is
+  written back to strategy_journal (override_honored + displaced baseline) so attribution measures
+  what truly traded — see mark_override_execution.
 
 Model: claude-sonnet-4-6 (fast structural selection — cost-efficient for per-ticker calls)
 Cost: ~$0.05/call × ≤10 calls/day ≈ $0.50/day
@@ -122,8 +126,10 @@ class StrategySelectorAgent:
 
     Call select() after rules engine builds its recommendation. In shadow mode the
     selection is journaled but the caller always uses the rules engine result.
-    In live mode, an 'override' decision causes the caller to re-run the rules engine
-    with the corrected strategy_type, while a 'no_structure' decision blocks submission.
+    In live mode, an 'override' decision causes the caller to re-run the rules engine forced to
+    the corrected strategy_type (honored only if the engine can construct it, else it falls back
+    to the engine's own structure), while a 'no_structure' decision blocks submission. The wiring
+    lives in AgoraSession._apply_selector_override; mark_override_execution records the outcome.
     """
 
     # Result cache TTL — reuse a selection for the same ticker / conviction-band /
@@ -365,6 +371,71 @@ class StrategySelectorAgent:
                 )
         except Exception as exc:
             logger.warning("strategy_journal write error: %s", exc)
+
+
+# ── Override-execution bookkeeping ──────────────────────────────────────────────
+
+def _map_strategy_type(name: str | None):
+    """Map a selector strategy_type string to the StrategyType enum, or None if unknown."""
+    if not name:
+        return None
+    try:
+        from agora.core.models import StrategyType
+        return StrategyType(str(name).strip().lower())
+    except Exception:
+        return None
+
+
+def mark_override_execution(
+    db_path: str, decision_id: str, honored: bool,
+    executed_recommendation: Any | None, displaced_strategy_type: str | None,
+) -> None:
+    """Record what ACTUALLY executed after a live override decision, so attribution credits the
+    override row only when the override truly drove the fill.
+
+    Before this existed the override was unwired: the journal stored the rules-engine economics
+    regardless of decision, so every 'override' metric measured a structure that never traded.
+    Now, when an override is honored, we overwrite the journal row with the EXECUTED structure and
+    stash the displaced rules-engine structure as the counterfactual baseline; when it is not
+    honored (unbuildable / rebuild failed), override_honored=0 marks it as having executed the
+    rules engine's structure (endorse-equivalent for outcome analysis)."""
+    try:
+        with sqlite3.connect(db_path, timeout=10) as conn:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(strategy_journal)")}
+            if "override_honored" not in cols:
+                conn.execute("ALTER TABLE strategy_journal ADD COLUMN override_honored INTEGER")
+            if not honored or executed_recommendation is None:
+                conn.execute(
+                    "UPDATE strategy_journal SET override_honored=0 WHERE decision_id=?",
+                    (decision_id,),
+                )
+                return
+            rec = executed_recommendation
+            legs = [
+                {"action": lg.action, "type": lg.option_type, "strike": lg.strike,
+                 "expiry": str(lg.expiration), "mid": lg.mid_price}
+                for lg in rec.legs
+            ]
+            conn.execute(
+                """UPDATE strategy_journal
+                   SET override_honored=1,
+                       strategy_type=?, legs_json=?, contracts=?,
+                       entry_debit_credit=?, max_profit=?, max_loss=?, reward_risk_ratio=?,
+                       output_full_json=json_patch(
+                           COALESCE(output_full_json,'{}'),
+                           json_object('rules_engine_displaced', ?))
+                   WHERE decision_id=?""",
+                (
+                    str(getattr(rec.strategy, "value", rec.strategy)),
+                    json.dumps(legs, default=str), rec.contracts,
+                    rec.entry_debit_credit, rec.max_gain_dollars, rec.max_loss_dollars,
+                    rec.reward_risk_ratio,
+                    displaced_strategy_type or "",
+                    decision_id,
+                ),
+            )
+    except Exception as exc:
+        logger.warning("mark_override_execution failed [%s]: %s", decision_id, exc)
 
 
 # ── Pure helpers ──────────────────────────────────────────────────────────────

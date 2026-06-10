@@ -2713,10 +2713,11 @@ class AgoraSession:
 
             # ── StrategySelectorAgent (Phase 6) ───────────────────────
             # Shadow: journals selection, rules engine result used for execution.
-            # Live: override decision can change strategy type (rules engine re-runs).
-            # Run regardless of whether analyst produced a thesis — selector validates
-            # the rules engine output even when no analyst thesis is available
-            # (e.g. vol_premium bypass where conviction < stock_analyst_min_conviction).
+            # Live: 'no_structure' vetoes the trade; 'override' re-runs the rules engine forcing
+            #       the corrected (buildable) strategy type — honored only if constructible, else
+            #       it falls back to the engine's own structure so a trade is never lost.
+            # Run regardless of whether analyst produced a thesis — selector validates the rules
+            # engine output even when no analyst thesis is available (e.g. vol_premium bypass).
             if self._strategy_selector:
                 _selection = await self._strategy_selector.select(
                     ticker=ticker,
@@ -2727,16 +2728,18 @@ class AgoraSession:
                     rules_recommendation=recommendation,
                     decision_id=_chain_id,
                 )
-                # Live mode: if selector overrides, re-run rules engine with new type
-                if (
-                    _selection
-                    and not self._strategy_selector.shadow_mode
-                    and _selection.decision == "no_structure"
-                ):
-                    _complete_chain(str(self._settings.db_path), _chain_id, "no_trade",
-                                    strategy="selector_no_structure")
-                    logger.info("StrategySelector: no_structure for %s — %s", ticker, _selection.rationale)
-                    return
+                if _selection and not self._strategy_selector.shadow_mode:
+                    if _selection.decision == "no_structure":
+                        _complete_chain(str(self._settings.db_path), _chain_id, "no_trade",
+                                        strategy="selector_no_structure")
+                        logger.info("StrategySelector: no_structure for %s — %s",
+                                    ticker, _selection.rationale)
+                        return
+                    if _selection.decision == "override":
+                        recommendation = self._apply_selector_override(
+                            ticker, _selection, recommendation, conviction, snap, chain_dict,
+                            gex, _direction_hint, _chain_id,
+                        )
 
             # ── IV Skew informational log (non-blocking) ─────────────────
             # Steep put skew on a bullish trade signals puts are rich;
@@ -2776,6 +2779,38 @@ class AgoraSession:
 
         except Exception as exc:
             logger.error("Evaluate ticker %s failed: %s", ticker, exc)
+
+    def _apply_selector_override(self, ticker, selection, rules_recommendation, conviction,
+                                 snap, chain_dict, gex, direction_hint, chain_id):
+        """Honor a live StrategySelector 'override' by re-running the rules engine forced to the
+        selector's strategy type. Buildable types execute the new structure; anything the engine
+        can't construct (or a rebuild that yields None) falls back to the original recommendation
+        so a trade is never silently lost. Records what actually executed for honest attribution."""
+        from agora.agents.strategy_selector import _map_strategy_type, mark_override_execution
+        displaced = str(getattr(rules_recommendation.strategy, "value",
+                                rules_recommendation.strategy)) if rules_recommendation else ""
+        forced = _map_strategy_type(selection.strategy_type)
+        rebuilt = None
+        if forced is not None:
+            try:
+                rebuilt = self._strategy.build_recommendation(
+                    conviction=conviction, spot=snap.price, options_chain=chain_dict, gex=gex,
+                    direction_override=direction_hint, iv_rank=snap.iv_rank, vix=snap.vix,
+                    dynamic_params=self._dynamic_params, force_strategy_type=forced,
+                )
+            except Exception as exc:
+                logger.warning("Selector override rebuild failed for %s (%s→%s): %s",
+                               ticker, displaced, selection.strategy_type, exc)
+        honored = rebuilt is not None
+        mark_override_execution(str(self._settings.db_path), chain_id, honored,
+                                rebuilt if honored else None, displaced)
+        if honored:
+            logger.info("StrategySelector OVERRIDE honored [%s]: %s → %s (executed)",
+                        ticker, displaced, selection.strategy_type)
+            return rebuilt
+        logger.info("StrategySelector override [%s] %s→%s NOT honored (unbuildable) — "
+                    "executing rules-engine structure", ticker, displaced, selection.strategy_type)
+        return rules_recommendation
 
     # ── Catalyst callback ──────────────────────────────────────────
 

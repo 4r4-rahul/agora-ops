@@ -10,9 +10,16 @@ metric-based monitoring.
 
 This module is the independent verifier: it cross-checks the factual claims inside agent
 reasoning against deterministic ground truth (the macro calendar), and raises a logged,
-persisted, dashboard-visible divergence alert when they disagree. It does NOT override the
-agent — it is an alarm, not a gate. The surgical event gate provides the agent correct
-context up front; this catches it if an agent *still* asserts something untrue.
+persisted, dashboard-visible divergence alert when they disagree.
+
+It is BOTH an alarm and a gate. `scan()` logs/persists the divergence (the alarm).
+`neutralize_fabricated_modes()` lets a caller surgically remove the failure mode(s) whose
+premise rests on a fabricated imminent event, so the caller can recompute its decision
+without the influence of a proven-false fact. This was upgraded from alarm-only after the
+06-05 post-mortem: an independent re-verification found the FOMC fabrication manufactured ~58
+spurious BLOCKs in a single day, the monitor saw every one of them, yet — being alarm-only —
+let them all stand. Gating only ever REMOVES phantom risk (it can downgrade a BLOCK driven by
+a lie; it never invents new risk), so it cannot make the advocate more reckless.
 
 Scope today: macro-event claims (FOMC / CPI / NFP) vs the calendar — the exact bug class
 we hit. Designed to extend to price/earnings claims.
@@ -117,6 +124,44 @@ def check_event_claims(text: str, source: str = "", ticker: str = "") -> list[di
                 "severity": "high",
             })
     return divergences
+
+
+def neutralize_fabricated_modes(
+    failure_modes: list, divergences: list[dict]
+) -> tuple[list, list[str]]:
+    """Given an advocate's failure_modes and the divergences `check_event_claims` found, drop the
+    failure mode(s) whose premise rests on a fabricated IMMINENT macro event. A mode is neutralized
+    only if it BOTH names a fabricated event AND asserts imminence about it — so a legitimate
+    'post-FOMC drift over the coming weeks' mode (event named, not claimed imminent) is preserved.
+
+    Returns (clean_modes, removed_mode_names). Surgical by design: it removes phantom risk and
+    nothing else, so a recomputed verdict can only relax, never tighten."""
+    if not divergences or not failure_modes:
+        return failure_modes, []
+    fab_terms: set[str] = set()
+    for d in divergences:
+        ev = (d.get("claimed_event") or "").lower()
+        if ev in _EVENT_TERMS:
+            fab_terms.update(_EVENT_TERMS[ev])
+    if not fab_terms:
+        return failure_modes, []
+
+    clean: list = []
+    removed: list[str] = []
+    for fm in failure_modes:
+        if not isinstance(fm, dict):
+            clean.append(fm)
+            continue
+        triggers = fm.get("trigger_conditions", "")
+        if isinstance(triggers, list):
+            triggers = " ".join(str(t) for t in triggers)
+        blob = " ".join(str(fm.get(k, "")) for k in ("mode_name", "scenario")) + " " + str(triggers)
+        blob = blob.lower()
+        if any(term in blob for term in fab_terms) and _has_unnegated_near(blob):
+            removed.append(str(fm.get("mode_name", "?")))
+        else:
+            clean.append(fm)
+    return clean, removed
 
 
 def _ensure_table(conn: sqlite3.Connection) -> None:

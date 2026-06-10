@@ -9,6 +9,10 @@ enough new samples accumulate.
 Design rules:
   - Pure Python for core attribution. One LLM call only for lesson synthesis.
   - Safe to call repeatedly — only writes NULL columns; never overwrites.
+  - Attributes ONLY from a genuine agent-driven close (_REAL_CLOSE: status='closed' with a
+    close_source in lifecycle/thesis_exit/trailing_stop). `realized_pnl` is NOT NULL DEFAULT 0,
+    so it can never gate a real fill — an open/reset/sync position reads pnl=0 and was previously
+    mis-attributed as a loss. Each pass first self-heals via _purge_fabricated_attribution.
   - Runs every 6 hours via ScheduledAttributor.
   - Also callable on-demand: GET /agora/health/analyst (analyst only)
     and GET /agora/health/promotion-readiness (all agents).
@@ -59,6 +63,26 @@ LESSON_TRIGGER_NEW_ATTRIBUTIONS = 10   # synthesize lessons after every N new at
 LESSON_TIME_INTERVAL_SEC = 3600 * 24 * 7   # also synthesize lessons weekly regardless of closes
 CALIBRATION_INTERVAL_SEC = 3600 * 24 * 7   # run ConvictionCalibrator weekly
 
+# A position's outcome is trustworthy for learning ONLY if it closed via a real,
+# agent-driven exit fill. `realized_pnl` is `NOT NULL DEFAULT 0`, so it can NEVER gate this —
+# an open or reset position reads pnl=0 and was previously mis-attributed as a loss. The real
+# gate is the close provenance. Excluded on purpose:
+#   • status='open'                 — not closed at all
+#   • status='reset'                — a reset, never a fill (pnl=0)
+#   • close_source='tws_startup_sync' / orphan reconcile — broker-sync artifacts the agents
+#     did not decide; their P&L must not feed agent learning.
+_REAL_CLOSE_SOURCES = ("lifecycle", "thesis_exit", "trailing_stop")
+_REAL_CLOSE = (
+    "p.status='closed' AND p.close_date IS NOT NULL AND p.close_date<>'' "
+    "AND p.close_source IN ('lifecycle','thesis_exit','trailing_stop')"
+)
+# Sub-select of chain_ids whose position genuinely closed — used both to gate attribution
+# writes and to detect (and purge) attribution written against anything else.
+_REAL_CLOSED_CHAINS = (
+    "SELECT dc.chain_id FROM decision_chains dc JOIN positions p "
+    f"ON p.position_id = dc.position_id WHERE {_REAL_CLOSE}"
+)
+
 # Shadow mode promotion thresholds (must match spec §8)
 _PROMOTION_THRESHOLDS = {
     "analyst":  {"metric": "direction_hit_rate", "min_rows": 40, "threshold": 0.55},
@@ -103,14 +127,17 @@ def _brier_score(confidence_buckets: list[tuple[float, float]]) -> float | None:
 
 
 def _fetch_closed_trades(conn: sqlite3.Connection) -> list[tuple]:
-    """Returns (trade_id, ticker, entry_date, realized_pnl, max_loss_dollars, max_gain_dollars)."""
+    """Returns (trade_id, ticker, entry_date, realized_pnl, max_loss_dollars, max_gain_dollars).
+    Gated on a genuine agent-driven close (INNER JOIN + _REAL_CLOSE) so exit attribution never
+    keys off broker-sync artifacts or reset positions."""
     return conn.execute(
-        """SELECT t.trade_id, t.ticker, t.entry_date, t.realized_pnl,
+        f"""SELECT t.trade_id, t.ticker, t.entry_date, t.realized_pnl,
                   p.max_loss_dollars, p.max_gain_dollars
            FROM trade_records t
-           LEFT JOIN positions p ON p.position_id = t.trade_id
+           JOIN positions p ON p.position_id = t.trade_id
            WHERE t.close_date IS NOT NULL
              AND t.realized_pnl IS NOT NULL
+             AND {_REAL_CLOSE}
            ORDER BY t.entry_date""",
     ).fetchall()
 
@@ -135,13 +162,13 @@ def _attribute_analyst(conn: sqlite3.Connection) -> int:
     then chains.position_id -> positions.realized_pnl. positions is the source of truth (all closed
     rows carry realized_pnl); the chain's own realized_pnl backfill leaks, so we read positions."""
     rows = conn.execute(
-        """SELECT a.journal_id, a.confidence_pct, p.realized_pnl, p.max_loss_dollars, a.ticker
+        f"""SELECT a.journal_id, a.confidence_pct, p.realized_pnl, p.max_loss_dollars, a.ticker
            FROM analyst_journal a
            JOIN decision_chains dc ON dc.chain_id = a.decision_id
            JOIN positions       p  ON p.position_id = dc.position_id
            WHERE a.thesis_played_out IS NULL
              AND a.decision = 'thesis'
-             AND p.realized_pnl IS NOT NULL""",
+             AND {_REAL_CLOSE}""",
     ).fetchall()
     attributed = 0
     for journal_id, confidence_pct, realized_pnl, max_loss, ticker in rows:
@@ -166,12 +193,12 @@ def _attribute_analyst(conn: sqlite3.Connection) -> int:
 def _attribute_strategy(conn: sqlite3.Connection) -> int:
     """Mark structure_used=1 and realized_pnl, keyed on the exact decision_id (see _attribute_analyst)."""
     rows = conn.execute(
-        """SELECT s.journal_id, p.realized_pnl, s.ticker
+        f"""SELECT s.journal_id, p.realized_pnl, s.ticker
            FROM strategy_journal s
            JOIN decision_chains dc ON dc.chain_id = s.decision_id
            JOIN positions       p  ON p.position_id = dc.position_id
            WHERE s.structure_used IS NULL
-             AND p.realized_pnl IS NOT NULL""",
+             AND {_REAL_CLOSE}""",
     ).fetchall()
     attributed = 0
     for journal_id, realized_pnl, ticker in rows:
@@ -199,13 +226,13 @@ def _attribute_advocate(conn: sqlite3.Connection) -> int:
     stays unmeasurable from fills alone. That is what the shadow book (loop-rebuild step 2) is for.
     """
     rows = conn.execute(
-        """SELECT a.journal_id, a.verdict, p.realized_pnl, a.ticker
+        f"""SELECT a.journal_id, a.verdict, p.realized_pnl, a.ticker
            FROM advocate_journal a
            JOIN decision_chains dc ON dc.chain_id = a.decision_id
            JOIN positions       p  ON p.position_id = dc.position_id
            WHERE a.trade_taken IS NULL
              AND a.verdict IN ('PASS', 'CAUTION', 'BLOCK')
-             AND p.realized_pnl IS NOT NULL""",
+             AND {_REAL_CLOSE}""",
     ).fetchall()
     attributed = 0
     for journal_id, verdict, realized_pnl, ticker in rows:
@@ -258,8 +285,8 @@ def _attribute_vetter(conn: sqlite3.Connection) -> int:
     try:
         pos = []
         for ticker, legs_json, entry_date, pnl in conn.execute(
-            """SELECT ticker, legs_json, entry_date, realized_pnl FROM positions
-               WHERE strategy IN ('long_call','long_put') AND realized_pnl IS NOT NULL"""):
+            f"""SELECT ticker, legs_json, entry_date, realized_pnl FROM positions p
+               WHERE strategy IN ('long_call','long_put') AND {_REAL_CLOSE}"""):
             try:
                 strike = float(json.loads(legs_json)[0]["strike"])
             except Exception:
@@ -425,6 +452,61 @@ def _write_calibration(conn: sqlite3.Connection, agent_name: str,
                        agent_name, avg_pred, actual_wr, gap)
 
 
+# ── Self-healing purge of fabricated attribution ──────────────────────────────
+
+def _purge_fabricated_attribution(conn: sqlite3.Connection) -> dict[str, int]:
+    """Idempotent self-heal. NULL any agent attribution that was written against something that
+    is NOT a genuine agent-driven close. Such rows entered the journals two ways:
+      1. an earlier fuzzy ticker+time matcher that paired journal rows to the wrong (or no) trade;
+      2. the `realized_pnl IS NOT NULL` no-op gate, which let open/reset/sync positions through.
+    Once clean this updates 0 rows each pass (the corrected attributors only write real closes), so
+    it doubles as a continuous regression guard. Advocate BLOCK rows scored from the shadow book
+    (a designed counterfactual, no real position) are explicitly spared."""
+    purged: dict[str, int] = {}
+
+    purged["analyst"] = conn.execute(
+        f"""UPDATE analyst_journal
+            SET thesis_played_out=NULL, magnitude_realized_pct=NULL, confidence_was_calibrated=NULL
+            WHERE thesis_played_out IS NOT NULL
+              AND decision_id NOT IN ({_REAL_CLOSED_CHAINS})""",
+    ).rowcount
+
+    purged["strategy"] = conn.execute(
+        f"""UPDATE strategy_journal
+            SET structure_used=NULL, realized_pnl=NULL
+            WHERE structure_used IS NOT NULL
+              AND decision_id NOT IN ({_REAL_CLOSED_CHAINS})""",
+    ).rowcount
+
+    # Advocate: spare rows legitimately scored from the shadow book (BLOCK counterfactuals never
+    # have a real position by construction).
+    purged["advocate"] = conn.execute(
+        f"""UPDATE advocate_journal
+            SET trade_taken=NULL, realized_pnl=NULL, advocate_was_right=NULL
+            WHERE trade_taken IS NOT NULL
+              AND decision_id NOT IN ({_REAL_CLOSED_CHAINS})
+              AND decision_id NOT IN (
+                  SELECT decision_id FROM shadow_book
+                  WHERE evaluated=1 AND hypothetical_win IS NOT NULL)""",
+    ).rowcount if _table_exists_conn(conn, "shadow_book") else conn.execute(
+        f"""UPDATE advocate_journal
+            SET trade_taken=NULL, realized_pnl=NULL, advocate_was_right=NULL
+            WHERE trade_taken IS NOT NULL
+              AND decision_id NOT IN ({_REAL_CLOSED_CHAINS})""",
+    ).rowcount
+
+    total = sum(purged.values())
+    if total:
+        logger.warning("OutcomeAttributor PURGED fabricated attribution: %s", purged)
+    return purged
+
+
+def _table_exists_conn(conn: sqlite3.Connection, table: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone() is not None
+
+
 # ── Core attribution entry point ──────────────────────────────────────────────
 
 def attribute_closed_trades(db_path: str) -> dict:
@@ -454,6 +536,11 @@ def attribute_closed_trades(db_path: str) -> dict:
         with sqlite3.connect(db_path) as conn:
             if _table_exists(db_path, "exit_journal"):
                 _ensure_exit_journal_quality_cols(conn)
+
+            # Self-heal FIRST: strip any attribution that does not trace to a genuine close, so a
+            # contaminated row from a prior pass (or an earlier code version) cannot survive and
+            # poison calibration/recalibration/value-monitor downstream this same cycle.
+            _purge_fabricated_attribution(conn)
 
             # Analyst / strategy / advocate are attributed by EXACT decision_id join (no fuzzy
             # ticker+time match, no dependence on the leaky chain.realized_pnl) — they self-query.
