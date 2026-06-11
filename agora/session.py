@@ -754,6 +754,12 @@ class AgoraSession:
         # GTC profit-targets can fill while the session is down; this catches them.
         await self._sync_positions_with_tws()
 
+        # Mirror the DB to the broker for 100% TWS↔DB accuracy: close ghost positions (DB-open,
+        # broker-flat) and ADOPT orphan broker positions the fill-based sync above can't see
+        # (it's BAG-only and fill-based; this is position-based and covers single-leg longs too).
+        await self._run_position_heal(reason="startup")
+        asyncio.create_task(self._position_healer_loop())
+
         # Auto-reset kill switch if it was tripped on a prior day (don't carry over daily losses).
         self._maybe_reset_kill_switch()
 
@@ -4065,6 +4071,41 @@ class AgoraSession:
             ibkr_order_id=ibkr_order_id,
         )
         return pos.position_id
+
+    async def _run_position_heal(self, reason: str = "periodic") -> None:
+        """Position-level TWS↔DB reconciliation that HEALS (not just detects): closes ghosts and
+        adopts orphan broker positions so the DB is a faithful mirror of the broker. Runs the
+        sync ib_insync work on a dedicated thread (its own clientId 73) so it never races the
+        execution path. Never raises."""
+        try:
+            from agora.ops.position_reconciler import heal
+            from concurrent.futures import ThreadPoolExecutor
+            if getattr(self, "_heal_executor", None) is None:
+                self._heal_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pos-heal")
+            loop = asyncio.get_event_loop()
+            res = await loop.run_in_executor(
+                self._heal_executor,
+                lambda: heal(str(self._settings.db_path), self._position_mgr,
+                             self._settings.ibkr_host, self._settings.ibkr_port, client_id=73),
+            )
+            if res.get("ghosts_closed") or res.get("orphans_adopted") or res.get("qty_mismatch"):
+                logger.warning("PositionHeal[%s]: closed %d ghost(s), adopted %d orphan(s), "
+                               "%d qty-mismatch", reason, res["ghosts_closed"],
+                               res["orphans_adopted"], res["qty_mismatch"])
+            elif res.get("errors"):
+                logger.debug("PositionHeal[%s] errors: %s", reason, res["errors"])
+        except Exception as exc:
+            logger.debug("PositionHeal[%s] failed: %s", reason, exc)
+
+    async def _position_healer_loop(self) -> None:
+        """Periodic DB↔broker mirror every 5 min, so a mid-session gap never persists."""
+        await asyncio.sleep(300)
+        while True:
+            try:
+                await self._run_position_heal(reason="periodic")
+            except Exception as exc:
+                logger.debug("position healer loop: %s", exc)
+            await asyncio.sleep(300)
 
     async def _sync_positions_with_tws(self) -> None:
         """

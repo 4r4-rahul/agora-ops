@@ -151,6 +151,153 @@ def reconcile(db_path: str, host: str = "127.0.0.1", port: int = 7497,
     return diff(db_legs(db_path), ibk, account=account)
 
 
+def ibkr_positions_detailed(ib: Any) -> dict[Leg, tuple[int, float]]:
+    """Per-leg (signed qty, avgCost per-contract) from the live IBKR account — for adoption."""
+    out: dict[Leg, tuple[int, float]] = {}
+    for p in ib.positions():
+        c = p.contract
+        if getattr(c, "secType", "") != "OPT":
+            continue
+        key: Leg = (
+            c.symbol, getattr(c, "right", "") or "",
+            float(getattr(c, "strike", 0) or 0),
+            _norm_expiry(getattr(c, "lastTradeDateOrContractMonth", "")),
+        )
+        out[key] = (int(p.position), float(getattr(p, "avgCost", 0.0) or 0.0))
+    return out
+
+
+def heal(db_path: str, position_mgr: Any, host: str = "127.0.0.1", port: int = 7497,
+         client_id: int = 73, adopt_orphans: bool = True, close_ghosts: bool = True,
+         ghost_min_age_min: float = 3.0) -> dict:
+    """Make the DB a faithful mirror of the broker (TWS↔DB 100% accuracy):
+
+      • GHOST   (DB position open, none of its legs at the broker) → mark closed in DB.
+                Guarded by ghost_min_age_min so a just-filled entry whose IBKR position stream
+                hasn't arrived yet is never closed prematurely.
+      • ORPHAN  (broker leg with no DB position) → ADOPT into the DB as a tracked position so the
+                engine manages its exit (never silently left unmanaged, never auto-flattened).
+      • QTY_MISMATCH → reported, not auto-mutated (a partial fill needs a human/engine decision).
+
+    Read-mostly on a clean book (no-op). Returns a summary dict. Never raises."""
+    from datetime import date as _date, datetime as _dt, timedelta as _td, timezone as _tz
+    from ib_insync import IB
+    from agora.core.models import (OpenPosition, SpreadLeg, StrategyType,
+                                   StrategyPillar, PositionStatus)
+
+    out = {"ghosts_closed": 0, "orphans_adopted": 0, "qty_mismatch": 0, "errors": []}
+    ib = IB()
+    try:
+        ib.connect(host, port, clientId=client_id, timeout=15)
+        ib.reqPositions()
+        ib.sleep(1.2)
+        ibk = ibkr_legs(ib)                    # signed qty per leg
+        detailed = ibkr_positions_detailed(ib) # qty + avgCost per leg
+    except Exception as exc:
+        out["errors"].append(f"connect/positions: {exc}")
+        try: ib.disconnect()
+        except Exception: pass
+        return out
+
+    try:
+        rep = diff(db_legs(db_path), ibk)
+
+        # ── GHOSTS: close DB positions whose legs are entirely absent at the broker ──
+        if close_ghosts:
+            try:
+                for pos in position_mgr.get_open_positions():
+                    keys = []
+                    for lg in pos.legs:
+                        right = "C" if str(lg.option_type).lower().startswith("c") else "P"
+                        keys.append((pos.ticker, right, float(lg.strike),
+                                     _norm_expiry(lg.expiration.isoformat())))
+                    if any(ibk.get(k, 0) != 0 for k in keys):
+                        continue  # at least one leg still live at broker → not a ghost
+                    # Safety against closing a just-filled entry whose IBKR position stream hasn't
+                    # arrived: reqPositions + the 1.2s settle above means a real fill is already in
+                    # `ibk`; combined with the periodic (not per-fill) cadence, a position absent
+                    # here is genuinely gone from the broker. Close it so the DB mirrors TWS.
+                    position_mgr.mark_position_closed(
+                        position_id=pos.position_id, realized_pnl=0.0, close_price=0.0,
+                        source="reconcile_ghost")
+                    out["ghosts_closed"] += 1
+            except Exception as exc:
+                out["errors"].append(f"ghost-close: {exc}")
+
+        # ── ORPHANS: adopt broker legs that no DB position covers ──
+        if adopt_orphans and rep.orphans:
+            try:
+                groups: dict[tuple[str, str], list[dict]] = {}
+                for o in rep.orphans:
+                    groups.setdefault((o["symbol"], o["expiry"]), []).append(o)
+                for (sym, expiry), legs in groups.items():
+                    adopted = _adopt_group(position_mgr, sym, expiry, legs, detailed,
+                                           OpenPosition, SpreadLeg, StrategyType,
+                                           StrategyPillar, PositionStatus)
+                    if adopted:
+                        out["orphans_adopted"] += 1
+            except Exception as exc:
+                out["errors"].append(f"orphan-adopt: {exc}")
+
+        out["qty_mismatch"] = len(rep.qty_mismatch)
+        if out["ghosts_closed"] or out["orphans_adopted"] or out["qty_mismatch"]:
+            import logging
+            logging.getLogger(__name__).warning(
+                "PositionHealer: closed %d ghost(s), adopted %d orphan(s), %d qty-mismatch%s",
+                out["ghosts_closed"], out["orphans_adopted"], out["qty_mismatch"],
+                f" {rep.qty_mismatch}" if rep.qty_mismatch else "")
+    finally:
+        try: ib.disconnect()
+        except Exception: pass
+    return out
+
+
+def _adopt_group(position_mgr, sym, expiry, legs, detailed, OpenPosition, SpreadLeg,
+                 StrategyType, StrategyPillar, PositionStatus) -> bool:
+    """Build and persist an OpenPosition from orphan broker legs so the engine tracks it."""
+    import uuid
+    from datetime import date as _date, datetime as _dt, timedelta as _td
+    exp_d = _date(int(expiry[:4]), int(expiry[4:6]), int(expiry[6:8]))
+    spread_legs, debit = [], 0.0
+    for o in legs:
+        key = (sym, o["right"], float(o["strike"]), expiry)
+        qty, avg_cost = detailed.get(key, (o["ibkr_qty"], 0.0))
+        action = "buy" if qty > 0 else "sell"
+        per_contract = (avg_cost / 100.0) if avg_cost else 0.0   # IBKR avgCost is per-share×100
+        debit += (per_contract if action == "buy" else -per_contract) * abs(qty)
+        spread_legs.append(SpreadLeg(
+            option_type="call" if o["right"] == "C" else "put",
+            strike=float(o["strike"]), expiration=exp_d, action=action,
+            contracts=abs(int(qty)), mid_price=round(per_contract, 2)))
+    if not spread_legs:
+        return False
+    # Infer strategy + direction conservatively.
+    if len(spread_legs) == 1:
+        lg = spread_legs[0]
+        is_call = lg.option_type == "call"
+        strat = StrategyType.LONG_CALL if is_call else StrategyType.LONG_PUT
+        direction = "bullish" if is_call else "bearish"
+    else:
+        strat = StrategyType.IRON_CONDOR if len(spread_legs) >= 4 else StrategyType.BULL_CALL_SPREAD
+        direction = "neutral"
+    contracts = max((l.contracts for l in spread_legs), default=1)
+    entry_debit = round(abs(debit) * 100, 2) or 1.0
+    pos = OpenPosition(
+        position_id=f"adopt-{uuid.uuid4().hex[:12]}", ticker=sym, strategy=strat,
+        pillar=StrategyPillar.DIRECTIONAL, direction=direction, status=PositionStatus.OPEN,
+        legs=spread_legs, contracts=contracts, entry_price=round(abs(debit), 2),
+        entry_date=_date.today(), expiry_date=exp_d,
+        target_close_date=min(exp_d, _date.today() + _td(days=21)),
+        max_loss_dollars=entry_debit, max_gain_dollars=entry_debit * 3,
+        notes="ADOPTED by position reconciler (broker leg untracked in DB)")
+    position_mgr.add_position(pos)
+    import logging
+    logging.getLogger(__name__).warning(
+        "PositionHealer ADOPTED %s %s %dx (%s) — was an untracked broker position",
+        sym, strat.value, contracts, expiry)
+    return True
+
+
 def format_report(rep: ReconcileReport) -> str:
     lines = [f"Reconciliation — account {rep.account or '?'} — "
              f"{'CLEAN ✓' if rep.clean else 'DIVERGENCE ✗'}"]
