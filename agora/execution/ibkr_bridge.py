@@ -176,7 +176,16 @@ async def submit_trade(rec: Any, settings: Any, session_id: str) -> dict:
     #     fill fine as a BAG and atomicity avoids a naked-short leg gap; live accounts allow
     #     riskless combos.
     is_credit = entry_per_share < 0
-    if settings.trading_mode == "paper" and is_credit:
+    is_single_leg = len(getattr(rec, "legs", []) or []) == 1
+    if is_single_leg:
+        # A single long leg (long_call/long_put) must NOT be wrapped in a BAG combo: IBKR cannot
+        # MODIFY a combo order via re-place, so the reprice walk was rejected with Error 103
+        # ("Duplicate order id") on every long-option entry — freezing fills at 0%. Adaptive is
+        # also silently ignored on BAGs. Native single-leg orders are repriceable and fill.
+        fn = place_legs_individually
+        logger.info("Single-leg %s %s → native leg order (BAG combos can't be repriced; Error 103)",
+                    rec.ticker, getattr(rec.strategy, "value", rec.strategy))
+    elif settings.trading_mode == "paper" and is_credit:
         fn = place_legs_individually
         logger.info("PAPER credit spread %s → leg-by-leg (avoids riskless-combo Error 201)", rec.ticker)
     else:
