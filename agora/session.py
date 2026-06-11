@@ -1117,11 +1117,22 @@ class AgoraSession:
                 except Exception:
                     return fallback
 
-            # Run blocking yfinance calls in thread so the event loop stays free.
-            vix, vix3m = await asyncio.gather(
-                asyncio.to_thread(_fast_price, "^VIX",  20.0),
-                asyncio.to_thread(_fast_price, "^VIX3M", 20.0),
-            )
+            # Run blocking yfinance calls in thread so the event loop stays free, AND bound the
+            # wait: yf.fast_info has no timeout and was observed hanging ~70s, which stalled the
+            # scan heartbeat long enough for the watchdog to kill+restart the engine. Cap at 8s
+            # and fall back to the last-known VIX (or 20) so a slow quote can never trigger a churn.
+            try:
+                vix, vix3m = await asyncio.wait_for(
+                    asyncio.gather(
+                        asyncio.to_thread(_fast_price, "^VIX",  20.0),
+                        asyncio.to_thread(_fast_price, "^VIX3M", 20.0),
+                    ),
+                    timeout=8.0,
+                )
+            except asyncio.TimeoutError:
+                vix   = float(getattr(self, "_last_macro_vix", 0.0) or 20.0)
+                vix3m = vix
+                logger.warning("Macro VIX fetch >8s — using last-known VIX=%.2f (avoids heartbeat stall)", vix)
             logger.info("Macro VIX fetch: %.1fs | VIX=%.2f VIX3M=%.2f", _t.monotonic()-_scan_start, vix, vix3m)
             spy_info = {}  # no longer needed for price; snapshot covers it
 

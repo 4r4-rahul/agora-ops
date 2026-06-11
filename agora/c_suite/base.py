@@ -450,14 +450,23 @@ class ExecutiveAgent:
         WRITE (1.25x) with zero reads, i.e. caching made these strictly more expensive.
         """
         _model = model or self._settings.claude_brief_model
+        # Adaptive thinking + the effort param are only valid on Opus 4.6+/Sonnet 4.6/Fable. The
+        # brief tier (Haiku) and older Sonnets reject BOTH with HTTP 400 ("adaptive thinking is not
+        # supported on this model") — which silently failed every C-suite synthesis. Send those
+        # params only for models that support them; Haiku runs fine without them.
+        _ml = _model.lower()
+        _supports = ("opus-4" in _ml) or ("sonnet-4-6" in _ml) or ("fable" in _ml)
+        _extra: dict[str, Any] = {}
+        if _supports:
+            _extra["thinking"] = {"type": "adaptive"}
+            _extra["output_config"] = {"effort": effort}
         try:
             async with self._client.messages.stream(
                 model=_model,
                 max_tokens=1024,
-                thinking={"type": "adaptive"},
                 system=self._system_prompt,
                 messages=[{"role": "user", "content": prompt}],
-                output_config={"effort": effort},
+                **_extra,
             ) as stream:
                 msg = await stream.get_final_message()
             if hasattr(msg, "usage"):
