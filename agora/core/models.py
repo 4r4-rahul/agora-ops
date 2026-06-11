@@ -203,6 +203,9 @@ class TradeRecommendation(BaseModel):
     # Quantified macro-event (FOMC/CPI/NFP) context set by the surgical event gate and read
     # by the advocate, so it reasons on real event/days/expected-move instead of assumptions.
     event_mitigation: str = ""
+    # Entry IVR, set on long-options recs so the advocate can recognise a low-IVR long-vega single
+    # leg (where "IV crush" is the wrong risk). Optional field — BaseModel forbids ad-hoc attrs.
+    entry_ivr: float = 0.0
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 
 
