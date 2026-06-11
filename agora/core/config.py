@@ -566,6 +566,16 @@ class AgoraSettings(BaseSettings):
                     "Score 2 = 2 confirming signals; 3+ = high conviction.",
         ge=1, le=5,
     )
+    long_options_vetter_overrides_advocate: bool = Field(
+        default=True,
+        description="For LONG options, a PROCEED from the purpose-built Opus vetter overrides a "
+                    "BLOCK from the general (spread-calibrated) advocate. The advocate blocked "
+                    "100% of longs (55/55), ~62% on debit-spread IV-crush logic that is backwards "
+                    "for low-IVR long-vega single legs; letting it veto the Opus vetter was a SPOF. "
+                    "When the vetter has NOT ruled (score-2, or vetter unavailable) the advocate "
+                    "block still stands — this only resolves the vetter-PROCEED-vs-advocate-BLOCK "
+                    "conflict in favor of the long-specific authority.",
+    )
     long_options_counter_trend_flow_damp: bool = Field(
         default=True,
         description="Damp options-flow by 1 weight when it OPPOSES a confirmed price trend (bullish "

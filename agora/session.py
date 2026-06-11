@@ -1714,6 +1714,12 @@ class AgoraSession:
                     return
 
                 rec = decision.recommendation
+                # Carry the entry IVR onto the rec so the advocate can recognise a low-IVR
+                # long-vega single leg (where "IV crush" is the wrong risk to flag HIGH).
+                try:
+                    rec.entry_ivr = float(decision.per_ticker_ivr or decision.ivr or 0.0)
+                except Exception:
+                    rec.entry_ivr = 0.0
                 # Shared heavy gates — long options now faces the same review as the main
                 # (spread) pipeline: timing / kill-switch / macro-cal / compliance / risk
                 # council / correlation / devils-advocate / LLM advocate.
@@ -3424,9 +3430,20 @@ class AgoraSession:
                     logger.warning("LongOptions BLOCKED (fail-closed): advocate unavailable [%s]", ticker)
                     return False
             if verdict is not None and live and verdict.is_block:
-                logger.info("LongOptions BLOCKED by advocate [%s]: %s",
-                            ticker, (verdict.verdict_reasoning or "")[:80])
-                return False
+                # The general advocate is spread-calibrated and blocks ~100% of longs (62% on
+                # debit IV-crush logic that's backwards for low-IVR long-vega single legs). When
+                # the purpose-built Opus vetter has independently PROCEEDed, it is the better judge
+                # for this instrument — its approval overrides the advocate BLOCK. Without a vetter
+                # opinion (score-2, or vetter unavailable) the advocate block still stands.
+                if vetter_approved and getattr(
+                        self._settings, "long_options_vetter_overrides_advocate", True):
+                    logger.info("LongOptions advocate BLOCK OVERRIDDEN by vetter PROCEED [%s]: %s",
+                                ticker, (verdict.verdict_reasoning or "")[:70])
+                else:
+                    logger.info("LongOptions BLOCKED by advocate [%s]%s: %s",
+                                ticker, "" if vetter_approved else " (no vetter opinion)",
+                                (verdict.verdict_reasoning or "")[:80])
+                    return False
         return True
 
     # ── Execution stubs (wired to IBKR in live mode) ──────────────

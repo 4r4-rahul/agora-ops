@@ -169,12 +169,6 @@ When strategy_type is BULL_PUT_SPREAD, BEAR_CALL_SPREAD, or IRON_CONDOR, the R/R
   • Credit collected < 8% of spread width (degenerate structure, e.g. $0.40 on $10-wide spread)
 For these structures, evaluate the trade on probability-of-profit, expected value (credit × POP - max_loss × (1-POP)), and DTE-theta match, not on raw risk:reward ratio.
 
-ITM DIRECTIONAL DEBIT — MANDATORY CALIBRATION:
-This applies ONLY to a single-leg long debit (LONG_CALL / LONG_PUT) whose leg is deep in-the-money: |delta| >= 0.70. Such premium is mostly INTRINSIC and largely vega-immune.
-  • Do NOT flag "IV crush kills debit" or "overpaying for direction in high vol" at HIGH severity for these — an IV crush hits only the small extrinsic sleeve (an ~0.80-delta put loses ~5-7% to a vol crush vs ~35% for an ATM debit). Judge it on the DIRECTIONAL thesis and the underlying move required, not on the IV level.
-  • INSTEAD scrutinize these ITM-specific risks (any can be HIGH): (1) REVERSAL/NOTIONAL — |delta| 0.70-0.85 moves ~1:1 with a large notional, so a counter-trend bounce loses fast; treat buying into an already-extended/oversold move (e.g. a put when RSI<35, or a call when RSI>65) as HIGH. (2) FILL QUALITY — deep-ITM strikes have wider bid-ask / lower OI; if bid-ask > 10% of mid or OI is thin, slippage erases the directional edge (HIGH). (3) DOLLARS-AT-RISK — max loss is the full (large) premium; size must be small.
-  • An ATM/OTM debit (|delta| < 0.55) keeps the FULL normal IV-crush scrutiny — do NOT relax it there.
-
 DTE CALIBRATION — MANDATORY:
 The payload includes "today_date" and each leg includes "dte" (days to expiry, pre-computed). USE THESE FIELDS — do not compute DTE yourself. Common target DTE for credit spreads is 30-60 days.
 
@@ -349,6 +343,10 @@ class AdvocateAgent:
             )
             verdict = _parse_verdict(raw_output)
 
+            # Structure-aware GATE — for a low-IVR single LONG, neutralize misapplied debit-spread
+            # "IV crush" failure modes (long vega: little IV to crush, expansion helps) and recompute.
+            verdict = self._apply_long_structure_filter(raw_output, recommendation, _kill_conditions, ticker)
+
             # Fact-grounding GATE — verify the advocate's stated event claims against the macro
             # calendar and, if it fabricated an imminent event (the "FOMC tomorrow" class), strip
             # the failure mode(s) built on that lie and recompute the verdict. A BLOCK manufactured
@@ -404,6 +402,7 @@ class AdvocateAgent:
                     raw_output.get("failure_modes", []), _kill_conditions,
                 )
                 verdict = _parse_verdict(raw_output)
+                verdict = self._apply_long_structure_filter(raw_output, recommendation, _kill_conditions, ticker)
                 verdict = self._apply_fact_gate(raw_output, verdict, _kill_conditions, ticker)
                 self._write_journal(
                     decision_id, ticker, verdict, raw_output,
@@ -420,6 +419,64 @@ class AdvocateAgent:
                                     0, 0, 0.0, latency_ms)
 
         return verdict
+
+    def _macro_event_within(self, days: int) -> bool:
+        """True if a major scheduled macro vol event (FOMC/CPI/NFP) is within `days`. On any
+        calendar failure returns True (conservative — keep the IV-crush concern)."""
+        try:
+            from trading_platform.services.macro_calendar import get_macro_calendar
+            nd, _ = get_macro_calendar().days_to_next_event()
+            return nd is not None and nd <= days
+        except Exception:
+            return True
+
+    def _apply_long_structure_filter(self, raw_output: dict, recommendation: Any,
+                                     kill_conditions: list, ticker: str) -> "AdvocateVerdict":
+        """For a LOW-IVR single LONG (long_call/long_put bought in the long-vega zone), an
+        "IV crush" / vega-collapse / debit-mispricing failure mode is the spread trader's reflex
+        misapplied: there is little IV to crush and IV EXPANSION helps the position. The
+        spread-calibrated advocate blocked ~62% of longs on exactly this mode. Drop such HIGH
+        modes and recompute the deterministic verdict — UNLESS a major macro vol event is imminent
+        (<=2d), where a real crush can occur (keep it then). Only ever relaxes; never raises risk.
+        Never raises — a guardrail must not break the path it guards."""
+        try:
+            _strat = getattr(recommendation, "strategy", None)
+            strat = str(getattr(_strat, "value", _strat) or "").lower()
+            if strat not in ("long_call", "long_put"):
+                return _parse_verdict(raw_output)
+            ivr = float(getattr(recommendation, "entry_ivr", 0.0) or 0.0)
+            # ivr<=0 means it wasn't plumbed (unknown) — skip rather than guess. >50 = genuinely
+            # elevated, where IV crush IS a real risk; keep the mode.
+            if ivr <= 0 or ivr > 50:
+                return _parse_verdict(raw_output)
+            if self._macro_event_within(2):
+                return _parse_verdict(raw_output)
+            modes = raw_output.get("failure_modes") or []
+            _IVK = ("iv crush", "iv-crush", "vega", "volatility crush", "vol crush",
+                    "iv collapse", "debit mispric", "premium decay", "premium collapse")
+            kept, removed = [], []
+            for fm in modes:
+                if not isinstance(fm, dict):
+                    kept.append(fm); continue
+                blob = (str(fm.get("mode_name", "")) + " " + str(fm.get("mechanism", "")) + " "
+                        + str(fm.get("trigger_conditions", ""))).lower()
+                if fm.get("severity") == "HIGH" and any(k in blob for k in _IVK):
+                    removed.append(str(fm.get("mode_name", "?")))
+                else:
+                    kept.append(fm)
+            if not removed:
+                return _parse_verdict(raw_output)
+            regrounded = _compute_verdict(kept, kill_conditions)
+            if regrounded != raw_output.get("verdict"):
+                logger.info("Advocate STRUCTURE-GATE [%s]: %s → %s — dropped misapplied IV-crush "
+                            "mode(s) on low-IVR(%.0f) %s: %s", ticker, raw_output.get("verdict"),
+                            regrounded, ivr, strat, removed)
+                raw_output["verdict"] = regrounded
+                raw_output["structure_gate"] = {"removed_modes": removed, "ivr": round(ivr, 1)}
+            return _parse_verdict(raw_output)
+        except Exception as exc:
+            logger.debug("advocate structure-gate skipped [%s]: %s", ticker, exc)
+            return _parse_verdict(raw_output)
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
