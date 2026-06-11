@@ -786,6 +786,7 @@ async def place_legs_individually(
     price_step_size: float = 0.05,
     use_adaptive_algo: bool = False,
     adaptive_algo_priority: str = "Normal",
+    adaptive_single_leg: bool = False,
     market_data_type: int = 3,
     max_combo_spread_pct: float = 0.50,
     pricing_sanity_max_ratio: float = 2.0,
@@ -951,7 +952,15 @@ async def place_legs_individually(
             o.orderRef = f"{session_id[:35]}-L{i}"
             o.tif = "DAY"
             o.transmit = True
+            # Single-leg orders (long_call/long_put) are NATIVE option orders, where the Adaptive
+            # algo IS valid (it is silently ignored on BAG combos). It fills server-side within the
+            # limit even without a client market-data sub — lifting fill rate above the walk-LMT
+            # alone. Scoped to single legs: a multi-leg credit spread keeps the proven walk only,
+            # so leg-in timing/atomicity is unchanged.
+            if adaptive_single_leg and len(qualified) == 1:
+                _apply_adaptive_algo(o, adaptive_algo_priority)
             trades[i] = ib.placeOrder(contract, o)
+            _bump_orderid_hw(trades[i].order.orderId)
             orders[i] = o
             logger.info("[%s] Leg %d/%d submitted — %s %s %.0f %s @ %.2f (natural %.2f)",
                         session_id, i + 1, len(legs), ls["action"].upper(), ticker,

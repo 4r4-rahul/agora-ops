@@ -281,6 +281,14 @@ class AgoraSettings(BaseSettings):
                     "i.e. single-leg routing): Urgent (fastest fill, worst price), Normal "
                     "(balanced), Patient (best price, slowest).",
     )
+    use_adaptive_single_leg: bool = Field(
+        default=True,
+        description="Attach the Adaptive algo to SINGLE-LEG native orders (long_call/long_put), "
+                    "where it IS valid (unlike BAG combos — see use_adaptive_algo). The walk-LMT "
+                    "alone fills poorly on a paper account with no market-data sub (~13%); Adaptive "
+                    "fills server-side within the limit. Scoped to single legs ONLY — the combo "
+                    "repricing walk is untouched. Safe to leave ON; set OFF to revert to walk-only.",
+    )
     max_slippage_pct_of_width: float = Field(
         default=0.10,
         description="Repricing-walk slippage budget as a fraction of the spread's strike WIDTH. "

@@ -183,8 +183,10 @@ async def submit_trade(rec: Any, settings: Any, session_id: str) -> dict:
         # ("Duplicate order id") on every long-option entry — freezing fills at 0%. Adaptive is
         # also silently ignored on BAGs. Native single-leg orders are repriceable and fill.
         fn = place_legs_individually
-        logger.info("Single-leg %s %s → native leg order (BAG combos can't be repriced; Error 103)",
-                    rec.ticker, getattr(rec.strategy, "value", rec.strategy))
+        kwargs["adaptive_single_leg"] = getattr(settings, "use_adaptive_single_leg", True)
+        logger.info("Single-leg %s %s → native leg order + Adaptive=%s (BAG can't reprice; Error 103)",
+                    rec.ticker, getattr(rec.strategy, "value", rec.strategy),
+                    kwargs["adaptive_single_leg"])
     elif settings.trading_mode == "paper" and is_credit:
         fn = place_legs_individually
         logger.info("PAPER credit spread %s → leg-by-leg (avoids riskless-combo Error 201)", rec.ticker)
