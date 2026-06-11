@@ -21,11 +21,59 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import os
 import uuid
 from datetime import date, timedelta
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# ── Order-id high-water mark (Error 103 "Duplicate order id" guard) ──────────────
+# The execution path opens a FRESH IB() connection per call (see _connect_ibkr). After rapid
+# reconnects (e.g. a restart churn), IBKR's nextValidId for a clientId can lag the highest id it
+# actually consumed, so a new connection re-issues a used id and IBKR rejects with Error 103 —
+# which cancelled every entry walk and froze fills at 0%. We persist the highest order id we've
+# ever placed and floor each connection's ib_insync sequence above it, guaranteeing strictly
+# increasing, collision-free ids across per-call connections AND across restarts.
+_ORDERID_HW_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "..", ".agora", ".orderid_highwater")
+_orderid_hw: int | None = None
+
+
+def _load_orderid_hw() -> int:
+    global _orderid_hw
+    if _orderid_hw is None:
+        try:
+            with open(_ORDERID_HW_PATH) as f:
+                _orderid_hw = int((f.read().strip() or "0"))
+        except Exception:
+            _orderid_hw = 0
+    return _orderid_hw
+
+
+def _bump_orderid_hw(used: int) -> None:
+    """Record the highest order id actually placed (persisted, single-executor-thread safe)."""
+    global _orderid_hw
+    if used and used > _load_orderid_hw():
+        _orderid_hw = used
+        try:
+            os.makedirs(os.path.dirname(_ORDERID_HW_PATH), exist_ok=True)
+            with open(_ORDERID_HW_PATH, "w") as f:
+                f.write(str(used))
+        except Exception as exc:
+            logger.debug("orderid high-water persist failed: %s", exc)
+
+
+def _floor_order_sequence(ib: Any) -> None:
+    """Floor ib_insync's req/order-id sequence above our persisted high-water so a stale
+    nextValidId from IBKR can't re-issue a consumed order id (Error 103)."""
+    try:
+        floor = _load_orderid_hw() + 1
+        cur = getattr(ib.client, "_reqIdSeq", 0) or 0
+        if floor > cur:
+            ib.client._reqIdSeq = floor
+    except Exception as exc:
+        logger.debug("order-id floor skipped: %s", exc)
 
 try:
     from ib_insync import IB, Option, Contract, ComboLeg, LimitOrder, StopOrder, Order, TagValue
@@ -224,6 +272,7 @@ async def _connect_ibkr(
     """
     await ib.connectAsync(host, port, clientId=client_id, timeout=timeout)
     _attach_error_monitor(ib, session_id)
+    _floor_order_sequence(ib)   # Error-103 guard: never re-issue a consumed order id
     if market_data_type is not None:
         try:
             ib.reqMarketDataType(market_data_type)
@@ -539,6 +588,7 @@ async def place_bracket_order(
 
         entry_trade = ib.placeOrder(bag, entry_order)
         parent_id = entry_trade.order.orderId
+        _bump_orderid_hw(parent_id)   # persist high-water so reconnects don't re-issue this id
 
         # Net combo fill price (per share) — a BAG reports one execution PER LEG (and may
         # report several per leg on a multi-contract fill). Average each leg by share volume,
@@ -1120,6 +1170,7 @@ async def close_position(
             close_order.orderType = "MKT"   # no usable quote — guarantee the exit
 
         trade = ib.placeOrder(bag, close_order)
+        _bump_orderid_hw(trade.order.orderId)
         logger.info(
             "[%s] Close order submitted — orderId=%d %s",
             session_id, trade.order.orderId,
