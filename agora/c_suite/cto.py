@@ -353,11 +353,17 @@ class CTOAgent(ExecutiveAgent):
                 pass
 
             # ── 21 DTE rule (pre-delegated authority) ──
+            # SPREADS ONLY. Long options (long_call/long_put) are bought at 15-30 DTE BY DESIGN and
+            # run their own 5-day-hold exit logic (time stop / conviction profit target / trailing
+            # stop) in PositionManager — applying the spread 21-DTE rule to them force-closes a
+            # fresh long the moment it opens (observed: TSLA/SCHW/QQQ closed ~30 min after entry),
+            # silently undoing the long-options strategy. Skip them here.
             try:
+                _strat = str(getattr(p.strategy, "value", p.strategy) or "").lower()
                 expiry = p.expiry_date if isinstance(p.expiry_date, _date) \
                     else _date.fromisoformat(str(p.expiry_date))
                 dte = (expiry - today).days
-                if dte <= 21:
+                if _strat not in ("long_call", "long_put") and dte <= 21:
                     reason = f"21_dte_{dte}DTE"
                     logger.info("CTO auto-close: %s at %d DTE — closing", p.ticker, dte)
                     await self._close_cb(p, reason)
