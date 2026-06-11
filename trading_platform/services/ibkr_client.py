@@ -941,6 +941,14 @@ async def place_legs_individually(
         trades: list = [None] * len(qualified)
         orders: list = [None] * len(qualified)
         limits = list(leg_mid)
+        # Single-leg Adaptive: start AT the marketable cross (ask+buffer), not mid. Adaptive only
+        # improves WITHIN the limit — at mid it can't cross a market above mid, which is why a
+        # mid-capped Adaptive order sat unfilled and cancelled. Starting at the cross lets IBKR's
+        # server-side Adaptive fill immediately at a fair price ≤ the limit, and the walk then finds
+        # itself already at the cross so it never modifies (mirrors the proven flatten pattern).
+        # Multi-leg credit spreads keep limits=leg_mid + the walk, unchanged.
+        if adaptive_single_leg and len(qualified) == 1:
+            limits = list(leg_cross)
         long_idx  = [i for i, (ls, _) in enumerate(qualified) if ls["action"].upper() == "BUY"]
         short_idx = [i for i, (ls, _) in enumerate(qualified) if ls["action"].upper() == "SELL"]
 

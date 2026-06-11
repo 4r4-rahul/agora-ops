@@ -347,13 +347,19 @@ async def close_trade(pos: Any, settings: Any, session_id: str) -> dict:
     # riskless-combo Error 201 as a BAG and strand the position. Close those leg-by-leg
     # (market orders). Debit spreads + all live closes use the atomic BAG.
     strat = str(getattr(pos.strategy, "value", pos.strategy)).lower()
+    is_single_leg = len(getattr(pos, "legs", []) or []) == 1
     is_credit = strat in _CREDIT_STRATEGIES
+    # A SINGLE-LEG long option (long_call/long_put) must close via the native leg path, NOT a BAG:
+    # a 1-leg BAG close re-creates the same combo that IBKR can't modify (Error 103) and strands
+    # the position — exactly the failure the single-leg ENTRY routing fixed. So entries AND exits
+    # now agree. Paper credit spreads also close leg-by-leg (riskless-combo 201). Debit spreads +
+    # all live closes use the atomic BAG.
     close_fn = (close_position_legs
-                if (settings.trading_mode == "paper" and is_credit)
+                if (is_single_leg or (settings.trading_mode == "paper" and is_credit))
                 else close_position)
     if close_fn is close_position_legs:
-        logger.info("PAPER credit close %s (%s) → leg-by-leg MKT (avoids riskless-combo 201)",
-                    pos.ticker, strat)
+        logger.info("Close %s (%s) → leg-by-leg native (%s)", pos.ticker, strat,
+                    "single-leg long" if is_single_leg else "paper credit")
 
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(
