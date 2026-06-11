@@ -4082,20 +4082,34 @@ class AgoraSession:
             from concurrent.futures import ThreadPoolExecutor
             if getattr(self, "_heal_executor", None) is None:
                 self._heal_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pos-heal")
+
+            def _heal_in_thread() -> dict:
+                # heal() uses SYNC ib_insync (ib.connect/ib.sleep), which needs an event loop in
+                # THIS thread. A bare executor thread has none → ib.connect raised and the healer
+                # silently no-op'd (MP orphan persisted 40+ min). Give the thread its own loop.
+                import asyncio as _a
+                _loop = _a.new_event_loop()
+                _a.set_event_loop(_loop)
+                try:
+                    return heal(str(self._settings.db_path), self._position_mgr,
+                                self._settings.ibkr_host, self._settings.ibkr_port, client_id=73)
+                finally:
+                    try:
+                        _loop.close()
+                    except Exception:
+                        pass
+                    _a.set_event_loop(None)
+
             loop = asyncio.get_event_loop()
-            res = await loop.run_in_executor(
-                self._heal_executor,
-                lambda: heal(str(self._settings.db_path), self._position_mgr,
-                             self._settings.ibkr_host, self._settings.ibkr_port, client_id=73),
-            )
+            res = await loop.run_in_executor(self._heal_executor, _heal_in_thread)
             if res.get("ghosts_closed") or res.get("orphans_adopted") or res.get("qty_mismatch"):
                 logger.warning("PositionHeal[%s]: closed %d ghost(s), adopted %d orphan(s), "
                                "%d qty-mismatch", reason, res["ghosts_closed"],
                                res["orphans_adopted"], res["qty_mismatch"])
             elif res.get("errors"):
-                logger.debug("PositionHeal[%s] errors: %s", reason, res["errors"])
+                logger.warning("PositionHeal[%s] errors: %s", reason, res["errors"])
         except Exception as exc:
-            logger.debug("PositionHeal[%s] failed: %s", reason, exc)
+            logger.warning("PositionHeal[%s] failed: %s", reason, exc)
 
     async def _position_healer_loop(self) -> None:
         """Periodic DB↔broker mirror every 5 min, so a mid-session gap never persists."""
