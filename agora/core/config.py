@@ -566,6 +566,23 @@ class AgoraSettings(BaseSettings):
                     "Score 2 = 2 confirming signals; 3+ = high conviction.",
         ge=1, le=5,
     )
+    long_options_counter_trend_flow_damp: bool = Field(
+        default=True,
+        description="Damp options-flow by 1 weight when it OPPOSES a confirmed price trend (bullish "
+                    "dip-buying flow in a downtrend, or bearish flow in an uptrend). Flow is the "
+                    "highest-weight signal; counter-trend call-sweeps on collapsing names (819 "
+                    "bullish vs 107 bearish flow in a bear week) were canceling genuine bearish "
+                    "momentum+rel_strength, capping bears at score-2 and blocking puts. Symmetric "
+                    "(both directions) so it is a regime-consistency rule, not a bear-week patch.",
+    )
+    long_options_rsi_capitulation_floor: int = Field(
+        default=18, ge=5, le=28,
+        description="In a CONFIRMED downtrend (below both SMAs + 10d underperformance), a put is "
+                    "blocked only below this RSI (true capitulation), not at the normal oversold "
+                    "line. Oversold can stay oversold in a real trend; the standard filter vetoed "
+                    "357 trend-confirmed puts in one bear week. Counter-trend puts keep the normal "
+                    "oversold veto. Symmetric ceiling for calls = 100 - this.",
+    )
     long_options_score2_min_signal_winrate: float = Field(
         default=0.35, ge=0.0, le=0.6,
         description="Deterministic auto-skip floor for minimum-conviction (score-2) longs: if the "

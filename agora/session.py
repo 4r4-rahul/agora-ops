@@ -1583,7 +1583,12 @@ class AgoraSession:
                     gex_data   = await asyncio.wait_for(
                         asyncio.to_thread(get_gex, ticker), timeout=5.0
                     )
-                    gex_regime = str(getattr(gex_data, "regime", "neutral") or "neutral")
+                    # get_gex returns a dict — getattr(dict,"regime") ALWAYS missed and silently
+                    # defaulted to "neutral", so the GEX amplifier was dead code for every long
+                    # (0 'negative' rows in 9k+). In a selloff dealers are short gamma → negative
+                    # GEX → +1 to the dominant (bearish) side. Read the dict key like the spread
+                    # path does (session.py ~2303).
+                    gex_regime = str((gex_data or {}).get("regime", "neutral") or "neutral")
                 except Exception:
                     pass
 

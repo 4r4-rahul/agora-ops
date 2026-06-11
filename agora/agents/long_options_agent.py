@@ -414,6 +414,8 @@ class LongOptionsAgent:
             macro_context, flow_signals, momentum, gex_regime, rsi_ob, rsi_os, min_conv,
             news_flag=_news_flag, signal_perf=signal_perf,
             score2_floor=getattr(self._settings, "long_options_score2_min_signal_winrate", 0.0),
+            rsi_capitulation_floor=getattr(self._settings, "long_options_rsi_capitulation_floor", 0),
+            counter_trend_flow_damp=getattr(self._settings, "long_options_counter_trend_flow_damp", False),
         )
         if _is_drift and direction is not None:
             signal_stack["pre_earnings_drift"] = f"floor→1(dtc={days_to_catalyst}d,rs={_ret_10d:.1%})"
@@ -699,6 +701,8 @@ class LongOptionsAgent:
         news_flag:      str | None = None,
         signal_perf:    dict | None = None,
         score2_floor:   float = 0.0,
+        rsi_capitulation_floor: int = 0,   # 0 = disabled (plain oversold/overbought veto)
+        counter_trend_flow_damp: bool = False,
     ) -> tuple[str | None, StrategyType | None, dict, int, str, float]:
         """
         Returns (direction, strategy, signal_stack, net_score, flow_dir, quality_score).
@@ -746,6 +750,14 @@ class LongOptionsAgent:
                 return ""
             return f"[{rec[0]*100:.0f}%/{rec[1]}]"
 
+        # Price-action trend, computed up front so flow can be made trend-aware. A "confirmed"
+        # trend needs BOTH SMAs and the 10d return to agree — the same bar the RSI carve-out uses.
+        _t_sma20 = momentum.get("above_sma20", False)
+        _t_sma50 = momentum.get("above_sma50", False)
+        _t_ret10 = momentum.get("ret_10d", 0.0)
+        _trend_down = (not _t_sma20) and (not _t_sma50) and _t_ret10 < -0.03
+        _trend_up   = _t_sma20 and _t_sma50 and _t_ret10 > 0.03
+
         # ── Flow signals (highest weight) ─────────────────────────────────────
         flow_dir = "neutral"
         if flow_signals:
@@ -754,14 +766,22 @@ class LongOptionsAgent:
             sweep_count = len(sweeps)
             weight = 2 if sweep_count > 0 else 1
             q_flow = 2.0 if sweep_count > 0 else 1.0
+            # Counter-trend damp: dip-buying flow that fights a confirmed trend gets 1 less weight
+            # (sweep 2→1, non-sweep 1→0) so it can't cancel genuine trend signals. Symmetric.
+            _counter = counter_trend_flow_damp and (
+                (flow_dir == "bullish" and _trend_down) or (flow_dir == "bearish" and _trend_up))
+            if _counter:
+                weight = max(0, weight - 1)
+                q_flow = max(0.0, q_flow - 1.0)
+            _ct_tag = "(counter-trend-damped)" if _counter else ""
             if flow_dir == "bullish":
                 bull += weight
                 qual_bull += q_flow * _pm("flow", "bullish")
-                stack["flow"] = f"bullish+{weight}{'(sweep)' if sweep_count > 0 else ''}{_wtag('flow','bullish')}"
+                stack["flow"] = f"bullish+{weight}{'(sweep)' if sweep_count > 0 else ''}{_ct_tag}{_wtag('flow','bullish')}"
             elif flow_dir == "bearish":
                 bear += weight
                 qual_bear += q_flow * _pm("flow", "bearish")
-                stack["flow"] = f"bearish+{weight}{'(sweep)' if sweep_count > 0 else ''}{_wtag('flow','bearish')}"
+                stack["flow"] = f"bearish+{weight}{'(sweep)' if sweep_count > 0 else ''}{_ct_tag}{_wtag('flow','bearish')}"
             else:
                 stack["flow"] = "neutral"
 
@@ -859,10 +879,21 @@ class LongOptionsAgent:
         else:
             stack["macro"] = stance
 
-        # ── RSI extremes filter ───────────────────────────────────────────────
+        # ── RSI extremes filter (trend-aware) ─────────────────────────────────
+        # The blanket oversold/overbought veto is a MEAN-REVERSION rule; applied to a
+        # trend-following swing book it killed exactly the strongest-trend entries (357
+        # trend-confirmed puts vetoed in one bear week). Carve-out: in a CONFIRMED trend
+        # (price below/above BOTH SMAs + 10d under/out-performance) the extreme is trend
+        # CONFIRMATION, so only veto on true capitulation/blow-off; counter-trend entries
+        # keep the normal bounce veto. Symmetric for both sides — not a bear-week patch.
+        _confirmed_down = (not sma20_ok) and (not sma50_ok) and ret_10d < -0.03
+        _confirmed_up   = sma20_ok and sma50_ok and ret_10d > 0.03
+        _cap = rsi_capitulation_floor if rsi_capitulation_floor > 0 else 0
         if bull >= min_conviction and bull > bear:
-            if rsi > rsi_overbought:
-                stack["rsi_filter"] = f"BLOCK_CALL(RSI={rsi:.0f}>{rsi_overbought})"
+            _call_ceiling = (100 - _cap) if (_cap and _confirmed_up) else rsi_overbought
+            if rsi > _call_ceiling:
+                _tag = "[blowoff]" if _call_ceiling != rsi_overbought else ""
+                stack["rsi_filter"] = f"BLOCK_CALL(RSI={rsi:.0f}>{_call_ceiling}{_tag})"
                 return None, None, stack, bull, flow_dir, qual_bull
             if bull <= 2 and (_dom := LongOptionsAgent._score2_dominant_loser(
                     "bullish", stack, signal_perf, score2_floor)):
@@ -870,8 +901,10 @@ class LongOptionsAgent:
                 return None, None, stack, bull, flow_dir, qual_bull
             return "bullish", StrategyType.LONG_CALL, stack, bull, flow_dir, qual_bull
         if bear >= min_conviction and bear > bull:
-            if rsi < rsi_oversold:
-                stack["rsi_filter"] = f"BLOCK_PUT(RSI={rsi:.0f}<{rsi_oversold})"
+            _put_floor = _cap if (_cap and _confirmed_down) else rsi_oversold
+            if rsi < _put_floor:
+                _tag = "[capit]" if _put_floor != rsi_oversold else ""
+                stack["rsi_filter"] = f"BLOCK_PUT(RSI={rsi:.0f}<{_put_floor}{_tag})"
                 return None, None, stack, bear, flow_dir, qual_bear
             if bear <= 2 and (_dom := LongOptionsAgent._score2_dominant_loser(
                     "bearish", stack, signal_perf, score2_floor)):
