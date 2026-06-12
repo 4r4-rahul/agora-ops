@@ -600,7 +600,7 @@ async def place_bracket_order(
             for ls, c in qualified_legs
         }
 
-        def _net_fill_per_share(trade: Any) -> float:
+        def _net_fill_per_share(trade: Any, signed: bool = False) -> float:
             by_conid: dict[Any, list[float]] = {}
             for f in trade.fills:
                 cid = getattr(getattr(f, "contract", None), "conId", None)
@@ -614,7 +614,9 @@ async def place_bracket_order(
             for cid, (pxsum, shsum) in by_conid.items():
                 if shsum > 0:
                     net += sign_by_conid.get(cid, +1) * (pxsum / shsum)
-            return round(abs(net), 4)
+            # signed=True → +debit paid / -credit received (the real fill WITH its sign,
+            # for storing actual entry_price). signed=False → magnitude (slippage tracking).
+            return round(net, 4) if signed else round(abs(net), 4)
 
         # Walk TARGET = the slippage-budget cap, NOT merely the natural. The combo "natural"
         # (sum of leg marketable sides) often isn't a real combo-book price, so a limit that
@@ -736,6 +738,7 @@ async def place_bracket_order(
                     "order_id": parent_id, "status": "PartiallyFilled",
                     "fills": _fills_payload(), "filled_contracts": filled_qty,
                     "entry_price": net_fill_price, "net_fill_price": net_fill_price,
+                    "net_entry_signed": _net_fill_per_share(entry_trade, signed=True),
                     "limit_at_fill": current_limit, "ibkr_greeks": ibkr_greeks,
                     "profit_target": profit_target, "stop_loss": stop_loss,
                 }
@@ -752,6 +755,7 @@ async def place_bracket_order(
             }
 
         net_fill_price = _net_fill_per_share(entry_trade) if entry_trade.fills else current_limit
+        net_entry_signed = _net_fill_per_share(entry_trade, signed=True) if entry_trade.fills else None
 
         return {
             "order_id": parent_id,
@@ -759,6 +763,7 @@ async def place_bracket_order(
             "fills": _fills_payload(),
             "entry_price": net_fill_price,       # net combo fill per share
             "net_fill_price": net_fill_price,    # explicit; used for slippage tracking
+            "net_entry_signed": net_entry_signed,  # signed real fill (+debit / -credit)
             "limit_at_fill": current_limit,      # the net limit when it filled
             "ibkr_greeks": ibkr_greeks,          # net delta / avg IV from IBKR (best-effort)
             "profit_target": profit_target,
@@ -1087,6 +1092,11 @@ async def place_legs_individually(
                 })
                 net += sign * float(f.execution.price)
         net_fill_price = round(abs(net), 4) if all_fills else abs(entry_price)
+        # Signed entry net (+debit paid / -credit received) — the real per-share fill
+        # WITH its sign, so the DB stores the ACTUAL fill (not the intended mid) as
+        # entry_price for ALL strategies. abs() above drops the sign, which forced
+        # credit spreads to fall back to the intended mid in _record_position.
+        net_entry_signed = round(net, 4) if all_fills else None
 
         return {
             "order_id": trades[0].order.orderId if trades else -1,
@@ -1094,6 +1104,7 @@ async def place_legs_individually(
             "fills":    all_fills,
             "entry_price":    net_fill_price,
             "net_fill_price": net_fill_price,   # net per share; used for slippage tracking
+            "net_entry_signed": net_entry_signed,  # signed real fill (+debit / -credit)
             "profit_target":  profit_target,
             "stop_loss":      stop_loss,
         }

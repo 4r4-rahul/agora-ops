@@ -1810,6 +1810,7 @@ class AgoraSession:
                                 is_pre_earnings=False,
                                 spot=spot,
                                 fill_price=fill_price,
+                                net_entry_signed=order.get("net_entry_signed"),
                                 target_close_date_override=time_stop_date,
                                 extra_metadata={
                                     "profit_target_pct": decision.profit_target_pct,
@@ -3914,6 +3915,7 @@ class AgoraSession:
                 is_pre_earnings=is_pre_earnings,
                 spot=spot,
                 fill_price=fill_price,
+                net_entry_signed=order.get("net_entry_signed"),
             )
             _complete_chain(
                 str(self._settings.db_path), chain_id, "filled",
@@ -4001,6 +4003,7 @@ class AgoraSession:
         is_pre_earnings: bool = False,
         spot: float = 0.0,
         fill_price: float = 0.0,
+        net_entry_signed: float | None = None,
         target_close_date_override: "date | None" = None,
         extra_metadata: dict | None = None,
     ) -> str:
@@ -4017,13 +4020,26 @@ class AgoraSession:
         #   Credit spreads: entry_price = negative (net credit received, e.g. -$1.47)
         #   Debit spreads / long options: entry_price = positive (net debit paid, e.g. +$7.84)
         #
-        # IBKR paper trading fill prices for BAG combos are unreliable — they often report a
-        # single leg's price rather than the net spread value.  For multi-leg positions we
-        # ignore fill_price entirely and derive entry_price from entry_debit_credit.
-        # For single-leg positions the fill price is trustworthy and we keep it.
+        # entry_price is the REAL signed per-share fill when available. net_entry_signed is
+        # computed from the actual executions (sign-aware, conid-grouped), so it carries the
+        # correct sign even for BAG combos — the old code discarded the BAG fill (it could be
+        # one leg's price) and stored the INTENDED mid, leaving entry_price slightly off the
+        # truth on every credit spread. Guard: if the real fill's sign disagrees with the
+        # intended structure (e.g. a partial that filled only one leg), fall back to the
+        # intended mid so the recorded sign still matches the strategy label.
         signed_mid  = rec.entry_debit_credit / max(1, rec.contracts * 100)
         is_multi_leg = len(rec.legs) > 1
-        if is_multi_leg:
+        if net_entry_signed not in (None, 0) and (
+            signed_mid == 0 or (net_entry_signed < 0) == (signed_mid < 0)
+        ):
+            entry_price = round(float(net_entry_signed), 4)   # real signed fill (source of truth)
+        elif is_multi_leg:
+            if net_entry_signed not in (None, 0):
+                logger.warning(
+                    "Entry fill sign disagrees with intent (fill=%.4f mid=%.4f) for %s — "
+                    "recording intended mid to keep sign consistent",
+                    float(net_entry_signed), signed_mid, getattr(rec, "ticker", "?"),
+                )
             entry_price = signed_mid          # signed: negative for credit, positive for debit
         else:
             entry_price = fill_price if fill_price > 0 else abs(signed_mid)
