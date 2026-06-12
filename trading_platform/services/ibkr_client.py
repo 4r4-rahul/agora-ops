@@ -1007,14 +1007,28 @@ async def place_legs_individually(
                         ib.cancelOrder(orders[i])
                     except Exception:
                         pass
-                logger.warning("[%s] %s: protective long leg unfilled — aborting (no naked short)",
-                               session_id, ticker)
-                return {
-                    "order_id": -1, "status": "Cancelled", "fills": [],
-                    "entry_price": entry_price, "profit_target": profit_target,
-                    "stop_loss": stop_loss,
-                    "reason": "protective long leg unfilled — aborted to avoid naked short",
-                }
+                # FILL-DETECTION RACE GUARD: an Adaptive order fills SERVER-SIDE and its fill
+                # callback can land a beat AFTER we cancel — the cancel RACES the fill. Without
+                # this, a long that actually filled is reported Cancelled → it sits orphaned at the
+                # broker → the healer later adopts it as a SECOND record (duplicate position +
+                # double-counted P&L; observed on MP 2026-06-11, ~-$790 counted twice). Wait for the
+                # status to settle, then re-check: if it really filled, continue instead of aborting.
+                for _ in range(8):  # ~4s grace
+                    await asyncio.sleep(0.5)
+                    if all(trades[i].orderStatus.status in
+                           ("Filled", "Cancelled", "ApiCancelled", "Inactive") for i in long_idx):
+                        break
+                if not all(trades[i].orderStatus.status == "Filled" for i in long_idx):
+                    logger.warning("[%s] %s: protective long leg unfilled — aborting (no naked short)",
+                                   session_id, ticker)
+                    return {
+                        "order_id": -1, "status": "Cancelled", "fills": [],
+                        "entry_price": entry_price, "profit_target": profit_target,
+                        "stop_loss": stop_loss,
+                        "reason": "protective long leg unfilled — aborted to avoid naked short",
+                    }
+                logger.info("[%s] %s long leg(s) filled AFTER the cancel raced an Adaptive fill — "
+                            "recording the real fill (no orphan)", session_id, ticker)
 
         for i in short_idx:
             _place_leg(i)
@@ -1034,6 +1048,16 @@ async def place_legs_individually(
                     ib.cancelOrder(order)
                 except Exception:
                     pass
+            # FILL-DETECTION RACE GUARD (see the long-leg path above): the cancel can race a
+            # server-side Adaptive fill, so wait for the statuses to settle and re-evaluate the
+            # fill set from the FINAL status — a just-filled order must be recorded as Filled, not
+            # Cancelled (which would orphan it and let the healer double-adopt it).
+            for _ in range(8):  # ~4s grace
+                await asyncio.sleep(0.5)
+                if all(t.orderStatus.status in ("Filled", "Cancelled", "ApiCancelled", "Inactive")
+                       for _, t, _, _ in pending):
+                    break
+            filled = [t for t in trades if t.orderStatus.status == "Filled"]
             if not filled:
                 return {
                     "order_id": -1, "status": "Cancelled", "fills": [],
@@ -1041,10 +1065,10 @@ async def place_legs_individually(
                     "stop_loss": stop_loss,
                     "reason": f"Unfilled after {_MAX_PRICE_STEPS} price steps (3 min)",
                 }
-            # Partial fill — some legs filled, others timed out.
-            # In paper mode log the mismatch; position manager will track via actual fills.
+            # Partial / post-cancel late fill — some legs filled (possibly after the cancel raced an
+            # Adaptive fill); record the position from the filled legs.
             logger.warning(
-                "[%s] Partial leg fill: %d/%d filled — recording position from filled legs",
+                "[%s] Partial/late leg fill: %d/%d filled — recording position from filled legs",
                 session_id, len(filled), len(trades),
             )
 
