@@ -2135,6 +2135,18 @@ class AgoraSession:
             if trigger:
                 logger.info("Intraday macro refresh triggered — %s", trigger)
                 await self._premarket_macro_scan(reason=f"intraday refresh: {trigger}")
+                # SHOCK FAST-PATH (defensive half): a sharp SPY/VIX move means open positions
+                # may have hit stops or profit targets RIGHT NOW. Re-mark + run exit checks
+                # immediately so the news's effect is acted on in seconds, not at the next
+                # lifecycle cycle minutes later. This is the "protect what the news hit" half;
+                # the offensive (new-trade) half is gated separately.
+                try:
+                    _shock_rv = await self._position_mgr.review_on_shock(reason=trigger)
+                    if _shock_rv.get("closed"):
+                        logger.warning("SHOCK-PROTECTED %d position(s) on: %s",
+                                       _shock_rv["closed"], trigger)
+                except Exception as _shock_exc:
+                    logger.warning("Shock position review failed: %s", _shock_exc)
 
         except Exception as exc:
             logger.debug("Macro refresh check error: %s", exc)

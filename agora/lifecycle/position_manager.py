@@ -338,6 +338,34 @@ class PositionManager:
         for pos in positions:
             await self._check_position_targets(pos)
 
+    async def review_on_shock(self, reason: str = "shock") -> dict:
+        """On-demand position review triggered by a market SHOCK (sharp SPY/VIX move or
+        breaking news). Re-marks every open position to CURRENT prices and runs the full
+        exit / stop-loss / profit-target check IMMEDIATELY, rather than waiting for the next
+        periodic lifecycle cycle. This is what lets the system PROTECT positions the news hit
+        — cut a stop or lock a profit within seconds of the move instead of minutes later."""
+        now_et = datetime.now(tz=ET)
+        if not self._is_market_hours(now_et):
+            return {"reviewed": 0, "skipped": "after_hours"}
+        positions = self.get_open_positions()
+        if not positions:
+            return {"reviewed": 0}
+        logger.info("SHOCK POSITION REVIEW (%s) — re-marking + checking %d open position(s)",
+                    reason, len(positions))
+        await asyncio.gather(*[self._refresh_position_price(p) for p in positions],
+                             return_exceptions=True)
+        positions = self.get_open_positions()
+        n_before = len(positions)
+        for pos in positions:
+            try:
+                await self._check_position_targets(pos)
+            except Exception as exc:
+                logger.warning("Shock review error on %s: %s", pos.ticker, exc)
+        closed = n_before - len(self.get_open_positions())
+        logger.info("SHOCK POSITION REVIEW (%s) complete — %d reviewed, %d closed/protected",
+                    reason, n_before, closed)
+        return {"reviewed": n_before, "closed": closed}
+
     def _is_market_hours(self, now_et: datetime) -> bool:
         """9:30 AM – 4:00 PM ET weekdays."""
         if now_et.weekday() >= 5:
