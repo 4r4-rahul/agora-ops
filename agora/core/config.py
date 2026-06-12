@@ -329,6 +329,15 @@ class AgoraSettings(BaseSettings):
                     "live bid/ask, marketDataType=1) — flipped 3→1 for real-time limit pricing. "
                     "Revert to 3 if the OPRA sub lapses.",
     )
+    exec_max_attempts_per_symbol: int = Field(
+        default=4,
+        description="Re-submission storm guard: after this many UNFILLED order attempts for the "
+                    "same ticker in one session (and zero fills), skip further attempts on that "
+                    "name until the next session. Stops the engine re-proposing an unfillable "
+                    "name every cycle (observed 2026-06-12: SMH x25, VECO x21, all unfilled) — "
+                    "which floods the pending queue, wastes broker traffic, and corrupts the "
+                    "fill-rate denominator. A name that fills even once is never skipped.",
+    )
     pricing_sanity_max_ratio: float = Field(
         default=2.0,
         description="Execution circuit breaker: abort the order if the IBKR mid is more than this "

@@ -1774,6 +1774,12 @@ class AgoraSession:
                         decision.contracts, decision.conviction,
                         decision.per_ticker_ivr,
                     )
+                    # Cooldown: back off a name that has already failed to fill repeatedly
+                    # this session (re-submission storm guard) — same as the spread pipeline.
+                    _skip, _why = self._exec_quality.should_skip_symbol(ticker)
+                    if _skip:
+                        logger.info("SKIP LONG ENTRY %s — %s; backing off", ticker, _why)
+                        return
                     # Record the attempt BEFORE submitting so the fill-rate metric has a
                     # proper denominator (long path previously called record_fill with no
                     # preceding record_attempt, corrupting the fill rate).
@@ -3631,6 +3637,15 @@ class AgoraSession:
                 recommendation = _repriced
                 # Keep the slippage baseline consistent with the repriced (real) entry.
                 mid_price = abs(recommendation.entry_debit_credit / max(1, recommendation.contracts * 100))
+
+        # Cooldown: stop re-submitting a name that has already failed to fill repeatedly
+        # this session (the SMH×25 storm) — it floods the pending queue, wastes broker
+        # traffic, and corrupts the fill-rate denominator. A name that has filled once is
+        # never skipped; only persistently-unfillable names back off until next session.
+        _skip, _why = self._exec_quality.should_skip_symbol(ticker)
+        if _skip:
+            logger.info("SKIP ENTRY %s — %s; backing off (re-submission storm guard)", ticker, _why)
+            return
 
         # Record the execution attempt now that the trade has cleared every deterministic
         # gate — fill-rate denominator = trades that actually reach submission.

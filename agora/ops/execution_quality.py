@@ -56,6 +56,11 @@ class ExecutionQualityAgent:
         self._session_policy_rejects = 0
         self._session_reject_reasons: dict[str, int] = defaultdict(int)
         self._session_slippage: list[float] = []
+        # Per-symbol attempt/fill tally THIS SESSION — caps the re-submission storm where
+        # the engine re-proposes the same name every cycle (e.g. SMH x25, all unfilled),
+        # which inflates the fill-rate denominator and floods the pending queue.
+        self._session_ticker_attempts: dict[str, int] = defaultdict(int)
+        self._session_ticker_fills: dict[str, int] = defaultdict(int)
 
         # Alert threshold: if effective_fill_rate drops below this, dispatch CEO alert
         self._fill_rate_alert_threshold = 0.30  # 30%
@@ -90,6 +95,7 @@ class ExecutionQualityAgent:
     def record_attempt(self, ticker: str, strategy: str, mid_price: float) -> None:
         """Call before submitting an order to IBKR."""
         self._session_attempts += 1
+        self._session_ticker_attempts[ticker] += 1
         self._db.execute(
             "INSERT INTO execution_quality (attempt_date, ticker, strategy, mid_price, outcome) "
             "VALUES (?, ?, ?, ?, 'pending')",
@@ -97,11 +103,25 @@ class ExecutionQualityAgent:
         )
         self._db.commit()
 
+    def should_skip_symbol(self, ticker: str) -> tuple[bool, str]:
+        """True if `ticker` has already failed to fill too many times THIS SESSION.
+
+        Stops the re-submission storm (one name, no fill, retried every cycle). A ticker
+        that has filled at least once is never skipped — only persistently-unfillable
+        names back off. Resets each session. Returns (skip, reason)."""
+        cap = int(getattr(self._settings, "exec_max_attempts_per_symbol", 4) or 4)
+        attempts = self._session_ticker_attempts.get(ticker, 0)
+        fills = self._session_ticker_fills.get(ticker, 0)
+        if fills == 0 and attempts >= cap:
+            return True, f"{attempts} unfilled attempts this session (cap {cap})"
+        return False, ""
+
     def record_fill(
         self, ticker: str, fill_price: float, mid_price: float, strategy: str = ""
     ) -> None:
         """Call when IBKR confirms a fill."""
         self._session_fills += 1
+        self._session_ticker_fills[ticker] += 1
         slippage = mid_price - fill_price  # positive = better than mid (rare)
 
         # Sanity guard: a multi-leg combo reports one execution per LEG, so passing a
