@@ -46,14 +46,24 @@ Given a news headline (and optional article body), return ONLY a JSON object:
   "direction":   "<bullish | bearish | neutral>",
   "strength":    "<strong | moderate | weak>",
   "reason":      "<one sentence summary>",
-  "derivative_tickers": ["<other tickers affected — max 3>"]
+  "derivative_tickers": ["<other tickers affected — max 3>"],
+  "forward_event": {
+    "is_forward": <true ONLY if the headline announces a SCHEDULED FUTURE event with a
+                   knowable date: IPO date, FDA/PDUFA decision date, product launch date,
+                   shareholder/merger vote, index rebalance, analyst/investor day. Routine
+                   already-happened news = false>,
+    "name":  "<short event name, e.g. 'Acme IPO' — omit if is_forward=false>",
+    "date":  "<YYYY-MM-DD of the future event if stated or clearly implied, else null>",
+    "peers": ["<tickers likely to move on this event: the subject + its sector peers, max 4>"]
+  }
 }
 
 Rules:
 - Use macro_bullish / macro_bearish for Fed/CPI/tariff/GDP/yield news (set ticker=SPY)
-- direction=neutral means no tradeable edge — still classify type and strength
+- direction=neutral means no tradeable edge TODAY — still classify type, strength, AND forward_event
 - Only include derivative_tickers if genuinely materially affected
 - Analyst upgrades/downgrades → direction = bullish/bearish, strength = moderate
+- forward_event.is_forward=true ONLY with a genuine FUTURE date; never for a past/current event
 """.strip()
 
 _MACRO_KEYWORDS = {
@@ -87,9 +97,13 @@ class IBKRNewsAgent:
         self,
         settings: Any,
         on_catalyst: Callable[..., Coroutine],
+        on_forward_event: Callable[[str, str, list], None] | None = None,
     ) -> None:
         self._settings    = settings
         self._on_catalyst = on_catalyst
+        # Sync callback (name, 'YYYY-MM-DD', peers) for autonomously-discovered FUTURE events
+        # — registered to the Phase-3 catalyst calendar so the sector is pre-staged ahead.
+        self._on_forward_event = on_forward_event
         self._main_loop: asyncio.AbstractEventLoop | None = None
         self._thread:    threading.Thread | None = None
         self._ib_loop:   asyncio.AbstractEventLoop | None = None
@@ -342,6 +356,28 @@ class IBKRNewsAgent:
             logger.debug("IBKRNewsAgent: unexpected classification shape (%s) — skipping",
                          type(data).__name__)
             return
+
+        # ── Autonomous forward-event discovery ───────────────────────────────────
+        # Extract a SCHEDULED FUTURE event (IPO/FDA/launch/vote) and register it to the
+        # catalyst calendar so the system pre-stages the sector AHEAD of the date. Done
+        # BEFORE the neutral-direction return below: a "X sets IPO for June 20" headline is
+        # usually direction=neutral TODAY but is exactly the kind of event we want to be
+        # proactive about. No extra LLM call — it's a field on this same classification.
+        fwd = data.get("forward_event") or {}
+        if (isinstance(fwd, dict) and fwd.get("is_forward") and fwd.get("date")
+                and self._on_forward_event and self._main_loop and self._main_loop.is_running()):
+            try:
+                _fname  = str(fwd.get("name") or data.get("reason") or headline[:60])[:80]
+                _fpeers = [str(p).upper() for p in (fwd.get("peers") or []) if p][:4]
+                if not _fpeers:
+                    _hint = data.get("ticker") or hint_ticker
+                    if _hint:
+                        _fpeers = [str(_hint).upper()]
+                if _fpeers:
+                    self._main_loop.call_soon_threadsafe(
+                        self._on_forward_event, _fname, str(fwd.get("date")), _fpeers)
+            except Exception as _fexc:
+                logger.debug("IBKRNews forward-event register failed: %s", _fexc)
 
         direction = data.get("direction", "neutral")
         if direction == "neutral":

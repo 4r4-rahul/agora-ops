@@ -158,6 +158,7 @@ class AgoraSession:
         self._ibkr_news       = IBKRNewsAgent(
             self._settings,
             on_catalyst=self._on_catalyst,
+            on_forward_event=self._register_forward_catalyst,
         )
 
         # Pre-earnings intelligence (proactive — runs before announcements)
@@ -506,6 +507,8 @@ class AgoraSession:
         self._priority_reasons: dict[str, str] = {}       # ticker → trigger reason
         self._last_shock_scan_ts: float = 0.0             # debounce for the Phase-2 shock opportunity scan
         self._prestaged_catalysts: set = set()            # (name, ev_date, day) already pre-staged — Phase 3
+        self._auto_catalysts: list[dict] = []             # forward events auto-discovered from news (Phase 3+)
+        self._auto_catalyst_keys: set = set()             # dedup keys for _auto_catalysts
         # #4 event-driven long options: the spread engine CONSUMES _priority_queue, so long
         # options gets its own promotion signal. The price monitor adds momentum/flow/sector
         # promotions here; the long loop drains it on a fast tick and evaluates immediately,
@@ -2231,6 +2234,8 @@ class AgoraSession:
         EarningsCalendarAgent. Each peer is promoted at most once per day per event. Config:
         settings.scheduled_catalysts = [{name, date 'YYYY-MM-DD', peers: [...], lead_days}]."""
         cals = list(getattr(self._settings, "scheduled_catalysts", None) or [])
+        # Autonomously-discovered forward events from the news classifier (Phase 3+).
+        cals = cals + list(self._auto_catalysts)
         # Also load a user-editable JSON file (.agora/scheduled_catalysts.json) so events can be
         # added/removed WITHOUT a restart — it's re-read each cycle. Merged with the config list.
         try:
@@ -2268,6 +2273,37 @@ class AgoraSession:
                 self._promote_priority(peer, reason)
             logger.warning("CATALYST PRE-STAGE [%s, T-%dd] — promoting %d peer(s) for sector "
                            "analysis: %s", name, days_until, len(peers), ", ".join(peers))
+
+    def _register_forward_catalyst(self, name: str, date_str: str, peers: list) -> None:
+        """Autonomous event discovery — called (thread-safely, via call_soon_threadsafe) by the
+        news classifier when it extracts a SCHEDULED FUTURE event from a headline. Validates,
+        dedups, and appends to the in-memory auto-catalyst list, which the Phase-3 pre-stager
+        reads alongside the manual calendar. This is what makes the system discover events like
+        an IPO on its own and pre-stage the sector — no manual entry. The event still flows
+        through every safety gate before any trade."""
+        try:
+            from datetime import date as _date
+            ev_date = _date.fromisoformat(str(date_str))
+        except Exception:
+            return
+        days = (ev_date - _date.today()).days
+        if not (0 <= days <= 45):                     # future only, sane horizon
+            return
+        peers = [str(p).upper() for p in (peers or []) if p][:4]
+        if not peers:
+            return
+        key = (str(name).strip().lower()[:60], ev_date.isoformat())
+        if key in self._auto_catalyst_keys:
+            return                                     # dedup repeated headlines for the same event
+        self._auto_catalyst_keys.add(key)
+        self._auto_catalysts.append({
+            "name": f"[auto] {str(name)[:60]}", "date": ev_date.isoformat(),
+            "peers": peers, "lead_days": 5,
+        })
+        if len(self._auto_catalysts) > 50:             # bound memory
+            self._auto_catalysts = self._auto_catalysts[-50:]
+        logger.warning("AUTO-CATALYST discovered from news: '%s' on %s (T-%dd) peers=%s",
+                       str(name)[:60], ev_date.isoformat(), days, peers)
 
     async def _universe_scan(self) -> None:
         """

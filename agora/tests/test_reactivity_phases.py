@@ -31,6 +31,8 @@ async def test_check_scheduled_catalysts_promotes_only_within_window(tmp_path):
         _priority_reasons={},
         _long_options_agent=None,
         _long_event_tickers={},
+        _auto_catalysts=[],
+        _auto_catalyst_keys=set(),
     )
     stub._promote_priority = AgoraSession._promote_priority.__get__(stub)
 
@@ -52,6 +54,7 @@ async def test_check_scheduled_catalysts_noop_when_empty(tmp_path):
         _settings=types.SimpleNamespace(scheduled_catalysts=[], db_path=str(tmp_path / "agora.db")),
         _prestaged_catalysts=set(), _scan_engine=None, _priority_queue=[],
         _priority_reasons={}, _long_options_agent=None, _long_event_tickers={},
+        _auto_catalysts=[], _auto_catalyst_keys=set(),
     )
     stub._promote_priority = AgoraSession._promote_priority.__get__(stub)
     await AgoraSession._check_scheduled_catalysts(stub)
@@ -138,3 +141,52 @@ async def test_shock_scan_debounces_repeat():
     assert n > 0
     await AgoraSession._shock_opportunity_scan(stub, "immediate repeat", 0.016)
     assert len(evaluated) == n                              # debounced — no new evals
+
+
+# ── Phase 3+ — autonomous forward-event discovery from news ───────────────────
+def _fwd_stub():
+    return types.SimpleNamespace(_auto_catalysts=[], _auto_catalyst_keys=set())
+
+
+def test_register_forward_catalyst_valid_future():
+    stub = _fwd_stub()
+    fut = (date.today() + timedelta(days=10)).isoformat()
+    AgoraSession._register_forward_catalyst(stub, "Acme IPO", fut, ["ACME", "ITA"])
+    assert len(stub._auto_catalysts) == 1
+    e = stub._auto_catalysts[0]
+    assert e["date"] == fut and e["peers"] == ["ACME", "ITA"] and e["lead_days"] == 5
+    assert e["name"].startswith("[auto]")
+
+
+def test_register_forward_catalyst_rejects_invalid():
+    stub = _fwd_stub()
+    AgoraSession._register_forward_catalyst(stub, "Past",    (date.today() - timedelta(days=2)).isoformat(), ["X"])
+    AgoraSession._register_forward_catalyst(stub, "TooFar",  (date.today() + timedelta(days=60)).isoformat(), ["Y"])
+    AgoraSession._register_forward_catalyst(stub, "BadDate", "not-a-date", ["Z"])
+    AgoraSession._register_forward_catalyst(stub, "NoPeers", (date.today() + timedelta(days=5)).isoformat(), [])
+    assert stub._auto_catalysts == []
+
+
+def test_register_forward_catalyst_dedups_case_insensitive():
+    stub = _fwd_stub()
+    fut = (date.today() + timedelta(days=10)).isoformat()
+    AgoraSession._register_forward_catalyst(stub, "Acme IPO", fut, ["ACME"])
+    AgoraSession._register_forward_catalyst(stub, "acme ipo", fut, ["ACME", "LMT"])
+    assert len(stub._auto_catalysts) == 1
+
+
+@pytest.mark.asyncio
+async def test_auto_catalyst_flows_into_prestage(tmp_path):
+    today = date.today()
+    stub = types.SimpleNamespace(
+        _settings=types.SimpleNamespace(scheduled_catalysts=[], db_path=str(tmp_path / "agora.db")),
+        _prestaged_catalysts=set(), _scan_engine=None, _priority_queue=[], _priority_reasons={},
+        _long_options_agent=None, _long_event_tickers={},
+        _auto_catalysts=[], _auto_catalyst_keys=set(),
+    )
+    stub._promote_priority = AgoraSession._promote_priority.__get__(stub)
+    # News auto-discovers an event 2 days out (within the 5-day lead).
+    AgoraSession._register_forward_catalyst(stub, "Acme IPO", (today + timedelta(days=2)).isoformat(),
+                                            ["ACME", "ITA"])
+    await AgoraSession._check_scheduled_catalysts(stub)
+    assert set(stub._priority_queue) == {"ACME", "ITA"}     # news → register → pre-stage
