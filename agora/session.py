@@ -35,6 +35,12 @@ from agora.agents.sector_intelligence import SectorIntelligenceAgent
 from agora.agents.price_target import PriceTargetAgent
 from agora.core.config import AgoraSettings, get_settings
 from agora.core.models import Catalyst, OpenPosition, PositionStatus, StrategyPillar
+from agora.core.pnl import (
+    realized_pnl as _calc_realized_pnl,
+    select_entry_price as _calc_entry_price,
+    signed_mid_from_total as _calc_signed_mid,
+    startup_sync_close as _calc_startup_sync_close,
+)
 from agora.discovery.analyst_revision import AnalystRevisionTracker
 from agora.discovery.catalyst_agent import CatalystDiscoveryAgent
 from agora.discovery.earnings_calendar import EarningsCalendarAgent, EarningsSetup
@@ -4261,22 +4267,18 @@ class AgoraSession:
         # truth on every credit spread. Guard: if the real fill's sign disagrees with the
         # intended structure (e.g. a partial that filled only one leg), fall back to the
         # intended mid so the recorded sign still matches the strategy label.
-        signed_mid  = rec.entry_debit_credit / max(1, rec.contracts * 100)
+        # Entry price via the single source of truth (agora.core.pnl) — prefers the real
+        # signed fill, falls back to the intended mid on a partial-fill sign flip.
+        signed_mid  = _calc_signed_mid(rec.entry_debit_credit, rec.contracts)
         is_multi_leg = len(rec.legs) > 1
-        if net_entry_signed not in (None, 0) and (
-            signed_mid == 0 or (net_entry_signed < 0) == (signed_mid < 0)
-        ):
-            entry_price = round(float(net_entry_signed), 4)   # real signed fill (source of truth)
-        elif is_multi_leg:
-            if net_entry_signed not in (None, 0):
-                logger.warning(
-                    "Entry fill sign disagrees with intent (fill=%.4f mid=%.4f) for %s — "
-                    "recording intended mid to keep sign consistent",
-                    float(net_entry_signed), signed_mid, getattr(rec, "ticker", "?"),
-                )
-            entry_price = signed_mid          # signed: negative for credit, positive for debit
-        else:
-            entry_price = fill_price if fill_price > 0 else abs(signed_mid)
+        entry_price = _calc_entry_price(net_entry_signed, signed_mid, fill_price, is_multi_leg)
+        if (is_multi_leg and net_entry_signed not in (None, 0)
+                and not (signed_mid == 0 or (net_entry_signed < 0) == (signed_mid < 0))):
+            logger.warning(
+                "Entry fill sign disagrees with intent (fill=%.4f mid=%.4f) for %s — "
+                "recording intended mid to keep sign consistent",
+                float(net_entry_signed), signed_mid, getattr(rec, "ticker", "?"),
+            )
         # target_close_date_override lets callers set a time-stop (e.g. long options: +5 days)
         # Default behaviour: close at 21 DTE remaining (spread/naked convention).
         target_close_date = target_close_date_override or (expiry - timedelta(days=21))
@@ -4475,10 +4477,21 @@ class AgoraSession:
             pos = open_by_ticker.get(ticker)
             if pos is None:
                 continue  # already closed or never recorded — skip
-            close_price = float(fill["price"])
-            realized_pnl = round(
-                (close_price - pos.entry_price) * 100 * pos.contracts, 2
+            # Signed-net close via the single source of truth (agora.core.pnl). A SLD combo
+            # was SOLD to close, so the signed net close cost is -price. The OLD inline
+            # (close_price - entry_price) formula re-booked credit-spread closes as huge FAKE
+            # GAINS on every restart — the defect behind the +$2,693 -> -$3,248.50 restatement.
+            close_price, realized_pnl, _should_book = _calc_startup_sync_close(
+                pos.entry_price, fill["price"], pos.contracts,
+                getattr(pos, "max_gain_dollars", 0.0),
             )
+            if not _should_book:
+                logger.warning(
+                    "STARTUP SYNC: %s SLD fill implies pnl $%.2f > 1.5x its max gain "
+                    "(structure mismatch) — NOT booking; leaving for reconciliation",
+                    ticker, realized_pnl,
+                )
+                continue
             self._position_mgr.mark_position_closed(
                 position_id=pos.position_id,
                 realized_pnl=realized_pnl,
@@ -4486,8 +4499,8 @@ class AgoraSession:
                 source="tws_startup_sync",
             )
             logger.info(
-                "STARTUP SYNC: closed %s | fill=$%.4f entry=$%.4f pnl=$%.2f",
-                ticker, close_price, pos.entry_price, realized_pnl,
+                "STARTUP SYNC: closed %s | net_close=$%.4f entry=$%.4f pnl=$%.2f",
+                ticker, net_close_signed, pos.entry_price, realized_pnl,
             )
             closed += 1
 
@@ -4589,8 +4602,8 @@ class AgoraSession:
                         # fake gains (MKSI: +$1,005 vs real -$235).
                         net_close_signed = float(_ncs)
                         close_price = round(abs(net_close_signed), 4)
-                        realized_pnl = round(
-                            -(position.entry_price + net_close_signed) * 100 * position.contracts, 2)
+                        realized_pnl = _calc_realized_pnl(
+                            position.entry_price, net_close_signed, position.contracts)
                     else:
                         # Legacy fallback only if a close path didn't report the signed net.
                         close_price = float(

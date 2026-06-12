@@ -44,11 +44,15 @@ class Settings(BaseSettings):
     )
 
     # ── Risk limits ────────────────────────────────────────────────
+    # Upper bounds widened to match the agora 'free paper mode' operating config (caps lifted
+    # for data collection — real protection is the $2k daily circuit breaker). This legacy
+    # package shares env-var names with agora, so the old narrow caps (le=0.20/20/0.10)
+    # rejected the live env values (1.0/1000/0.20) at import and broke test collection.
     account_size: float = Field(default=25_000.0, ge=1_000.0)
-    max_position_size_pct: float = Field(default=0.05, ge=0.01, le=0.20)
-    max_open_positions: int = Field(default=10, ge=1, le=20)
-    daily_loss_limit_pct: float = Field(default=0.03, ge=0.005, le=0.10)
-    weekly_loss_limit_pct: float = Field(default=0.07, ge=0.01, le=0.20)
+    max_position_size_pct: float = Field(default=0.05, ge=0.01, le=1.0)
+    max_open_positions: int = Field(default=10, ge=1, le=1000)
+    daily_loss_limit_pct: float = Field(default=0.03, ge=0.005, le=0.25)
+    weekly_loss_limit_pct: float = Field(default=0.07, ge=0.01, le=0.50)
     min_reward_risk_ratio: float = Field(default=1.5, ge=1.0)
     max_iv_rank: float = Field(default=85.0, ge=0.0, le=100.0)
     min_open_interest: int = Field(default=100, ge=0)
