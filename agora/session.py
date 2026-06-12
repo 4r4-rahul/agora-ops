@@ -4328,15 +4328,30 @@ class AgoraSession:
                     break  # skip remaining retries → fall through to escalation below
                 if status == "Filled":
                     fills = order.get("fills", [])
-                    close_price = float(
-                        order.get("avg_price")
-                        or (fills[0]["price"] if fills else position.current_price)
-                    )
-                    realized_pnl = round(
-                        (close_price - position.entry_price) * 100 * position.contracts
-                        * (-1 if position.direction == "bearish" else 1),
-                        2,
-                    )
+                    _ncs = order.get("net_close_signed")
+                    if _ncs is not None:
+                        # Correct, convention-safe realized P&L from the SIGNED net close cost
+                        # (+ = net debit paid to close, - = net credit received). Works for credit
+                        # spreads, debit spreads AND long options:
+                        #   pnl = -(entry_signed + close_signed) * 100 * contracts
+                        # entry_price is the signed per-share net (credit<0, debit>0). The OLD
+                        # (close_price - entry_price) formula booked credit-spread closes as huge
+                        # fake gains (MKSI: +$1,005 vs real -$235).
+                        net_close_signed = float(_ncs)
+                        close_price = round(abs(net_close_signed), 4)
+                        realized_pnl = round(
+                            -(position.entry_price + net_close_signed) * 100 * position.contracts, 2)
+                    else:
+                        # Legacy fallback only if a close path didn't report the signed net.
+                        close_price = float(
+                            order.get("avg_price")
+                            or (fills[0]["price"] if fills else position.current_price)
+                        )
+                        realized_pnl = round(
+                            (close_price - position.entry_price) * 100 * position.contracts
+                            * (-1 if position.direction == "bearish" else 1),
+                            2,
+                        )
                     self._position_mgr.mark_position_closed(
                         position_id=position.position_id,
                         realized_pnl=realized_pnl,

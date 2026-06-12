@@ -71,10 +71,15 @@ CALIBRATION_INTERVAL_SEC = 3600 * 24 * 7   # run ConvictionCalibrator weekly
 #   • status='reset'                — a reset, never a fill (pnl=0)
 #   • close_source='tws_startup_sync' / orphan reconcile — broker-sync artifacts the agents
 #     did not decide; their P&L must not feed agent learning.
-_REAL_CLOSE_SOURCES = ("lifecycle", "thesis_exit", "trailing_stop")
+_REAL_CLOSE_SOURCES = ("lifecycle", "thesis_exit", "trailing_stop", "stop_loss")
+# A genuine agent-driven close that carries REAL fill-based P&L (post the close-booking fix): the
+# profit engine (lifecycle), LLM (thesis_exit), trailing_stop, stop_loss, and CTO/CEO direct closes
+# (close_source LIKE 'session:%'). EXCLUDES broker-sync artifacts (tws_startup_sync, reconcile_ghost)
+# whose realized_pnl is not a real decision outcome.
 _REAL_CLOSE = (
     "p.status='closed' AND p.close_date IS NOT NULL AND p.close_date<>'' "
-    "AND p.close_source IN ('lifecycle','thesis_exit','trailing_stop')"
+    "AND (p.close_source IN ('lifecycle','thesis_exit','trailing_stop','stop_loss') "
+    "     OR p.close_source LIKE 'session:%')"
 )
 # Sub-select of chain_ids whose position genuinely closed — used both to gate attribution
 # writes and to detect (and purge) attribution written against anything else.

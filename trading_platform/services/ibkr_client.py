@@ -1244,16 +1244,26 @@ async def close_position(
             sum(f["shares"] * f["price"] for f in fills) / sum(f["shares"] for f in fills)
             if fills else None
         )
+        # SIGNED net cost to flatten the combo, per share (+ = net debit paid, - = net credit
+        # received), from each leg's actual side. realized P&L must use this, not the meaningless
+        # weighted-avg of leg prices: pnl = -(entry_price + net_close_signed)*100*contracts.
+        net_close_signed = (
+            round(sum((+1 if f.execution.side == "BOT" else -1) * float(f.execution.price)
+                      for f in trade.fills), 4)
+            if trade.fills else None
+        )
 
         logger.info(
-            "[%s] Position closed — orderId=%d status=%s avg=%.2f",
+            "[%s] Position closed — orderId=%d status=%s avg=%.2f net_signed=%s",
             session_id, trade.order.orderId, trade.orderStatus.status, avg_price or 0,
+            net_close_signed,
         )
         return {
             "order_id": trade.order.orderId,
             "status": trade.orderStatus.status,
             "fills": fills,
             "avg_price": avg_price,
+            "net_close_signed": net_close_signed,
         }
 
     finally:
@@ -1406,6 +1416,11 @@ async def close_position_legs(
             "status": _close_status,
             "fills": fills,
             "avg_price": avg_price,
+            # SIGNED net cost to flatten, per share (+ = net debit paid to close, - = net credit
+            # received). This is what realized P&L must be computed from: pnl = -(entry_price +
+            # net_close_signed)*100*contracts. abs(avg_price) loses the sign and made the old
+            # (close-entry) formula book credit-spread closes as huge fake gains.
+            "net_close_signed": round(net, 4) if fills else None,
             "n_filled": n_filled,
             "n_legs": len(trades),
         }

@@ -884,6 +884,35 @@ class PositionManager:
                              position.ticker)
                 return
 
+            # KEYSTONE FIX: the real-close callback (_execute_close) has ALREADY recorded the
+            # close_price + realized_pnl from the ACTUAL broker fill (mark_position_closed). The old
+            # code then OVERWROTE that here with close_price=current_price and
+            # realized_pnl=unrealized_pnl — the model MARK — which booked losing credit spreads as
+            # full-credit max wins (close_price=0.00, +full credit) off a fabricated mark. NEVER
+            # overwrite the real numbers. Only re-stamp the structured close_source label, then link
+            # downstream off the REAL realized P&L.
+            try:
+                _row = self._db.execute(
+                    "SELECT realized_pnl, close_price FROM positions WHERE position_id=?",
+                    (position.position_id,),
+                ).fetchone()
+            except Exception:
+                _row = None
+            _real_pnl = float(_row[0]) if _row and _row[0] is not None else round(position.unrealized_pnl, 2)
+            _real_cp  = float(_row[1]) if _row and _row[1] is not None else round(position.current_price, 4)
+            self._db.execute(
+                "UPDATE positions SET close_source=?, last_reviewed=? WHERE position_id=?",
+                (source, datetime.now(tz=timezone.utc).isoformat(), position.position_id),
+            )
+            self._db.commit()
+            logger.info("CLOSED (real fill): %s | reason: %s | realized=$%.0f close=%.2f",
+                        position.ticker, reason, _real_pnl, _real_cp)
+            _decision_chain_close(str(self._settings.db_path), position.position_id, round(_real_pnl, 2))
+            self._write_trade_record(position, reason, realized_pnl=_real_pnl, close_price=_real_cp)
+            return
+
+        # No real-close callback wired (pure paper SIMULATION) — book from the in-memory mark.
+        # This is the only path where the unrealized mark is the realized result, by design.
         self._db.execute(
             "UPDATE positions SET status=?, close_date=?, close_price=?, close_source=?, "
             "realized_pnl=?, last_reviewed=? WHERE position_id=?",
@@ -898,7 +927,7 @@ class PositionManager:
             ),
         )
         self._db.commit()
-        logger.info("CLOSED: %s | reason: %s | PnL: $%.0f",
+        logger.info("CLOSED (sim mark): %s | reason: %s | PnL: $%.0f",
                     position.ticker, reason, position.unrealized_pnl)
 
         # Link realized P&L back to the decision chain that opened this position
@@ -1195,7 +1224,14 @@ class PositionManager:
         )
         self._db.commit()
 
-    def _write_trade_record(self, position: OpenPosition, notes: str) -> None:
+    def _write_trade_record(self, position: OpenPosition, notes: str,
+                            realized_pnl: float | None = None,
+                            close_price: float | None = None) -> None:
+        # Record the REAL fill-based close P&L/price when provided (a genuine broker close), NOT
+        # position.unrealized_pnl / current_price — those are model MARKS and booking them as the
+        # realized result was the defect that recorded losing spreads as max-credit wins.
+        _pnl = realized_pnl if realized_pnl is not None else position.unrealized_pnl
+        _cp  = close_price  if close_price  is not None else position.current_price
         self._db.execute("""
             INSERT OR IGNORE INTO trade_records VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
@@ -1207,9 +1243,9 @@ class PositionManager:
             date.today().isoformat(),
             position.expiry_date.isoformat(),
             position.entry_price,
-            position.current_price,
+            _cp,
             position.contracts,
-            position.unrealized_pnl,
+            _pnl,
             0.0,  # commission tracked separately by IBKR callback
             0.0,  # slippage filled in by execution layer
             position.regime_at_entry or None,
