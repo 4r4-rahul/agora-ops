@@ -89,3 +89,4 @@ scalp_backtest_SPY_*.json
 # ── OS ───────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
+.agora/agora.db.bak-restate-*
