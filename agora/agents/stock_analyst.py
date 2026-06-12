@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -194,18 +195,24 @@ class StockAnalystAgent:
 
             text_blocks = [b for b in response.content if b.type == "text"]
             raw_text = text_blocks[-1].text.strip() if text_blocks else "{}"
-            if raw_text.startswith("```"):
-                raw_text = raw_text.split("```")[1].lstrip("json").strip()
+            # Robust JSON extraction. After a tool turn the model often writes a prose
+            # preamble BEFORE the fenced JSON, e.g.
+            #   "All data gathered. Synthesizing now.\n\n```json\n{...}```"
+            # The old `startswith("```")` check missed that preamble, so json.loads got the
+            # prose and raised "Expecting value: line 1 column 1 (char 0)" — the cause of the
+            # StockAnalyst's 06-10→06-12 outage (0 successful theses for two days while every
+            # OTHER agent worked, so it was never credits). Pull the JSON out regardless of
+            # surrounding prose: a ```json fenced object first, else the first {...} span.
+            _m = re.search(r"```(?:json)?\s*(\{.*\})\s*```", raw_text, re.DOTALL)
+            if _m:
+                raw_text = _m.group(1).strip()
+            elif "{" in raw_text and "}" in raw_text:
+                raw_text = raw_text[raw_text.find("{"): raw_text.rfind("}") + 1]
 
-            # An empty body here means the call returned no text — almost always an Anthropic
-            # API issue (credit balance too low / rate limit / overload), NOT a data problem.
-            # Surface that clearly instead of letting json.loads('') raise the cryptic
-            # "Expecting value: line 1 column 1 (char 0)" that masks the real cause.
             if not raw_text:
                 logger.warning(
-                    "StockAnalyst [%s]: empty LLM response (stop=%s, out_tok=%d) — likely an "
-                    "Anthropic API error (credit balance too low / rate limit / overload), not "
-                    "a data problem; skipping thesis this cycle",
+                    "StockAnalyst [%s]: empty LLM response (stop=%s, out_tok=%d) — no JSON and "
+                    "no text; skipping thesis this cycle",
                     ticker, getattr(response, "stop_reason", "?"), out_tok,
                 )
                 return None
