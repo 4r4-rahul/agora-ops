@@ -197,6 +197,19 @@ class StockAnalystAgent:
             if raw_text.startswith("```"):
                 raw_text = raw_text.split("```")[1].lstrip("json").strip()
 
+            # An empty body here means the call returned no text — almost always an Anthropic
+            # API issue (credit balance too low / rate limit / overload), NOT a data problem.
+            # Surface that clearly instead of letting json.loads('') raise the cryptic
+            # "Expecting value: line 1 column 1 (char 0)" that masks the real cause.
+            if not raw_text:
+                logger.warning(
+                    "StockAnalyst [%s]: empty LLM response (stop=%s, out_tok=%d) — likely an "
+                    "Anthropic API error (credit balance too low / rate limit / overload), not "
+                    "a data problem; skipping thesis this cycle",
+                    ticker, getattr(response, "stop_reason", "?"), out_tok,
+                )
+                return None
+
             raw_output = json.loads(raw_text)
             thesis = _parse_thesis(raw_output)
 
