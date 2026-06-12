@@ -329,6 +329,17 @@ class AgoraSettings(BaseSettings):
                     "live bid/ask, marketDataType=1) — flipped 3→1 for real-time limit pricing. "
                     "Revert to 3 if the OPRA sub lapses.",
     )
+    prescreen_combo_spread_pct: float = Field(
+        default=0.80,
+        description="Deterministic liquidity PRE-SCREEN run BEFORE the StrategySelector LLM: if "
+                    "the rules-engine structure's net bid-ask exceeds this fraction of its mid "
+                    "(read from the chain), skip the LLM call entirely (and the downstream "
+                    "advocate) — the trade can't fill anyway. LOOSE on purpose (0.80) so only "
+                    "egregiously illiquid structures (SMH ~117%, VECO ~190%) are dropped early; "
+                    "borderline names still get the full LLM + the precise 50% reprice gate "
+                    "(max_combo_spread_pct). FAIL-OPEN: if quotes can't be read, the LLM still "
+                    "runs. Saves LLM tokens/latency on untradeable names without losing trades.",
+    )
     exec_max_attempts_per_symbol: int = Field(
         default=4,
         description="Re-submission storm guard: after this many UNFILLED order attempts for the "

@@ -2753,6 +2753,20 @@ class AgoraSession:
             #       it falls back to the engine's own structure so a trade is never lost.
             # Run regardless of whether analyst produced a thesis — selector validates the rules
             # engine output even when no analyst thesis is available (e.g. vol_premium bypass).
+            # Deterministic liquidity PRE-SCREEN before the LLM: skip the StrategySelector
+            # (and the downstream advocate) on structures whose net bid-ask is egregiously
+            # wide — they can't fill anyway, so spending LLM intelligence on them is waste.
+            _liq_ok, _rel = self._prescreen_combo_liquidity(recommendation, chain_dict)
+            if not _liq_ok:
+                _complete_chain(str(self._settings.db_path), _chain_id, "no_trade",
+                                strategy="prescreen_illiquid")
+                logger.info(
+                    "PRESCREEN %s illiquid: net bid-ask %.0f%% of mid > %.0f%% — skipped LLM selector",
+                    ticker, _rel * 100,
+                    float(getattr(self._settings, "prescreen_combo_spread_pct", 0.80)) * 100,
+                )
+                return
+
             if self._strategy_selector:
                 _selection = await self._strategy_selector.select(
                     ticker=ticker,
@@ -4008,6 +4022,45 @@ class AgoraSession:
                 "EXEC COOLDOWN set (pending): %s blocked until %s",
                 ticker, _cooldown_until.strftime("%H:%M ET"),
             )
+
+    def _prescreen_combo_liquidity(self, rec: Any, chain_dict: dict) -> tuple[bool, float]:
+        """Cheap deterministic liquidity check on the rules-engine structure BEFORE the
+        StrategySelector LLM. Mirrors the reprice gate's net-bid-ask-vs-mid formula but reads
+        the CHAIN (not IBKR reprice quotes) and uses a LOOSE cap, so only egregiously illiquid
+        structures are dropped early. FAIL-OPEN: any missing/odd quote returns (True, 0.0) so
+        the LLM still runs — this can never silently kill a tradeable name. Returns
+        (liquid_enough, net_bid_ask_fraction_of_mid)."""
+        try:
+            legs = getattr(rec, "legs", None) or []
+            if not legs:
+                return True, 0.0
+            net_mid = 0.0
+            net_nat = 0.0
+            for lg in legs:
+                exp = lg.expiration.isoformat() if hasattr(lg.expiration, "isoformat") else str(lg.expiration)
+                data = chain_dict.get(exp)
+                if not data:
+                    return True, 0.0
+                df = data.get("calls") if lg.option_type == "call" else data.get("puts")
+                if df is None or getattr(df, "empty", True):
+                    return True, 0.0
+                row = df[df["strike"].round(2) == round(float(lg.strike), 2)]
+                if row.empty:
+                    return True, 0.0
+                bid = float(row.iloc[0].get("bid", 0) or 0)
+                ask = float(row.iloc[0].get("ask", 0) or 0)
+                if bid <= 0 and ask <= 0:
+                    return True, 0.0   # no quote — let mid<=0 / reprice gates handle it
+                mid = (bid + ask) / 2 if (bid > 0 and ask > 0) else (lg.mid_price or 0.0)
+                net_mid += mid if lg.action == "buy" else -mid
+                net_nat += ask if lg.action == "buy" else -bid
+            if abs(net_mid) < 1e-9:
+                return True, 0.0
+            rel = 2.0 * abs(net_mid - net_nat) / abs(net_mid)
+            cap = float(getattr(self._settings, "prescreen_combo_spread_pct", 0.80))
+            return (rel <= cap), rel
+        except Exception:
+            return True, 0.0   # fail-open: never block a trade on a pre-screen error
 
     def _record_position(
         self,
