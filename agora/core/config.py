@@ -317,15 +317,17 @@ class AgoraSettings(BaseSettings):
     ibkr_chain_dte_lo: int = Field(default=18, description="Phase B: enrich expiries with DTE ≥ this.")
     ibkr_chain_dte_hi: int = Field(default=66, description="Phase B: enrich expiries with DTE ≤ this (credit-spread target band).")
     ibkr_market_data_type: int = Field(
-        default=3,
-        description="IBKR market-data type for execution pricing: 1=live (real-time, needs an "
-                    "OPRA subscription), 3=delayed (15-min, FREE — works today). The execution "
-                    "walk reads IBKR's real combo bid/ask + greeks as the limit's mid and natural "
-                    "(strictly better than the yfinance width heuristic). Default 3 (delayed). "
-                    "Flip to 1 the day a non-pro OPRA subscription (~$1.50/mo) goes live — same "
-                    "code path. Falls back to the yfinance mid + width heuristic if IBKR returns "
-                    "no quote (e.g. contract not found / market closed). Probed 2026-06-05: delayed "
-                    "options+combo quotes work; live options need the paid OPRA sub.",
+        default=1,
+        description="IBKR market-data type for execution pricing: 1=live (real-time, OPRA), "
+                    "3=delayed (15-min, FREE). The execution walk reads IBKR's real combo "
+                    "bid/ask + greeks as the limit's mid and natural (strictly better than the "
+                    "yfinance width heuristic). Falls back to the yfinance mid + width heuristic "
+                    "if IBKR returns no quote (e.g. contract not found / market closed) — so the "
+                    "underlying-stock NMS denial (no equities sub) is harmless; spot stays on "
+                    "yfinance. VERIFIED 2026-06-12 (scripts/probe_live_options.py): OPRA live "
+                    "option quotes ARE served to the API on DUP344869 (TSLA/MSFT puts returned "
+                    "live bid/ask, marketDataType=1) — flipped 3→1 for real-time limit pricing. "
+                    "Revert to 3 if the OPRA sub lapses.",
     )
     pricing_sanity_max_ratio: float = Field(
         default=2.0,
