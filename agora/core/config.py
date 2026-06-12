@@ -329,6 +329,15 @@ class AgoraSettings(BaseSettings):
                     "live bid/ask, marketDataType=1) — flipped 3→1 for real-time limit pricing. "
                     "Revert to 3 if the OPRA sub lapses.",
     )
+    scheduled_catalysts: list[dict] = Field(
+        default_factory=list,
+        description="Phase-3 proactive catalyst calendar — upcoming NON-earnings events to "
+                    "pre-stage (earnings are handled by EarningsCalendarAgent). Each entry: "
+                    "{'name': 'SpaceX IPO', 'date': '2026-06-12', 'peers': ['RKLB','LMT','NOC'], "
+                    "'lead_days': 3}. When today is within lead_days of the date, the listed peers "
+                    "are promoted to URGENT scan priority so the system analyzes the sector AHEAD "
+                    "of the event. Promoted once per day per event.",
+    )
     prescreen_combo_spread_pct: float = Field(
         default=0.80,
         description="Deterministic liquidity PRE-SCREEN run BEFORE the StrategySelector LLM: if "

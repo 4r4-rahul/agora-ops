@@ -505,6 +505,7 @@ class AgoraSession:
         self._priority_queue: list[str] = []
         self._priority_reasons: dict[str, str] = {}       # ticker → trigger reason
         self._last_shock_scan_ts: float = 0.0             # debounce for the Phase-2 shock opportunity scan
+        self._prestaged_catalysts: set = set()            # (name, ev_date, day) already pre-staged — Phase 3
         # #4 event-driven long options: the spread engine CONSUMES _priority_queue, so long
         # options gets its own promotion signal. The price monitor adds momentum/flow/sector
         # promotions here; the long loop drains it on a fast tick and evaluates immediately,
@@ -2049,6 +2050,9 @@ class AgoraSession:
                 # ── Intraday macro refresh check ───────────────────
                 await self._check_macro_refresh(close)
 
+                # ── Phase 3: proactive catalyst-calendar pre-staging ──
+                await self._check_scheduled_catalysts()
+
                 # ── M3: surface critical IBKR connectivity/session errors ──
                 await self._alert_ibkr_critical_errors()
 
@@ -2188,7 +2192,10 @@ class AgoraSession:
         for _etf in ("SPY", "QQQ", "IWM", "DIA"):
             if _etf in self._settings.etf_universe and _etf not in affected:
                 affected.append(_etf)
-        for _peer in self._priority_queue:
+        # Recently event-promoted names — _long_event_tickers is populated in BOTH scan paths
+        # (engine + fallback), so sector peers are included regardless of which path is active;
+        # _priority_queue adds any fallback-only entries.
+        for _peer in list(self._long_event_tickers.keys()) + list(self._priority_queue):
             if _peer not in affected:
                 affected.append(_peer)
         affected = affected[: self._SHOCK_SCAN_MAX_NAMES]
@@ -2203,6 +2210,64 @@ class AgoraSession:
                                             scan_reason=f"shock:{trigger}")
             except Exception as _exc:
                 logger.warning("Shock scan eval %s failed: %s", _tk, _exc)
+
+    def _promote_priority(self, ticker: str, reason: str) -> None:
+        """Promote a ticker to URGENT scan priority via whichever scan path is active —
+        the async engine in production, else the _priority_queue fallback. Also wakes the
+        long-options loop. Mirrors the live price-monitor promotion so behaviour is identical."""
+        if self._scan_engine:
+            asyncio.create_task(self._scan_engine.enqueue(ScanPriority.URGENT, ticker, reason=reason))
+        elif ticker not in self._priority_queue:
+            self._priority_queue.append(ticker)
+            self._priority_reasons[ticker] = reason
+        if self._long_options_agent is not None:
+            self._long_event_tickers[ticker] = reason
+
+    async def _check_scheduled_catalysts(self) -> None:
+        """Phase 3 — proactive catalyst calendar. For each registered upcoming NON-earnings
+        event (IPO, product launch, sector catalyst) within its lead window, PRE-STAGE the
+        affected peers by promoting them to URGENT scan priority — so the system analyzes the
+        sector AHEAD of the event instead of reacting after. Earnings are handled separately by
+        EarningsCalendarAgent. Each peer is promoted at most once per day per event. Config:
+        settings.scheduled_catalysts = [{name, date 'YYYY-MM-DD', peers: [...], lead_days}]."""
+        cals = list(getattr(self._settings, "scheduled_catalysts", None) or [])
+        # Also load a user-editable JSON file (.agora/scheduled_catalysts.json) so events can be
+        # added/removed WITHOUT a restart — it's re-read each cycle. Merged with the config list.
+        try:
+            import json as _json, os as _os
+            _f = _os.path.join(_os.path.dirname(str(self._settings.db_path)) or ".",
+                               "scheduled_catalysts.json")
+            if _os.path.exists(_f):
+                with open(_f) as _fh:
+                    _file_cals = _json.load(_fh)
+                if isinstance(_file_cals, list):
+                    cals = cals + _file_cals
+        except Exception as _exc:
+            logger.debug("scheduled_catalysts.json read error: %s", _exc)
+        if not cals:
+            return
+        from datetime import date as _date
+        today = _date.today()
+        for ev in cals:
+            try:
+                ev_date = _date.fromisoformat(str(ev.get("date")))
+                lead    = int(ev.get("lead_days", 3))
+                peers   = [str(p).upper() for p in (ev.get("peers") or [])]
+                name    = str(ev.get("name", "catalyst"))
+            except Exception:
+                continue
+            days_until = (ev_date - today).days
+            if not (0 <= days_until <= lead) or not peers:
+                continue
+            promote_key = (name, ev_date.isoformat(), today.isoformat())
+            if promote_key in self._prestaged_catalysts:
+                continue   # already pre-staged this event today
+            self._prestaged_catalysts.add(promote_key)
+            reason = f"catalyst-prestage:{name}(T-{days_until}d)"
+            for peer in peers:
+                self._promote_priority(peer, reason)
+            logger.warning("CATALYST PRE-STAGE [%s, T-%dd] — promoting %d peer(s) for sector "
+                           "analysis: %s", name, days_until, len(peers), ", ".join(peers))
 
     async def _universe_scan(self) -> None:
         """
