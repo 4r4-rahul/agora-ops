@@ -23,18 +23,24 @@ from agora.ops.discord_commander import (
 def _make_db_with_lessons(n: int = 3) -> str:
     tmp = tempfile.mktemp(suffix=".db")
     with sqlite3.connect(tmp) as conn:
+        # Match the PRODUCTION agent_lessons schema that discord_commander.py and the API
+        # query (lesson_id / confidence_in_lesson / human_approved / active / created_at_utc).
         conn.execute("""CREATE TABLE agent_lessons (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            lesson_id INTEGER PRIMARY KEY AUTOINCREMENT,
             agent_name TEXT,
             lesson_text TEXT,
-            confidence REAL,
-            approved INTEGER,
-            approved_at TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            confidence_in_lesson REAL,
+            human_approved INTEGER,
+            approved_at_utc TEXT,
+            rejected_at_utc TEXT,
+            active INTEGER DEFAULT 1,
+            created_at_utc TEXT DEFAULT CURRENT_TIMESTAMP
         )""")
         for i in range(n):
             conn.execute(
-                "INSERT INTO agent_lessons (agent_name, lesson_text, confidence) VALUES (?,?,?)",
+                "INSERT INTO agent_lessons "
+                "(agent_name, lesson_text, confidence_in_lesson, human_approved, active) "
+                "VALUES (?,?,?,NULL,1)",
                 (f"agent_{i}", f"Lesson text number {i}.", 0.75),
             )
     return tmp
@@ -105,7 +111,8 @@ class TestLessonOperations:
         result = _approve_lesson(db, 1)
         assert "approved" in result.lower()
         with sqlite3.connect(db) as conn:
-            row = conn.execute("SELECT approved FROM agent_lessons WHERE id=1").fetchone()
+            row = conn.execute(
+                "SELECT human_approved FROM agent_lessons WHERE lesson_id=1").fetchone()
         assert row[0] == 1
 
     def test_reject_lesson_sets_rejected(self):
@@ -113,7 +120,8 @@ class TestLessonOperations:
         result = _reject_lesson(db, 1)
         assert "rejected" in result.lower()
         with sqlite3.connect(db) as conn:
-            row = conn.execute("SELECT approved FROM agent_lessons WHERE id=1").fetchone()
+            row = conn.execute(
+                "SELECT human_approved FROM agent_lessons WHERE lesson_id=1").fetchone()
         assert row[0] == 0
 
     def test_approve_nonexistent_lesson_no_crash(self):
