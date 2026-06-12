@@ -504,6 +504,7 @@ class AgoraSession:
         # Priority queue: tickers promoted by price monitor (move/volume triggers)
         self._priority_queue: list[str] = []
         self._priority_reasons: dict[str, str] = {}       # ticker → trigger reason
+        self._last_shock_scan_ts: float = 0.0             # debounce for the Phase-2 shock opportunity scan
         # #4 event-driven long options: the spread engine CONSUMES _priority_queue, so long
         # options gets its own promotion signal. The price monitor adds momentum/flow/sector
         # promotions here; the long loop drains it on a fast tick and evaluates immediately,
@@ -2083,6 +2084,11 @@ class AgoraSession:
     _MACRO_REFRESH_SPY_THRESHOLD = 0.015   # SPY move ≥ 1.5% from last synthesis
     _MACRO_REFRESH_VIX_THRESHOLD = 0.03    # VIX move ≥ 3% from last synthesis
     _MACRO_REFRESH_COOLDOWN_MIN  = 120     # minimum minutes between refreshes (≤3 intraday calls)
+    # Phase 2 — shock OPPORTUNITY scan (offensive). On a shock, fast-track a bounded set of
+    # affected names through the FULL safe pipeline (gates intact) for a new directional trade.
+    _SHOCK_SCAN_DEBOUNCE_SECS = 600        # don't re-fire within 10 min (avoid spamming a noisy tape)
+    _SHOCK_SCAN_MAX_NAMES     = 5          # evaluate at most this many affected names per shock
+    _SHOCK_SCAN_MAX_MOVE_PCT  = 0.05       # chasing-the-top guard: skip new entries if move ≥ 5% (too extended)
 
     async def _check_macro_refresh(self, close_df: Any) -> None:
         """
@@ -2147,9 +2153,56 @@ class AgoraSession:
                                        _shock_rv["closed"], trigger)
                 except Exception as _shock_exc:
                     logger.warning("Shock position review failed: %s", _shock_exc)
+                # SHOCK FAST-PATH (offensive half): fast-track affected names for a NEW trade,
+                # through the full safe pipeline. Guarded (debounce / cap / chasing-the-top).
+                try:
+                    await self._shock_opportunity_scan(trigger, spy_move)
+                except Exception as _shock_exc:
+                    logger.warning("Shock opportunity scan failed: %s", _shock_exc)
 
         except Exception as exc:
             logger.debug("Macro refresh check error: %s", exc)
+
+    async def _shock_opportunity_scan(self, trigger: str, spy_move: float) -> None:
+        """Phase 2 — offensive shock reaction. On a macro shock, fast-track a BOUNDED set of
+        affected names (index ETFs + sector peers the intraday detector already queued) through
+        the FULL safe pipeline (_evaluate_ticker keeps every gate — risk council, advocate,
+        liquidity pre-screen, entry window) for a new directional trade. We speed up the
+        reaction; we do NOT remove any risk gate. Guards: debounce (no spamming a noisy tape),
+        a per-shock name cap, and a chasing-the-top skip when the move is already extended."""
+        import time as _time_mod
+        _now = _time_mod.monotonic()
+        if _now - self._last_shock_scan_ts < self._SHOCK_SCAN_DEBOUNCE_SECS:
+            logger.info("Shock opportunity scan debounced (%.0fs since last) — %s",
+                        _now - self._last_shock_scan_ts, trigger)
+            return
+        # Chasing-the-top guard: a move this large is likely late/faded — Phase 1 already
+        # protected open positions; don't chase a NEW entry into an extended move.
+        if abs(spy_move) >= self._SHOCK_SCAN_MAX_MOVE_PCT:
+            logger.warning("Shock opportunity scan SKIPPED — move %.1f%% ≥ %.0f%% (too extended): %s",
+                           spy_move * 100, self._SHOCK_SCAN_MAX_MOVE_PCT * 100, trigger)
+            return
+        # Affected names: index ETFs (cleanest macro play) + sector peers already on the
+        # priority queue (the intraday sector detector pushes them on a sector move). Bounded.
+        affected: list[str] = []
+        for _etf in ("SPY", "QQQ", "IWM", "DIA"):
+            if _etf in self._settings.etf_universe and _etf not in affected:
+                affected.append(_etf)
+        for _peer in self._priority_queue:
+            if _peer not in affected:
+                affected.append(_peer)
+        affected = affected[: self._SHOCK_SCAN_MAX_NAMES]
+        if not affected:
+            return
+        self._last_shock_scan_ts = _now
+        logger.warning("SHOCK OPPORTUNITY SCAN (%s) — fast-tracking %d name(s): %s",
+                       trigger, len(affected), ", ".join(affected))
+        for _tk in affected:
+            try:
+                await self._evaluate_ticker(_tk, scan_priority=ScanPriority.URGENT,
+                                            scan_reason=f"shock:{trigger}")
+            except Exception as _exc:
+                logger.warning("Shock scan eval %s failed: %s", _tk, _exc)
 
     async def _universe_scan(self) -> None:
         """
