@@ -313,7 +313,15 @@ class RiskCouncil:
                 tripped_by="auto",
             )
 
+    def _paper_breakers_disabled(self) -> bool:
+        """True only when running PAPER and the owner has lifted loss breakers for data collection.
+        Double-guarded on trading_mode so a live session can never disable its loss limits."""
+        return (str(getattr(self._settings, "trading_mode", "paper")) == "paper"
+                and getattr(self._settings, "paper_disable_loss_breakers", False))
+
     def _check_daily_loss(self) -> tuple[bool, str]:
+        if self._paper_breakers_disabled():
+            return True, ""
         today = date.today().isoformat()
         row = self._db.execute(
             "SELECT realized_pnl + unrealized_pnl FROM daily_pnl WHERE record_date=?",
@@ -328,6 +336,8 @@ class RiskCouncil:
         return True, ""
 
     def _check_weekly_loss(self) -> tuple[bool, str]:
+        if self._paper_breakers_disabled():
+            return True, ""
         cutoff = (date.today() - timedelta(days=5)).isoformat()
         row = self._db.execute(
             "SELECT SUM(realized_pnl + unrealized_pnl) FROM daily_pnl WHERE record_date >= ?",

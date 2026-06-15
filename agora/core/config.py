@@ -61,6 +61,12 @@ class AgoraSettings(BaseSettings):
     )
     daily_loss_limit_pct: float = Field(default=0.02, ge=0.005, le=0.25)
     weekly_loss_limit_pct: float = Field(default=0.06, ge=0.01, le=0.20)
+    paper_disable_loss_breakers: bool = Field(
+        default=False,
+        description="PAPER MODE ONLY: skip the daily/weekly loss-limit halts so the engine keeps "
+                    "running for data collection. DOUBLE-GUARDED — it has effect ONLY when "
+                    "trading_mode=='paper'; in live the loss breakers are ALWAYS enforced.",
+    )
     min_rr_ratio: float = Field(default=1.3, ge=0.5)
     min_credit_spread_rr_ratio: float = Field(
         default=0.10,

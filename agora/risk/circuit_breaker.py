@@ -196,6 +196,11 @@ class CircuitBreakerAgent:
 
     async def _check_cycle(self) -> None:
         from datetime import date
+        # PAPER-ONLY breaker bypass for data collection (double-guarded on trading_mode; live always
+        # enforces). The owner lifted loss limits to keep the engine running and gathering data.
+        if (str(getattr(self._settings, "trading_mode", "paper")) == "paper"
+                and getattr(self._settings, "paper_disable_loss_breakers", False)):
+            return
         positions = self._position_mgr.get_open_positions() if self._position_mgr else []
 
         # ── Bad-mark guard (protects BOTH loss checks below) ──────────────────

@@ -1032,12 +1032,19 @@ tr.pos-detail-row td { padding: 0; background: var(--bg1); }
 
     <div id="tab-performance" class="rtab-content">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-        <span style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px">Performance — capital deployed &amp; P&amp;L</span>
+        <span style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px">Performance — the heartbeat (real fills only)</span>
         <button onclick="fetchPerformance()" style="background:none;border:1px solid var(--border);border-radius:3px;color:var(--text2);font-size:10px;padding:2px 6px;cursor:pointer">↻</button>
       </div>
 
-      <!-- Confidence headline grid -->
+      <!-- Book↔DB reconciliation banner -->
+      <div id="perf-recon" style="margin-bottom:10px"></div>
+
+      <!-- Expectancy headline (canonical /health/performance) -->
       <div id="perf-headline" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-bottom:12px"></div>
+
+      <!-- Daily achievements -->
+      <div style="font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Achievements</div>
+      <div id="perf-achievements" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px"></div>
 
       <!-- Period toggle -->
       <div style="display:flex;gap:4px;margin-bottom:8px">
@@ -2117,22 +2124,43 @@ async function fetchPerformance() {
     const d = await r.json();
     if (d.error) return;
     _perfData = d;
-    const h = d.headline || {};
-
-    // Headline confidence grid
-    const exp = h.expectancy || 0, net = h.net_realized || 0, pf = h.profit_factor;
     const stat = (lbl, val, color) =>
       `<div class="perf-stat"><div class="lbl">${lbl}</div><div class="val" style="color:${color||'var(--text)'}">${val}</div></div>`;
-    document.getElementById('perf-headline').innerHTML =
-      stat('Net Realized', fmt$(net), net >= 0 ? 'var(--green)' : 'var(--red)') +
-      stat('Deployed', '$' + (h.total_deployed||0).toLocaleString('en-US',{maximumFractionDigits:0}), 'var(--text)') +
-      stat('Win Rate', h.win_rate == null ? '—' : h.win_rate + '%', h.win_rate >= 50 ? 'var(--green)' : 'var(--yellow)') +
-      stat('Expectancy/Trade', fmt$(exp), exp >= 0 ? 'var(--green)' : 'var(--red)') +
-      stat('Win:Loss Size', h.wl_ratio == null ? '—' : h.wl_ratio + ' : 1', (h.wl_ratio||0) >= 1.5 ? 'var(--green)' : 'var(--yellow)') +
-      stat('Profit Factor', pf == null ? '—' : pf.toFixed(2), (pf||0) >= 1.5 ? 'var(--green)' : (pf||0) >= 1 ? 'var(--yellow)' : 'var(--red)') +
-      stat('Closed Trades', h.total_trades_closed || 0, 'var(--text)') +
-      stat('Avg Win / Loss', fmt$(h.avg_win||0) + ' / ' + fmt$(h.avg_loss||0), 'var(--text2)') +
-      stat('Best / Worst', fmt$(h.best||0) + ' / ' + fmt$(h.worst||0), 'var(--text2)');
+
+    // Canonical heartbeat — /health/performance (REAL fills, reconciled book↔DB). This is the face.
+    try {
+      const pr = await fetch('/agora/health/performance');
+      const pd = await pr.json();
+      const m   = (pd.metrics && pd.metrics.overall) || {};
+      const rec = pd.reconciliation || {};
+      const exp = m.expectancy || 0, net = m.net_realized || 0, pf = m.profit_factor;
+      const wr  = (m.win_rate == null) ? null : Math.round(m.win_rate * 1000) / 10;
+
+      // Reconciliation banner (green OK / red DIVERGENCE)
+      const okR = rec.status === 'OK';
+      document.getElementById('perf-recon').innerHTML =
+        `<div style="padding:6px 10px;border-radius:4px;font-size:11px;border:1px solid ${okR?'var(--green)':'var(--red)'};color:${okR?'var(--green)':'var(--red)'}">`+
+        `${okR ? '✓ Books reconcile to real fills' : '✗ BOOK↔DB DIVERGENCE — investigate'} · `+
+        `book ${fmt$(rec.book_realized||0)} vs db ${fmt$(rec.db_real_realized||0)} (drift ${fmt$(rec.drift||0)})</div>`;
+
+      // Expectancy headline (precise)
+      document.getElementById('perf-headline').innerHTML =
+        stat('Expectancy/Trade', fmt$(exp), exp >= 0 ? 'var(--green)' : 'var(--red)') +
+        stat('Net Realized', fmt$(net), net >= 0 ? 'var(--green)' : 'var(--red)') +
+        stat('Win Rate', wr == null ? '—' : wr + '%', (wr||0) >= 50 ? 'var(--green)' : 'var(--yellow)') +
+        stat('Avg Win', fmt$(m.avg_win||0), 'var(--green)') +
+        stat('Avg Loss', fmt$(-(m.avg_loss||0)), 'var(--red)') +
+        stat('Profit Factor', pf == null ? '—' : pf.toFixed(2), (pf||0) >= 1.5 ? 'var(--green)' : (pf||0) >= 1 ? 'var(--yellow)' : 'var(--red)') +
+        stat('Payoff (R)', m.payoff_ratio == null ? '—' : m.payoff_ratio.toFixed(2), 'var(--text2)') +
+        stat('Closed (real)', m.n || 0, 'var(--text)') +
+        stat('Status', m.status || '—', m.is_profitable ? 'var(--green)' : 'var(--red)');
+
+      // Daily achievements (honest — earned/locked)
+      const ach = pd.achievements || [];
+      document.getElementById('perf-achievements').innerHTML = ach.length ? ach.map(a =>
+        `<div style="padding:3px 8px;border-radius:10px;font-size:10px;border:1px solid ${a.earned?'var(--green)':'var(--border)'};color:${a.earned?'var(--green)':'var(--text2)'};opacity:${a.earned?1:0.55}">${a.earned?'🏆':'🔒'} ${a.label}</div>`
+      ).join('') : '<span style="font-size:10px;color:var(--text2)">—</span>';
+    } catch (e) { /* keep last good render */ }
 
     _renderPerfPeriods();
 
