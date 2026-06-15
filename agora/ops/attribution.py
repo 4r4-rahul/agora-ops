@@ -53,11 +53,14 @@ class PnlAttributor:
         end_date = end_date or date.today()
         start_date = start_date or (end_date - timedelta(days=30))
 
-        rows = self._db.execute("""
-            SELECT pillar, realized_pnl, commission, slippage,
+        # REAL fills only — positions.realized_pnl is the actual net fill P&L. Was reading
+        # trade_records (MODEL marks that disagreed in SIGN: +$12,741 fiction vs -$3,104 real).
+        from agora.ops.edge_dashboard import _REAL_CLOSE
+        rows = self._db.execute(f"""
+            SELECT pillar, realized_pnl, 0.0 AS commission, 0.0 AS slippage,
                    entry_date, close_date, ticker, strategy
-            FROM trade_records
-            WHERE close_date IS NOT NULL
+            FROM positions
+            WHERE {_REAL_CLOSE}
               AND close_date >= ? AND close_date <= ?
         """, (start_date.isoformat(), end_date.isoformat())).fetchall()
 
@@ -153,13 +156,15 @@ class PnlAttributor:
         How accurate was our regime classification?
         Profitable trades in high_vol regime validate the vol premium edge.
         """
-        rows = self._db.execute("""
+        # REAL fills only (was trade_records fiction: vol_premium "90% win +$10,149").
+        from agora.ops.edge_dashboard import _REAL_CLOSE
+        rows = self._db.execute(f"""
             SELECT regime_at_entry, pillar,
                    COUNT(*) as trades,
                    SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) as wins,
                    SUM(realized_pnl) as total_pnl
-            FROM trade_records
-            WHERE regime_at_entry IS NOT NULL AND realized_pnl IS NOT NULL
+            FROM positions
+            WHERE {_REAL_CLOSE} AND regime_at_entry IS NOT NULL AND regime_at_entry<>''
             GROUP BY regime_at_entry, pillar
         """).fetchall()
 

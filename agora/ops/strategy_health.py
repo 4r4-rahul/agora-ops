@@ -74,14 +74,15 @@ def compute_health(db_path: str) -> dict[str, dict]:
     """
     cutoff = (date.today() - timedelta(days=LOOKBACK_DAYS)).isoformat()
     try:
+        from agora.ops.edge_dashboard import _REAL_CLOSE
         with sqlite3.connect(db_path) as conn:
+            # REAL fills only — was trade_records model marks (fiction Sharpe). This drives both the
+            # Strat-Health display AND the is_pillar_paused trading gate, so it must be real.
             rows = conn.execute(
-                """SELECT pillar, COALESCE(regime_at_entry, 'neutral') as regime,
+                f"""SELECT pillar, COALESCE(regime_at_entry, 'neutral') as regime,
                           realized_pnl
-                   FROM trade_records
-                   WHERE close_date IS NOT NULL
-                     AND close_date >= ?
-                     AND realized_pnl IS NOT NULL
+                   FROM positions
+                   WHERE {_REAL_CLOSE} AND close_date >= ?
                    ORDER BY pillar, regime""",
                 (cutoff,),
             ).fetchall()

@@ -129,9 +129,14 @@ class RiskCouncil:
         """
         checks: dict[str, Any] = {}
 
-        # 0. StrategyHealth pause gate — blocks pillar/regime cells with bad rolling Sharpe
+        # 0. StrategyHealth pause gate — blocks pillar/regime cells with bad rolling Sharpe.
+        # Lifted in paper data-collection mode (same paper-only guard as the loss breakers) so a
+        # negative real Sharpe doesn't throttle the very data needed to find edge; live still pauses.
         pillar_str = str(recommendation.pillar.value) if hasattr(recommendation.pillar, "value") else str(recommendation.pillar)
-        _paused, _pause_reason = is_pillar_paused(str(self._settings.db_path), pillar_str, regime)
+        if self._paper_breakers_disabled():
+            _paused, _pause_reason = False, ""
+        else:
+            _paused, _pause_reason = is_pillar_paused(str(self._settings.db_path), pillar_str, regime)
         checks["strategy_health"] = not _paused
         if _paused:
             return {
