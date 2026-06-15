@@ -10,7 +10,8 @@ Feeds insights back to:
   - DisagreementResolver: which pillars should get higher weight (future)
   - MacroSynthesizer: which regimes we perform best in
 
-Data source: trade_records table in agora.db (written by PositionManager on close).
+Data source: positions table real broker fills via the canonical _REAL_CLOSE predicate
+(NOT trade_records — those are model marks that disagreed in SIGN with the fills).
 No market data fetches — pure DB analytics.
 """
 
@@ -23,6 +24,7 @@ from datetime import date, timedelta
 from typing import Any
 
 from ..core.config import AgoraSettings, get_settings
+from .edge_dashboard import _REAL_CLOSE
 
 logger = logging.getLogger(__name__)
 
@@ -93,12 +95,18 @@ class AgentPerformanceMonitor:
             conn = sqlite3.connect(self._db_path, check_same_thread=False)
             cutoff = (date.today() - timedelta(days=lookback_days)).isoformat()
 
-            # Fetch all closed trades in window
-            rows = conn.execute("""
+            # Fetch all REAL-fill closes in window. Was FROM trade_records (model marks that
+            # disagree in SIGN with the broker fills — it read +$12.3k/65% win while the real
+            # fills were -$3.2k/15% win). Missed in the 2026-06-12 fiction purge that repointed
+            # attribution/strategy_health/circuit_breaker; this monitor kept emitting fiction into
+            # the feed AND into the CFO's alpha attribution (best_pillar/best_regime), steering the
+            # system toward pillars that only "win" on fake P&L. Now sourced from the canonical
+            # _REAL_CLOSE predicate so every attribution number is honest.
+            rows = conn.execute(f"""
                 SELECT pillar, regime_at_entry, conviction_at_entry, realized_pnl,
                        strategy, close_date
-                FROM trade_records
-                WHERE close_date >= ? AND realized_pnl IS NOT NULL
+                FROM positions
+                WHERE {_REAL_CLOSE} AND close_date >= ? AND realized_pnl IS NOT NULL
                 ORDER BY close_date DESC
             """, (cutoff,)).fetchall()
             conn.close()
