@@ -3721,6 +3721,14 @@ class AgoraSession:
                     logger.info("LongOptions BLOCKED by advocate [%s]%s: %s",
                                 ticker, "" if vetter_approved else " (no vetter opinion)",
                                 (verdict.verdict_reasoning or "")[:80])
+                    # Shadow-book the long BLOCK so its counterfactual is measurable too — long
+                    # singles were NEVER recorded, so long-options BLOCK precision was unknowable
+                    # (the relaxation targets are long debits, so this is the population to measure).
+                    try:
+                        from agora.ops.shadow_book import record_block
+                        record_block(str(self._settings.db_path), "", ticker, rec, spot)
+                    except Exception:
+                        pass
                     return False
         return True
 

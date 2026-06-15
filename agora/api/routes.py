@@ -1336,6 +1336,22 @@ async def get_analyst_health() -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+@router.get("/health/edge")
+async def get_edge() -> JSONResponse:
+    """Where is the edge? Read-only realized-expectancy cuts (pillar/strategy/regime/direction/
+    close_source) over REAL fills only, with Wilson lower bounds + min-sample gates, plus the
+    hold-day churn histogram. Pure observability — makes no trading decision."""
+    session = get_session()
+    if session is None:
+        return JSONResponse({"error": "session not ready"}, status_code=503)
+    try:
+        from agora.ops.edge_dashboard import compute_edge
+        return JSONResponse(compute_edge(str(session._settings.db_path)))
+    except Exception as exc:
+        logger.error("Edge dashboard error: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 @router.get("/health/promotion-readiness")
 async def get_promotion_readiness() -> JSONResponse:
     """
