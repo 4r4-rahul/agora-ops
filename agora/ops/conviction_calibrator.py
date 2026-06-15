@@ -61,16 +61,20 @@ def _cell_stats(pnls: list[float]) -> dict[str, Any]:
 
 
 def _load_trades(db_path: str, lookback_days: int) -> list[dict]:
-    """Closed trades from trade_records within lookback window."""
+    """Closed REAL-fill trades within lookback window. Was trade_records (model marks that
+    flip sign vs the fills) — fiction P&L here mis-calibrates the conviction->size/gate mapping,
+    teaching the system that high-conviction trades 'win' when the fills say they lose. Now
+    sourced from positions/_REAL_CLOSE (the canonical real-fill P&L)."""
+    from agora.ops.edge_dashboard import _REAL_CLOSE
     cutoff = (date.today() - timedelta(days=lookback_days)).isoformat()
     try:
         with sqlite3.connect(db_path) as conn:
             rows = conn.execute(
-                """SELECT pillar, COALESCE(regime_at_entry, 'neutral') as regime,
+                f"""SELECT pillar, COALESCE(regime_at_entry, 'neutral') as regime,
                           COALESCE(conviction_at_entry, 0) as conviction,
                           realized_pnl
-                   FROM trade_records
-                   WHERE close_date IS NOT NULL
+                   FROM positions
+                   WHERE {_REAL_CLOSE}
                      AND close_date >= ?
                      AND realized_pnl IS NOT NULL
                    ORDER BY close_date""",
@@ -85,17 +89,21 @@ def _load_trades(db_path: str, lookback_days: int) -> list[dict]:
 
 
 def _load_decision_chains(db_path: str, lookback_days: int) -> list[dict]:
-    """Decision chains that resulted in fills, with final P&L."""
+    """Filled decision chains with REAL final P&L. Was decision_chains.realized_pnl (a model
+    mark); now joined to positions/_REAL_CLOSE so the conviction->P&L calibration is honest."""
+    from agora.ops.edge_dashboard import _REAL_CLOSE
     cutoff = (date.today() - timedelta(days=lookback_days)).isoformat()
     try:
         with sqlite3.connect(db_path) as conn:
             rows = conn.execute(
-                """SELECT conviction, strategy, realized_pnl, started_at
-                   FROM decision_chains
-                   WHERE outcome = 'filled'
-                     AND realized_pnl IS NOT NULL
-                     AND started_at >= ?
-                   ORDER BY started_at""",
+                f"""SELECT dc.conviction, dc.strategy, p.realized_pnl, dc.started_at
+                   FROM decision_chains dc
+                   JOIN positions p ON p.position_id = dc.position_id
+                   WHERE dc.outcome = 'filled'
+                     AND p.realized_pnl IS NOT NULL
+                     AND dc.started_at >= ?
+                     AND {_REAL_CLOSE}
+                   ORDER BY dc.started_at""",
                 (cutoff,),
             ).fetchall()
         return [

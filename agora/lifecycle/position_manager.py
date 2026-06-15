@@ -1392,11 +1392,12 @@ class PositionManager:
         Used by the afterhours attribution report and future feedback scoring.
         """
         cutoff = (date.today() - timedelta(days=lookback_days)).isoformat()
-        rows = self._db.execute("""
+        from agora.ops.edge_dashboard import _REAL_CLOSE
+        rows = self._db.execute(f"""
             SELECT strategy, regime_at_entry, conviction_at_entry,
                    realized_pnl, close_date
-            FROM trade_records
-            WHERE close_date IS NOT NULL AND close_date >= ?
+            FROM positions
+            WHERE {_REAL_CLOSE} AND close_date >= ?
         """, (cutoff,)).fetchall()
 
         if not rows:

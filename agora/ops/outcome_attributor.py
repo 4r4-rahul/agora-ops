@@ -136,12 +136,12 @@ def _fetch_closed_trades(conn: sqlite3.Connection) -> list[tuple]:
     Gated on a genuine agent-driven close (INNER JOIN + _REAL_CLOSE) so exit attribution never
     keys off broker-sync artifacts or reset positions."""
     return conn.execute(
-        f"""SELECT t.trade_id, t.ticker, t.entry_date, t.realized_pnl,
+        f"""SELECT t.trade_id, t.ticker, t.entry_date, p.realized_pnl,
                   p.max_loss_dollars, p.max_gain_dollars
            FROM trade_records t
            JOIN positions p ON p.position_id = t.trade_id
-           WHERE t.close_date IS NOT NULL
-             AND t.realized_pnl IS NOT NULL
+           WHERE p.close_date IS NOT NULL
+             AND p.realized_pnl IS NOT NULL
              AND {_REAL_CLOSE}
            ORDER BY t.entry_date""",
     ).fetchall()
