@@ -424,6 +424,13 @@ class AgoraSettings(BaseSettings):
         description="Minimum conviction score to invoke the analyst (skip cheap tickers).",
         ge=0.0, le=100.0,
     )
+    analyst_cache_ttl_secs: int = Field(
+        default=3600, ge=300, le=14400,
+        description="Reuse a ticker's thesis for this long instead of re-calling the analyst LLM "
+                    "every scan cycle. A 1–30 day thesis is stable intraday; the analyst was "
+                    "re-called ~27x/ticker/day (TLT 44x) — a ~$12/day leak. Keyed on ticker + "
+                    "conviction band + macro stance; re-journals on hit to preserve attribution.",
+    )
 
     # ── StrategySelectorAgent (Phase 6 intelligence layer) ────────────────────
     strategy_selector_enabled: bool = Field(

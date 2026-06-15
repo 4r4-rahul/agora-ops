@@ -76,6 +76,10 @@ For a valid thesis:
 If confidence cannot reach 35%:
 {"decision": "no_thesis", "reason": "<specific reason>"}"""
 
+# Prompt-cache the (large, static) system prompt so it isn't re-billed as fresh input tokens on
+# every call (the analyst was sending ~8,900 input tokens/call; the AdvocateAgent already does this).
+_CACHED_SYSTEM = [{"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}]
+
 
 # ── Output dataclass ──────────────────────────────────────────────────────────
 
@@ -114,6 +118,12 @@ class StockAnalystAgent:
             api_key=settings.anthropic_api_key
         )
         self._model = "claude-sonnet-4-6"
+        # Result cache (mirrors StrategySelectorAgent). A 1–30 day thesis does NOT change every
+        # scan cycle, yet the analyst was re-called for the SAME ticker ~27x/day (TLT 44x), a
+        # ~$12/day leak. Cache by ticker + conviction-band + macro stance; re-journal on hit so
+        # attribution stays intact while the LLM call is skipped.
+        self._cache: dict[str, tuple[datetime, "AnalystThesis"]] = {}
+        self._cache_ttl = int(getattr(settings, "analyst_cache_ttl_secs", 3600))
         logger.info(
             "StockAnalystAgent ready: model=%s shadow=%s",
             self._model, shadow_mode,
@@ -145,6 +155,28 @@ class StockAnalystAgent:
         Run thesis analysis. Returns AnalystThesis in live mode, None in shadow mode.
         Never raises — failures return None and are logged.
         """
+        # ── Result cache ──────────────────────────────────────────────────────
+        # Key on ticker + conviction band (nearest 5) + macro stance — the inputs that move a
+        # multi-day thesis. Intraday spot wiggles do NOT (the thesis is 1–30 days), so we don't
+        # key on price. On hit, re-journal under the NEW decision_id (no LLM cost) so the chain
+        # still links for attribution, then return the cached thesis.
+        _conv_band = int(conviction_score // 5) * 5
+        _stance = str(getattr(macro_context, "macro_stance", "") or "")
+        _ckey = f"{ticker}|{_conv_band}|{_stance}"
+        _now = datetime.now(timezone.utc)
+        _hit = self._cache.get(_ckey)
+        if _hit and (_now - _hit[0]).total_seconds() < self._cache_ttl:
+            _cached = _hit[1]
+            logger.debug("StockAnalyst cache hit [%s] %s (age=%ds, saves ~$0.04)",
+                         ticker, _ckey, int((_now - _hit[0]).total_seconds()))
+            try:
+                self._write_journal(decision_id, ticker, conviction_score,
+                                    {"cached": True, "key": _ckey}, _cached, _cached.raw or {},
+                                    0, 0, 0.0, 0, [])
+            except Exception:
+                pass
+            return _cached
+
         lessons = _load_lessons(str(self._settings.db_path), "analyst")
         payload = self._build_payload(
             ticker, conviction_score, snapshot, macro_context,
@@ -170,7 +202,7 @@ class StockAnalystAgent:
             response = await run_with_tools(
                 client=self._client,
                 model=self._model,
-                system=_SYSTEM,
+                system=_CACHED_SYSTEM,
                 messages=[{"role": "user", "content": _compress(payload)}],
                 tools=_tools,
                 handlers=_handlers,
@@ -258,6 +290,11 @@ class StockAnalystAgent:
                 decision_id, ticker, conviction_score, payload, thesis, raw_output,
                 0, 0, 0.0, latency_ms, lessons,
             )
+
+        # Cache only a genuine thesis (never a no_thesis/error) so a transient failure isn't
+        # pinned for the TTL — the next cycle retries.
+        if thesis is not None and getattr(thesis, "decision", "") == "thesis":
+            self._cache[_ckey] = (_now, thesis)
 
         # Always return thesis — gating (blocking execution) is caller's responsibility.
         # Shadow mode only means "do not gate"; the thesis object is always useful
