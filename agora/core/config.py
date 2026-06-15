@@ -431,6 +431,13 @@ class AgoraSettings(BaseSettings):
                     "re-called ~27x/ticker/day (TLT 44x) — a ~$12/day leak. Keyed on ticker + "
                     "conviction band + macro stance; re-journals on hit to preserve attribution.",
     )
+    advocate_cache_ttl_secs: int = Field(
+        default=10800, ge=300, le=21600,
+        description="Agent-level advocate verdict cache TTL. The long-options advocate gate had NO "
+                    "cache — 499 reviews/39 tickers/day (~13x/ticker, ~$13/day). Cached on the "
+                    "structure fingerprint (ticker+strategy+strikes+macro) so re-reviewing the same "
+                    "structure reuses the verdict; a changed structure or macro flip re-runs.",
+    )
 
     # ── StrategySelectorAgent (Phase 6 intelligence layer) ────────────────────
     strategy_selector_enabled: bool = Field(

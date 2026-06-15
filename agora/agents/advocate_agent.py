@@ -224,7 +224,27 @@ class AdvocateAgent:
         self._settings    = settings
         self._shadow_mode = shadow_mode
         self._client      = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+        # Agent-level result cache. The spread path has a session cache, but the LONG-OPTIONS gate
+        # called review() directly with NO caching — 499 reviews/39 tickers/day (~13x/ticker,
+        # ~$13/day). Caching here covers BOTH call sites. Keyed on the structure fingerprint
+        # (ticker + strategy + strikes + macro stance) so a re-review of the SAME structure within
+        # the TTL reuses the verdict; a changed structure or macro flip re-runs.
+        self._cache: dict[str, tuple[float, "AdvocateVerdict"]] = {}
+        self._cache_ttl = float(getattr(settings, "advocate_cache_ttl_secs", 10800))
         logger.info("AdvocateAgent ready: model=%s shadow=%s", _MODEL, shadow_mode)
+
+    @staticmethod
+    def _fingerprint(ticker: str, recommendation: Any, macro_context: Any) -> str:
+        try:
+            legs = getattr(recommendation, "legs", []) or []
+            strikes = "_".join(f"{getattr(l, 'strike', '')}{getattr(l, 'option_type', '')[:1]}" for l in legs)
+            strat = str(getattr(getattr(recommendation, "strategy", ""), "value",
+                                getattr(recommendation, "strategy", "")))
+            stance = str(getattr(macro_context, "macro_stance", "") or "")
+            ctr = getattr(recommendation, "contracts", "")
+            return f"{ticker}|{strat}|{strikes}|{ctr}|{stance}"
+        except Exception:
+            return f"{ticker}|?"
 
     @property
     def shadow_mode(self) -> bool:
@@ -250,6 +270,16 @@ class AdvocateAgent:
         Returns AdvocateVerdict in both shadow and live mode.
         Never raises — failures return None (treated as PASS by callers).
         """
+        # ── Result cache (covers both the spread and long-options call sites) ──
+        import time as _t
+        _fp = self._fingerprint(ticker, recommendation, macro_context)
+        _now = _t.monotonic()
+        _hit = self._cache.get(_fp)
+        if _hit and (_now - _hit[0]) < self._cache_ttl:
+            logger.debug("Advocate cache hit [%s] %s (age=%ds, saves ~$0.03)",
+                         ticker, _fp, int(_now - _hit[0]))
+            return _hit[1]
+
         lessons = _load_lessons(str(self._settings.db_path), "advocate")
         # Calibration haircut: prepend the agent's measured over/under-confidence so it
         # self-corrects (an over-confident advocate over-blocks and throttles entries).
@@ -413,6 +443,10 @@ class AdvocateAgent:
                 self._write_journal(decision_id, ticker, None, {"error": str(exc)},
                                     0, 0, 0.0, latency_ms)
 
+        # Cache only a real verdict (never None/error, so a transient failure isn't pinned for
+        # the TTL — the next call retries). Same structure within the TTL reuses this verdict.
+        if verdict is not None:
+            self._cache[_fp] = (_now, verdict)
         return verdict
 
     def _macro_event_within(self, days: int) -> bool:
