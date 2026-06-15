@@ -171,10 +171,20 @@ class LongOptionsVetterAgent:
         stack    = getattr(decision, "signal_stack", {})
         stack_lines = "\n".join(f"  {k}: {v}" for k, v in stack.items())
 
+        # Trade direction = the ACTUAL bet, derived from the structure (long_put → bearish,
+        # long_call → bullish). Previously this passed flow_direction, so a momentum/RS-driven
+        # bearish put with neutral flow showed the vetter "direction: neutral" — it judged a
+        # bearish directional bet as directionless. Flow alignment is still visible in the
+        # signal_stack (the 'flow:' line), so no information is lost.
+        _strat = str(getattr(decision, "strategy", "") or "")
+        _trade_dir = ("bearish" if _strat == "long_put"
+                      else "bullish" if _strat == "long_call"
+                      else (getattr(decision, "flow_direction", "") or "neutral"))
+
         prompt = _PROMPT_TEMPLATE.format(
             ticker        = decision.ticker,
             strategy      = decision.strategy,
-            direction     = getattr(decision, "flow_direction", ""),
+            direction     = _trade_dir,
             strike        = decision.strike,
             delta         = abs(decision.delta_approx),
             dte           = decision.dte,
