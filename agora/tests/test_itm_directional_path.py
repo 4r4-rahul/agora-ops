@@ -73,22 +73,52 @@ def _call_itm(agent, *, enabled_overrides=None, **kw):
     return agent._try_itm_entry(**base)
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-def test_inert_when_off():
-    """itm disabled + IVR over OTM cap → original hard-skip; ITM branch never fires."""
-    s = _settings(long_options_itm_enabled=False)
-    agent = LongOptionsAgent(s)
-    macro = SimpleNamespace(iv_rank=90.0, vix=22.0, macro_stance="risk_off")
-    dec = agent._evaluate_inner(
+# ── Paper-aware activation gate (live obeys flag; paper force-runs for data) ───
+def _evaluate(agent, *, ivr, **kw):
+    macro = SimpleNamespace(iv_rank=ivr, vix=22.0, macro_stance="risk_off")
+    return agent._evaluate_inner(
         ticker="NVDA", spot=100.0, options_chain=_put_chain(),
         macro_context=macro, flow_signals=None, momentum=_bearish_momentum(),
-        gex_regime="neutral", session_id="sess", per_ticker_ivr=90.0,
-        days_to_catalyst=None,
+        gex_regime="neutral", session_id="sess", per_ticker_ivr=ivr,
+        days_to_catalyst=None, **kw,
     )
+
+
+def test_live_disabled_skips_expensive():
+    """LIVE + itm disabled + IVR in the ITM band → original OTM hard-skip; ITM never fires.
+
+    IVR=75 sits in the ITM band (otm_cap 60 < 75 <= ceiling 85), so the ONLY thing keeping
+    it on the OTM 'too expensive' path is that live obeys long_options_itm_enabled (False)."""
+    agent = LongOptionsAgent(_settings(long_options_itm_enabled=False, trading_mode="live"))
+    dec = _evaluate(agent, ivr=75.0)
     assert dec.outcome == "skipped"
+    assert "options too expensive" in dec.block_reason   # OTM gate fired
+    assert "ITM" not in dec.block_reason                 # ITM builder never reached
+
+
+def test_paper_activates_itm_path():
+    """PAPER + itm disabled-flag but paper_data_collection on → OTM 'too expensive' gate is
+    BYPASSED and the ITM fork engages. Proven by the absence of the OTM skip reason (the
+    decision either proceeds via ITM or skips for a scoring/ITM-specific reason instead)."""
+    agent = LongOptionsAgent(_settings(long_options_itm_enabled=False, trading_mode="paper"))
+    dec = _evaluate(agent, ivr=75.0)
+    assert "options too expensive" not in (dec.block_reason or "")  # OTM gate was bypassed
+
+
+def test_paper_can_be_opted_out():
+    """Paper data-collection flag OFF → paper behaves like live (OTM gate fires)."""
+    agent = LongOptionsAgent(_settings(
+        long_options_itm_enabled=False, long_options_itm_paper_data_collection=False,
+        trading_mode="paper"))
+    dec = _evaluate(agent, ivr=75.0)
     assert "options too expensive" in dec.block_reason
-    assert "ITM" not in dec.block_reason          # the ITM builder was never reached
-    assert dec.recommendation is None
+
+
+def test_above_itm_ceiling_skips_even_in_paper():
+    """IVR above the ITM ceiling (85) → even ITM is too rich; skip regardless of mode."""
+    agent = LongOptionsAgent(_settings(long_options_itm_enabled=True, trading_mode="paper"))
+    dec = _evaluate(agent, ivr=90.0)
+    assert dec.outcome == "skipped" and "options too expensive" in dec.block_reason
 
 
 def test_itm_proceeds_on_clean_setup():

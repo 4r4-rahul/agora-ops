@@ -386,12 +386,19 @@ class LongOptionsAgent:
         # When OTM is priced out (IVR > cap) the ITM-directional path MAY still be viable —
         # a deep-ITM (intrinsic-dominated) leg is largely vega-immune, so a rich IV that kills
         # OTM doesn't kill ITM. Defer the skip and route to _try_itm_entry AFTER scoring (so we
-        # have direction/conviction). DARK by default: long_options_itm_enabled=False → this is
-        # never set true and the original hard-skip below fires unchanged.
+        # have direction/conviction).
+        # Paper-aware activation: LIVE obeys long_options_itm_enabled ONLY (CRO gate — off until
+        # >=30 ITM closes prove edge). PAPER force-runs the path for data collection (no capital
+        # at risk, every verifier guard still active) so that very data can accrue — otherwise
+        # the live-promotion gate could never be met. All guards live inside _try_itm_entry.
         _itm_mode = False
         if active_ivr is not None and active_ivr > ivr_cap:
             _itm_ceiling = float(getattr(self._settings, "long_options_itm_ivr_cap", 85.0))
-            if getattr(self._settings, "long_options_itm_enabled", False) and active_ivr <= _itm_ceiling:
+            _is_paper = str(getattr(self._settings, "trading_mode", "paper")) == "paper"
+            _itm_on = getattr(self._settings, "long_options_itm_enabled", False) or (
+                _is_paper and getattr(self._settings, "long_options_itm_paper_data_collection", False)
+            )
+            if _itm_on and active_ivr <= _itm_ceiling:
                 _itm_mode = True   # defer skip — ITM may still clear all its own guards
             else:
                 return LongDecision(

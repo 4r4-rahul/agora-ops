@@ -708,7 +708,8 @@ class AgoraSettings(BaseSettings):
     # Deep-ITM (intrinsic-dominated) directional buying for sustained-trend high-IV names, where
     # OTM long premium is locked out by the IVR cap but ITM is largely vega-immune. N=1 empirical
     # basis -> enabled=False (shadow-first). All verifier de-risking baked in.
-    long_options_itm_enabled: bool = Field(default=False, description="DARK. Master switch for the deep-ITM directional path. Off until shadow-validated (>=30 ITM closes incl. adverse reversals).")
+    long_options_itm_enabled: bool = Field(default=False, description="LIVE master switch for the deep-ITM directional path. Off in LIVE until shadow-validated (>=30 ITM closes incl. adverse reversals). In PAPER it is force-enabled by long_options_itm_paper_data_collection (the data that earns the live promotion can only accrue if the path actually trades).")
+    long_options_itm_paper_data_collection: bool = Field(default=True, description="In PAPER mode, run the ITM path regardless of long_options_itm_enabled — paper has no capital at risk, the all-verifier guards stay fully active, and this is the ONLY way the >=30 ITM closes that gate live enablement can ever accrue. Hard-ignored in LIVE (live obeys long_options_itm_enabled only).")
     long_options_itm_ivr_cap: float = Field(default=85.0, ge=60.0, le=100.0, description="ITM-only IVR ceiling. ITM activates when IVR>long_options_ivr_cap (OTM locked out) but <= this. Above this, even ITM's small extrinsic + fat bid-ask are punishing.")
     long_options_itm_target_delta: float = Field(default=0.75, ge=0.65, le=0.85, description="Target delta for the ITM leg (intrinsic-dominated). Strike is delta-driven; %ITM floats.")
     long_options_itm_min_conviction: int = Field(default=3, ge=3, le=5, description="ITM requires high conviction (no score-2 ITM).")
