@@ -158,6 +158,11 @@ class AgoraSettings(BaseSettings):
     min_credit_per_share: float = Field(default=0.50, description="Minimum credit collected per share for credit spreads. $0.50 avoids IBKR leg rejections in live; lower in paper mode.")
     min_credit_to_width_ratio: float = Field(default=0.30, ge=0.0, le=0.6, description="Binding edge gate for credit verticals (bull_put/bear_call): reject any spread whose credit/width is below this. Sub-0.30 credit spreads are negative-EV by construction (17/17 historical losers were 0.13-0.23; winner 0.61). Iron condors exempt.")
     block_bull_put_in_risk_off: bool = Field(default=True, description="Regime gate: in a risk_off macro, build a BEARISH credit spread (bear_call) instead of defaulting VOL_PREMIUM to a bullish bull_put — sell premium WITH the trend. Source-level complement to the StrategySelector's bull_put->bear_call flip.")
+    # ── Edge-aware sizing (C-suite rank 12 — SHIPPED DARK) ───────────────────────
+    edge_sizing_enabled: bool = Field(default=False, description="DARK. When True, scale position size by a (pillar,regime) cell's real-fill Sharpe (StrategyHealth). Only ever sizes DOWN. Enable only after exits are fixed AND >=edge_min_sample closes show win>=55%.")
+    edge_size_up_max: float = Field(default=1.0, ge=1.0, le=2.0, description="Hard cap on the edge multiplier — PINNED at 1.0 so no subset is ever sized UP on unproven edge. Raise only with proven positive edge.")
+    edge_size_down_min: float = Field(default=0.5, ge=0.1, le=1.0, description="Floor for sizing DOWN a negative-edge cell.")
+    edge_min_sample: int = Field(default=30, ge=10, le=200, description="Min real closes in a (pillar,regime) cell before edge sizing acts; below this the multiplier is neutral (1.0).")
     force_vol_selling_ok: bool = Field(default=False, description="Paper-mode override: bypass MacroContext.vol_selling_ok=False gate. Lets credit spreads through when IVR/VIX are just below threshold.")
     long_loop_parallel_enabled: bool = Field(
         default=False,

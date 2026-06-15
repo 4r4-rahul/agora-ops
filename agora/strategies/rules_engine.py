@@ -218,6 +218,16 @@ class StrategyRulesEngine:
         contracts = self._size_contracts(
             conviction.size_multiplier, max_loss, self._settings
         )
+        # Edge-aware sizing (DARK by default → multiplier 1.0, no change). Only ever sizes DOWN a
+        # proven negative-edge (pillar, regime) cell; never up. Inert until edge_sizing_enabled.
+        try:
+            from agora.ops.edge_sizing import edge_size_multiplier
+            _em = edge_size_multiplier(str(self._settings.db_path), conviction.pillar,
+                                       macro_stance, self._settings)
+            if _em < 1.0:
+                contracts = max(1, int(round(contracts * _em)))
+        except Exception:
+            pass
 
         return TradeRecommendation(
             session_id=conviction.session_id,
