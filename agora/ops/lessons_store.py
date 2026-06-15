@@ -51,10 +51,38 @@ def load_approved_lessons(
                    LIMIT ?""",
                 (agent_name, max_lessons),
             ).fetchall()
-        return [r[0] for r in rows]
+        lessons = [r[0] for r in rows]
+        # INTO THE BLOOD: prepend the live system-performance line so EVERY agent that loads
+        # lessons reasons toward positive expectancy (analyst/strategy/advocate/exit/long_options/
+        # defender all call this). It leads the list so the LLM sees it first. Cheap aggregate over
+        # real fills; failure-safe (omitted on any error).
+        try:
+            perf = _perf_context_cached(db_path)
+            if perf:
+                lessons = [perf] + lessons
+        except Exception:
+            pass
+        return lessons
     except Exception as exc:
         logger.debug("lessons_store.load_approved_lessons[%s]: %s", agent_name, exc)
         return []
+
+
+# Per-process cache so N agents in one cycle don't each recompute the metrics aggregate.
+_PERF_CACHE: dict[str, tuple[float, str]] = {}
+_PERF_TTL_SEC = 300.0
+
+
+def _perf_context_cached(db_path: str) -> str:
+    import time
+    now = time.monotonic()
+    hit = _PERF_CACHE.get(db_path)
+    if hit and (now - hit[0]) < _PERF_TTL_SEC:
+        return hit[1]
+    from agora.ops.performance_metrics import performance_context_line
+    line = performance_context_line(db_path)
+    _PERF_CACHE[db_path] = (now, line)
+    return line
 
 
 def load_calibration_note(db_path: str, agent_name: str, min_gap: float = 0.15) -> str:

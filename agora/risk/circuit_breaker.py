@@ -343,14 +343,21 @@ class CircuitBreakerAgent:
     # ── Helpers ────────────────────────────────────────────────────
 
     def _get_todays_realized_pnl(self) -> float:
-        """Query trade_records for today's realized P&L from closed positions."""
+        """Today's realized P&L from REAL broker fills (positions / _REAL_CLOSE).
+
+        Was summing trade_records — MODEL marks that disagree in SIGN with the actual fill (the
+        ledger read +$12,740 while real fills were -$3,088). That fiction blinded the daily-loss
+        breaker to real losses AND made the books un-reconcilable. Now sourced from the same
+        real-fill predicate as every other money number, so the breaker protects on real losses
+        and the daily_pnl ledger reconciles to the DB."""
         try:
             import sqlite3
             from datetime import date
+            from agora.ops.edge_dashboard import _REAL_CLOSE
             conn = sqlite3.connect(str(self._settings.db_path), check_same_thread=False, timeout=10)
             conn.execute("PRAGMA journal_mode=WAL")
             row = conn.execute(
-                "SELECT SUM(realized_pnl) FROM trade_records WHERE close_date=?",
+                f"SELECT SUM(realized_pnl) FROM positions WHERE {_REAL_CLOSE} AND close_date=?",
                 (date.today().isoformat(),),
             ).fetchone()
             conn.close()

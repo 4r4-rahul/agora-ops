@@ -589,6 +589,14 @@ def attribute_closed_trades(db_path: str) -> dict:
     except Exception as exc:
         logger.debug("recalibrate: %s", exc)
 
+    # Performance snapshot — persist today's precise edge metrics (expectancy/win-rate/profit-factor)
+    # + the book↔DB reconciliation as first-class learning data, so the loop can act on the trend.
+    try:
+        from agora.ops.performance_metrics import snapshot_daily
+        snapshot_daily(db_path)
+    except Exception as exc:
+        logger.debug("perf snapshot: %s", exc)
+
     grand_total = sum(total.values())
     if grand_total > 0:
         logger.info("OutcomeAttributor pass: %s", total)

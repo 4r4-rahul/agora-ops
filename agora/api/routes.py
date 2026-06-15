@@ -494,14 +494,26 @@ async def get_performance() -> JSONResponse:
         conn = _sql.connect(str(db_path), check_same_thread=False)
         rows = conn.execute(
             "SELECT strategy, status, contracts, entry_price, entry_date, "
-            "close_date, realized_pnl FROM positions"
+            "close_date, realized_pnl, close_source FROM positions"
         ).fetchall()
         conn.close()
     except Exception as exc:
         return JSONResponse({"error": f"db read failed: {exc}"}, status_code=500)
 
     # Column indices
-    STRAT, STATUS, QTY, ENTRY_PX, ENTRY_D, CLOSE_D, RPNL = range(7)
+    STRAT, STATUS, QTY, ENTRY_PX, ENTRY_D, CLOSE_D, RPNL, CLOSE_SRC = range(8)
+
+    _REAL_SRC = {"lifecycle", "thesis_exit", "trailing_stop", "stop_loss", "pre_earnings"}
+
+    def _is_real_close(r) -> bool:
+        """Real broker fill only — excludes fabricated_unfilled / tws_startup_sync / reconcile /
+        reset so the headline win-rate/expectancy can NEVER show model-mark fiction."""
+        if (r[STATUS] or "") != "closed" or r[RPNL] is None:
+            return False
+        src = (r[CLOSE_SRC] or "")
+        if any(k in src for k in ("fabricated", "sync", "reconcile", "duplicate")):
+            return False
+        return src in _REAL_SRC or src.startswith("session:")
 
     def _cost(r) -> float:
         return float(r[ENTRY_PX] or 0) * 100 * int(r[QTY] or 1)
@@ -520,7 +532,9 @@ async def get_performance() -> JSONResponse:
 
     # Genuine trades only (drop admin resets)
     genuine = [r for r in rows if (r[STATUS] or "") != "reset"]
-    closed  = [r for r in genuine if (r[STATUS] or "") == "closed" and r[RPNL] is not None]
+    # Headline win-rate / avg-win/loss / expectancy compute over REAL fills only — never the
+    # fabricated/sync closes that produced the fictional +$12,740 the books used to show.
+    closed  = [r for r in genuine if _is_real_close(r)]
 
     # ── Period rollups: deployed by entry_date, realized by close_date ──────────
     def _rollup(keyfn):
@@ -574,7 +588,7 @@ async def get_performance() -> JSONResponse:
         a["trades"] += 1
         if _cost(r) > 0:
             a["deployed"] += _cost(r)
-        if (r[STATUS] or "") == "closed" and r[RPNL] is not None:
+        if _is_real_close(r):
             a["closes"] += 1
             a["realized"] += float(r[RPNL] or 0)
             if float(r[RPNL] or 0) > 0:
@@ -1333,6 +1347,28 @@ async def get_analyst_health() -> JSONResponse:
         return JSONResponse(stats)
     except Exception as exc:
         logger.error("Analyst health error: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@router.get("/health/performance")
+async def get_performance_metrics() -> JSONResponse:
+    """The heartbeat — precise money-management metrics over REAL fills: Avg Win/Loss, Win/Loss
+    rate, Expectancy, Profit factor, Profitability (all-time + rolling), the book↔DB reconciliation
+    proof, and honest daily achievements. This is the single trustworthy performance surface."""
+    session = get_session()
+    if session is None:
+        return JSONResponse({"error": "session not ready"}, status_code=503)
+    try:
+        from agora.ops.performance_metrics import (
+            compute_metrics, reconcile_books, compute_achievements)
+        db = str(session._settings.db_path)
+        return JSONResponse({
+            "metrics": compute_metrics(db),
+            "reconciliation": reconcile_books(db),
+            "achievements": compute_achievements(db),
+        })
+    except Exception as exc:
+        logger.error("Performance metrics error: %s", exc)
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
