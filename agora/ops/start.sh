@@ -68,6 +68,21 @@ echo "[start.sh] open-file limit (ulimit -n) = $(ulimit -n)" >> "$LOG_DIR/launch
 # Load .env so subprocesses inherit API keys etc.
 set -a; source "$REPO/.env"; set +a
 
+# ── Rotate the IBKR clientId block each restart (deploy-churn fix) ──────────────
+# A hard-killed engine leaves its IBKR connection (clientId) held by TWS for ~30-60s, so a fresh
+# process reusing the same id gets "Error 326: client id already in use" and burns ~30-60s + ~20
+# error lines reconnecting on every restart. Rotating the block (offset cycles 0→20→40→60) means
+# the new process never collides with the dying one. Spacing (≥20) keeps main/news/sync distinct
+# within and across consecutive blocks. Set AFTER sourcing .env so it overrides the static value.
+OFFSET_FILE="$LOG_DIR/.ibkr_clientid_offset"
+_OFF=$(cat "$OFFSET_FILE" 2>/dev/null || echo 0)
+_OFF=$(( (_OFF + 20) % 80 ))
+echo "$_OFF" > "$OFFSET_FILE"
+export IBKR_CLIENT_ID=$(( 2 + _OFF ))
+export IBKR_NEWS_CLIENT_ID=$(( 4 + _OFF ))
+export STARTUP_TWS_SYNC_CLIENT_ID=$(( 12 + _OFF ))
+echo "[start.sh] IBKR clientId block offset=$_OFF (main=$IBKR_CLIENT_ID news=$IBKR_NEWS_CLIENT_ID sync=$STARTUP_TWS_SYNC_CLIENT_ID) $(date)" >> "$LOG_DIR/launchd-start.log"
+
 "$VENV/uvicorn" agora.api.app:app \
   --host 0.0.0.0 --port 8001 \
   --workers 1 \
