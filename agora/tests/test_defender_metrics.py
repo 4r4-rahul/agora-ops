@@ -76,3 +76,38 @@ def test_no_overrides_is_safe(tmp_path):
     r = defender_override_precision(db)
     assert r["overrides"] == 0
     assert "nothing to judge" in r["verdict"].lower()
+
+
+# ── Cost control: dedup cache short-circuits identical blocks ──────────────────
+def test_defender_dedup_cache(tmp_path, monkeypatch):
+    """Re-scans block the same setup 12-26x/day; the agent must defend an identical
+    (ticker,strategy,strikes) only ONCE per TTL and reuse the verdict with no LLM call."""
+    import asyncio, time
+    from types import SimpleNamespace
+    from agora.agents import thesis_defender as TD
+
+    s = SimpleNamespace(db_path=str(tmp_path / "d.db"), anthropic_api_key="sk-test",
+                        defender_cache_ttl_secs=14400, defender_max_tokens=900, tavily_api_key=None)
+    agent = TD.ThesisDefenderAgent(s, shadow_mode=False)
+
+    rec = SimpleNamespace(strategy="bull_put_spread",
+                          legs=[SimpleNamespace(option_type="put", strike=95.0),
+                                SimpleNamespace(option_type="put", strike=90.0)])
+    fp = agent._fingerprint("NVDA", rec)
+    assert fp == "NVDA:bull_put_spread:p95.0/p90.0"
+    # different strikes => different key (a genuinely new setup re-runs)
+    rec2 = SimpleNamespace(strategy="bull_put_spread",
+                           legs=[SimpleNamespace(option_type="put", strike=80.0),
+                                 SimpleNamespace(option_type="put", strike=75.0)])
+    assert agent._fingerprint("NVDA", rec2) != fp
+
+    monkeypatch.setattr(TD, "run_with_tools",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("LLM called on cache hit")))
+    sentinel = SimpleNamespace(thesis_strength="strong", confidence=0.8, go_recommendation=1, success_modes=[])
+    agent._cache[fp] = (time.monotonic(), sentinel)
+    # Use a dedicated loop left set as current, so we don't close the global loop that a later
+    # test reaches via the deprecated asyncio.get_event_loop().
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    out = loop.run_until_complete(agent.defend("NVDA", rec, None, [], None, decision_id="d1"))
+    assert out is sentinel   # reused, zero LLM calls

@@ -145,8 +145,25 @@ class ThesisDefenderAgent:
         self._settings    = settings
         self._shadow_mode = shadow_mode
         self._client      = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+        # Cost control: re-scans block the same setup 12-26x/day, so dedup identical theses to one
+        # LLM call per (ticker,strategy,strikes) per TTL — cuts defender volume ~92% (see config).
+        self._cache: dict[str, tuple[float, Any]] = {}
+        self._cache_ttl = float(getattr(settings, "defender_cache_ttl_secs", 14400))
+        self._max_tokens = int(getattr(settings, "defender_max_tokens", 900))
         self._ensure_table()
-        logger.info("ThesisDefenderAgent ready: model=%s shadow=%s", _MODEL, shadow_mode)
+        logger.info("ThesisDefenderAgent ready: model=%s shadow=%s cache_ttl=%.0fs max_tok=%d",
+                    _MODEL, shadow_mode, self._cache_ttl, self._max_tokens)
+
+    @staticmethod
+    def _fingerprint(ticker: str, recommendation: Any) -> str:
+        """Stable key for an identical proposed structure — ticker + strategy + each leg's
+        type/strike. Re-scans that re-propose the SAME structure reuse the cached verdict."""
+        legs = getattr(recommendation, "legs", None) or []
+        parts = []
+        for lg in legs:
+            ot = str(getattr(lg, "option_type", ""))[:1]
+            parts.append(f"{ot}{getattr(lg, 'strike', '')}")
+        return f"{ticker}:{getattr(recommendation, 'strategy', '')}:{'/'.join(parts)}"
 
     @property
     def shadow_mode(self) -> bool:
@@ -199,6 +216,14 @@ class ThesisDefenderAgent:
         Returns DefenderVerdict in both shadow and live mode.
         Never raises — failures return None (treated as no defense by callers).
         """
+        # ── Dedup cache: identical block within TTL reuses the verdict, NO LLM call ──
+        _fp  = self._fingerprint(ticker, recommendation)
+        _now = time.monotonic()
+        _hit = self._cache.get(_fp)
+        if _hit is not None and (_now - _hit[0]) < self._cache_ttl:
+            logger.debug("ThesisDefender cache HIT %s — reusing verdict (no LLM call)", _fp)
+            return _hit[1]
+
         lessons = _load_lessons(str(self._settings.db_path), "defender")
         payload = self._build_payload(ticker, recommendation, thesis, positions, macro_context, lessons)
         t0 = time.monotonic()
@@ -224,9 +249,9 @@ class ThesisDefenderAgent:
                 tools=_tools,
                 handlers=_handlers,
                 max_turns=3,
-                max_tokens=2000,
+                max_tokens=self._max_tokens,
                 thinking={"type": "disabled"},
-                output_config={"effort": "medium"},
+                output_config={"effort": "low"},
                 timeout=anthropic.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0),
             )
             latency_ms = int((time.monotonic() - t0) * 1000)
@@ -265,6 +290,10 @@ class ThesisDefenderAgent:
             self._write_journal(decision_id, ticker, None, {"error": str(exc)},
                                 0, 0, 0.0, latency_ms)
 
+        # Cache only a real verdict (never an error/None) so a transient API failure isn't
+        # pinned for the whole TTL — the next identical block retries instead of reusing junk.
+        if verdict is not None:
+            self._cache[_fp] = (_now, verdict)
         return verdict
 
     # ── Helpers ───────────────────────────────────────────────────────────────

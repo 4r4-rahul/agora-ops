@@ -444,9 +444,25 @@ class AgoraSettings(BaseSettings):
                     "structure fingerprint (ticker+strategy+strikes+macro) so re-reviewing the same "
                     "structure reuses the verdict; a changed structure or macro flip re-runs.",
     )
+    defender_cache_ttl_secs: int = Field(
+        default=14400, ge=300, le=28800,
+        description="Agent-level ThesisDefender verdict cache TTL (cost control). The defender fires "
+                    "on EVERY advocate BLOCK, but re-scans block the same setup 12-26x/day (494 "
+                    "blocks/40 tickers observed) — re-defending an identical thesis for the same "
+                    "verdict at ~$0.027/call (~$13/day worst case). Cached on the structure "
+                    "fingerprint (ticker+strategy+strikes); an identical block within TTL reuses the "
+                    "verdict with NO LLM call, cutting volume ~92% (~$1/day). Changed strikes re-run.",
+    )
+    defender_max_tokens: int = Field(
+        default=900, ge=300, le=2000,
+        description="Max output tokens for the defender. The override decision uses ONLY "
+                    "thesis_strength + confidence; the verbose success_modes/most_likely_win JSON is "
+                    "journal-only. Was 2000 (output ~1351 tok = 74% of per-call cost); 900 + effort=low "
+                    "trims the journal narrative without touching the decision fields.",
+    )
     long_options_vetter_model: str = Field(
         default="claude-opus-4-8",
-        description="Model for the long-options Opus vetter (the deliberate quality gate). Default "
+        description="Model for the long-options Opus vetter (the deliberate quality gate). Default"
                     "Opus; set claude-sonnet-4-6 to trade quality for ~80% lower per-call cost.",
     )
     csuite_patrol_interval_min: int = Field(
