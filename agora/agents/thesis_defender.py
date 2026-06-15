@@ -21,6 +21,7 @@ from typing import Any
 
 import anthropic
 
+from agora.core.json_extract import extract_json as _extract_json
 from agora.ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
 from agora.ops.payload_compressor import compress_payload as _compress
 from agora.ops.lessons_store import load_approved_lessons as _load_lessons
@@ -234,11 +235,8 @@ class ThesisDefenderAgent:
             cost    = (in_tok * 3.0 + out_tok * 15.0) / 1_000_000  # Sonnet 4.6
 
             text_blocks = [b for b in response.content if b.type == "text"]
-            raw_text = text_blocks[-1].text.strip() if text_blocks else "{}"
-            if raw_text.startswith("```"):
-                raw_text = raw_text.split("```")[1].lstrip("json").strip()
-
-            raw_output = _parse_json_robust(raw_text)
+            raw_text = text_blocks[-1].text if text_blocks else "{}"
+            raw_output = _extract_json(raw_text)
             verdict = _parse_verdict(raw_output)
 
             try:

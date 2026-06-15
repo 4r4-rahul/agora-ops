@@ -28,6 +28,7 @@ from typing import Any
 
 import anthropic
 
+from agora.core.json_extract import extract_json as _extract_json
 from agora.ops.payload_compressor import compress_payload as _compress
 
 logger = logging.getLogger(__name__)
@@ -124,13 +125,11 @@ class LessonsGenerator:
             return 0
 
         text_blocks = [b for b in response.content if b.type == "text"]
-        raw_text = text_blocks[-1].text.strip() if text_blocks else "{}"
-        if raw_text.startswith("```"):
-            raw_text = raw_text.split("```")[1].lstrip("json").strip()
+        raw_text = text_blocks[-1].text if text_blocks else "{}"
 
         try:
-            raw = json.loads(raw_text)
-        except json.JSONDecodeError:
+            raw = _extract_json(raw_text)
+        except (json.JSONDecodeError, ValueError):
             logger.warning("LessonsGenerator[%s]: invalid JSON: %s", agent, raw_text[:200])
             return 0
 

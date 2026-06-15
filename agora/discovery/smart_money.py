@@ -30,6 +30,7 @@ import anthropic
 import httpx
 
 from ..core.config import AgoraSettings, get_settings
+from ..core.json_extract import extract_json as _extract_json
 from ..ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
 from ..core.models import Catalyst, CatalystType
 
@@ -314,11 +315,9 @@ class SmartMoneyAgent:
                 text_blocks = [b for b in response.content if b.type == "text"]
                 if text_blocks:
                     try:
-                        raw = text_blocks[-1].text.strip()
-                        if raw.startswith("```"):
-                            raw = raw.split("```")[1].lstrip("json").strip()
-                        return json.loads(raw)
-                    except json.JSONDecodeError:
+                        raw = text_blocks[-1].text
+                        return _extract_json(raw)
+                    except (json.JSONDecodeError, ValueError):
                         return None
                 break
 
@@ -522,10 +521,8 @@ class SmartMoneyAgent:
             if hasattr(response, "usage"):
                 _log_msg(str(self._settings.db_path), "SmartMoneyForm4", self._settings.claude_fast_model,
                          response.usage, purpose="form4_classify")
-            raw = response.content[0].text.strip()
-            if raw.startswith("```"):
-                raw = raw.split("```")[1].lstrip("json").strip()
-            return json.loads(raw)
+            raw = response.content[0].text
+            return _extract_json(raw)
         except Exception as exc:
             logger.debug("Form 4 cluster analysis failed for %s: %s", ticker, exc)
             return None

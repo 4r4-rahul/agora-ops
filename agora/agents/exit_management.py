@@ -31,6 +31,8 @@ import json
 import logging
 import sqlite3
 import time
+
+from agora.core.json_extract import extract_json as _extract_json
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any, Callable, Awaitable
@@ -219,11 +221,10 @@ class ExitIntelligenceAgent:
             cost    = (in_tok * 5.0 + out_tok * 25.0) / 1_000_000
 
             text_blocks = [b for b in response.content if b.type == "text"]
-            raw_text = text_blocks[-1].text.strip() if text_blocks else "{}"
-            if raw_text.startswith("```"):
-                raw_text = raw_text.split("```")[1].lstrip("json").strip()
-
-            raw_output = json.loads(raw_text)
+            raw_text = text_blocks[-1].text if text_blocks else "{}"
+            # Robust extraction — tolerant of a prose preamble before the ```json fence
+            # (the "Expecting value" parse failures this agent was hitting in production).
+            raw_output = _extract_json(raw_text)
             rec = _parse_recommendation(raw_output)
 
             # Fact-grounding monitor — verify the exit agent's event claims vs the calendar.

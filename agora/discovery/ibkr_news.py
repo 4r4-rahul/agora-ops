@@ -27,6 +27,7 @@ import anthropic
 from ib_insync import IB, Stock
 
 from ..core.models import Catalyst, CatalystType
+from ..core.json_extract import extract_json as _extract_json
 from ..ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
 from ..ops.payload_compressor import compress_text as _compress_text
 
@@ -337,12 +338,8 @@ class IBKRNewsAgent:
             if hasattr(response, "usage") and hasattr(self._settings, "db_path"):
                 _log_msg(str(self._settings.db_path), "IBKRNews", "claude-haiku-4-5-20251001",
                          response.usage, purpose="news_classify")
-            raw = response.content[0].text.strip()
-            if raw.startswith("```"):
-                raw = raw.split("```")[1]
-                if raw.startswith("json"):
-                    raw = raw[4:]
-            data = json.loads(raw)
+            raw = response.content[0].text
+            data = _extract_json(raw)
         except Exception as exc:
             logger.debug("IBKRNewsAgent Claude call failed: %s", exc)
             return

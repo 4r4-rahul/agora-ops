@@ -28,6 +28,7 @@ from typing import Any
 import anthropic
 
 from ..core.config import AgoraSettings, get_settings
+from ..core.json_extract import extract_json as _extract_json
 
 logger = logging.getLogger(__name__)
 
@@ -162,10 +163,8 @@ class SectorMomentumAgent:
             ticker = result.custom_id
             if result.result.type == "succeeded":
                 try:
-                    text = result.result.message.content[0].text.strip()
-                    if text.startswith("```"):
-                        text = text.split("```")[1].lstrip("json").strip()
-                    analysis = json.loads(text)
+                    text = result.result.message.content[0].text
+                    analysis = _extract_json(text)
                     results[ticker] = analysis
                 except Exception as exc:
                     logger.debug("Parse failed for %s: %s", ticker, exc)

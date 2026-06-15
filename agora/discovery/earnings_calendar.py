@@ -30,6 +30,7 @@ from zoneinfo import ZoneInfo
 import anthropic
 
 from ..core.config import AgoraSettings, get_settings
+from ..core.json_extract import extract_json as _extract_json
 from ..ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
 
 logger = logging.getLogger(__name__)
@@ -578,11 +579,8 @@ Output JSON: {{"direction": "bullish|bearish|neutral", "confidence": 0.0-1.0, "r
                 _log_msg(str(self._settings.db_path), "EarningsCalendar", self._settings.claude_model,
                          resp.usage, purpose="earnings_direction")
 
-            import json as _json
-            raw = resp.content[-1].text.strip() if resp.content else ""
-            if raw.startswith("```"):
-                raw = raw.split("```")[1].lstrip("json").strip()
-            data = _json.loads(raw)
+            raw = resp.content[-1].text if resp.content else ""
+            data = _extract_json(raw)
             return (
                 data.get("direction", "neutral"),
                 float(data.get("confidence", 0.5)),

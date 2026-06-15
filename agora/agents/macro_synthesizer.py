@@ -33,6 +33,7 @@ from typing import Any
 import anthropic
 
 from ..core.config import AgoraSettings, get_settings
+from ..core.json_extract import extract_json as _extract_json
 from ..ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
 from ..ops.payload_compressor import compress_text as _compress_text
 
@@ -147,11 +148,8 @@ class MacroSynthesizer:
                 self._last_context = ctx
                 return ctx
 
-            raw = text_blocks[-1].text.strip()
-            if raw.startswith("```"):
-                raw = raw.split("```")[1].lstrip("json").strip()
-
-            data = json.loads(raw)
+            raw = text_blocks[-1].text
+            data = _extract_json(raw)
             ctx = MacroContext(
                 macro_stance=data.get("macro_stance", "neutral"),
                 confidence=float(data.get("confidence", 0.5)),

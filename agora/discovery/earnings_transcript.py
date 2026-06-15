@@ -38,6 +38,7 @@ import anthropic
 import httpx
 
 from ..core.config import AgoraSettings, get_settings
+from ..core.json_extract import extract_json as _extract_json
 from ..core.models import Catalyst, CatalystType
 
 logger = logging.getLogger(__name__)
@@ -377,12 +378,7 @@ class EarningsTranscriptAgent:
                 async for text_chunk in stream.text_stream:
                     full_text += text_chunk
 
-            raw = full_text.strip()
-            if raw.startswith("```"):
-                raw = raw.split("```")[1]
-                if raw.startswith("json"):
-                    raw = raw[4:]
-            data = json.loads(raw)
+            data = _extract_json(full_text)
 
             # Derive ticker from entity name (best effort — will be refined later)
             ticker = self._infer_ticker(entity, data)

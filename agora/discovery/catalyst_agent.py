@@ -32,6 +32,7 @@ import anthropic
 import httpx
 
 from ..core.config import AgoraSettings, get_settings
+from ..core.json_extract import extract_json as _extract_json
 from ..ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
 from ..core.models import Catalyst, CatalystType
 from ..mcp.edgar_tools import edgar_tool_handlers
@@ -325,14 +326,8 @@ class CatalystDiscoveryAgent:
                 _log_msg(str(self._settings.db_path), "CatalystAgent", "claude-haiku-4-5-20251001",
                          response.usage, purpose="filing_classify")
 
-            import json as _json
-            raw = response.content[0].text.strip()
-            # Strip markdown code fences if present
-            if raw.startswith("```"):
-                raw = raw.split("```")[1]
-                if raw.startswith("json"):
-                    raw = raw[4:]
-            data = _json.loads(raw)
+            raw = response.content[0].text
+            data = _extract_json(raw)
 
             catalyst_type_str = data.get("catalyst_type", "other")
             try:

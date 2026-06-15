@@ -28,6 +28,7 @@ from typing import Any
 import anthropic
 
 from ..core.config import AgoraSettings, get_settings
+from ..core.json_extract import extract_json as _extract_json
 from ..ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
 from ..ops.payload_compressor import compress_text as _compress_text
 
@@ -216,16 +217,13 @@ Output JSON:
                 _log_msg(str(self._settings.db_path), "PriceTarget", self._settings.claude_model,
                          resp.usage, purpose="price_target")
 
-            import json as _json
             # Get last text block
             raw = ""
             for block in reversed(resp.content):
                 if hasattr(block, "text"):
-                    raw = block.text.strip()
+                    raw = block.text
                     break
-            if raw.startswith("```"):
-                raw = raw.split("```")[1].lstrip("json").strip()
-            data = _json.loads(raw)
+            data = _extract_json(raw)
 
             scenarios = [
                 PriceScenario(

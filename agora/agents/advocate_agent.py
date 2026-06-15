@@ -33,6 +33,7 @@ from typing import Any
 
 import anthropic
 
+from agora.core.json_extract import extract_json as _extract_json
 from agora.ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
 from agora.ops.payload_compressor import compress_payload as _compress
 from agora.ops.lessons_store import load_approved_lessons as _load_lessons, load_calibration_note as _load_cal_note
@@ -295,9 +296,7 @@ class AdvocateAgent:
             cost    = (in_tok * 3.0 + out_tok * 15.0) / 1_000_000  # Sonnet 4.6
 
             text_blocks = [b for b in response.content if b.type == "text"]
-            raw_text = text_blocks[-1].text.strip() if text_blocks else "{}"
-            if raw_text.startswith("```"):
-                raw_text = raw_text.split("```")[1].lstrip("json").strip()
+            raw_text = text_blocks[-1].text if text_blocks else "{}"
 
             try:
                 raw_output = _parse_json_robust(raw_text)
@@ -325,9 +324,7 @@ class AdvocateAgent:
                     timeout=anthropic.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0),
                 ), ticker=ticker)
                 _rtb = [b for b in response.content if b.type == "text"]
-                raw_text = _rtb[-1].text.strip() if _rtb else "{}"
-                if raw_text.startswith("```"):
-                    raw_text = raw_text.split("```")[1].lstrip("json").strip()
+                raw_text = _rtb[-1].text if _rtb else "{}"
                 try:
                     raw_output = _parse_json_robust(raw_text)
                 except ValueError:
@@ -393,9 +390,7 @@ class AdvocateAgent:
                     timeout=anthropic.Timeout(connect=20.0, read=90.0, write=20.0, pool=20.0),
                 )
                 _fb = [b for b in response.content if b.type == "text"]
-                raw_text = _fb[-1].text.strip() if _fb else "{}"
-                if raw_text.startswith("```"):
-                    raw_text = raw_text.split("```")[1].lstrip("json").strip()
+                raw_text = _fb[-1].text if _fb else "{}"
                 raw_output = _parse_json_robust(raw_text)
                 _kill_conditions = [c for c in (getattr(thesis, "kill_conditions", []) or [])]
                 raw_output["verdict"] = _compute_verdict(
@@ -660,12 +655,12 @@ def _parse_json_robust(text: str) -> dict:
     def _valid(obj: object) -> bool:
         return isinstance(obj, dict) and "failure_modes" in obj
 
-    # 1. Whole string is the object.
+    # 1. Robust extraction (tolerates a prose preamble before a ```json fence).
     try:
-        obj = json.loads(text)
+        obj = _extract_json(text)
         if _valid(obj):
             return obj
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, ValueError):
         pass
     # 2. The model commonly wraps the verdict in prose and/or a ```json fence
     #    ("Here is my verdict:\n```json\n{...}\n```"). Extract the first balanced {...}
