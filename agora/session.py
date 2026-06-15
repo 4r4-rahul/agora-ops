@@ -641,6 +641,10 @@ class AgoraSession:
             # Hand the agent to PositionManager — the single exit owner runs the LLM
             # thesis check itself (for spreads AND longs), instead of a separate patrol.
             self._position_mgr.set_exit_agent(self._exit_agent)
+            # Entry<->exit dialogue: give the exit brain a live read at decision time —
+            # current GEX/flow/IV/momentum + the entry brain's FRESH thesis on the ticker.
+            self._exit_fresh_read_cache: dict = {}     # ticker -> (monotonic_ts, fresh_read)
+            self._exit_agent.set_signal_provider(self._exit_signal_provider)
             logger.info(
                 "ExitIntelligenceAgent configured (owned by PositionManager): shadow=%s interval=%.1fh",
                 self._settings.exit_intelligence_shadow_mode,
@@ -2310,6 +2314,70 @@ class AgoraSession:
             self._auto_catalysts = self._auto_catalysts[-50:]
         logger.warning("AUTO-CATALYST discovered from news: '%s' on %s (T-%dd) peers=%s",
                        str(name)[:60], ev_date.isoformat(), days, peers)
+
+    async def _exit_signal_provider(self, position: Any) -> dict:
+        """Entry↔exit dialogue (cost-bounded). Gathers the CURRENT market read for the exit
+        brain at decision time: cheap live signals (GEX regime / options flow / IV-rank /
+        spot) plus the entry brain's FRESH thesis on this exact ticker ("if I analyzed it now,
+        what would I conclude?"). The fresh LLM re-read is cached ~30 min per ticker so repeated
+        exit checks don't re-spend a token. Fail-open at every step — returns whatever it could
+        gather so the exit brain is never blocked."""
+        import time as _time_mod
+        ticker = position.ticker
+        out: dict = {"current_signals": {}, "entry_brain_now": {}}
+        # Snapshot (spot + IV-rank).
+        snap = None
+        try:
+            from trading_platform.services.market_data.yfinance_provider import YFinanceProvider
+            snap = await asyncio.wait_for(YFinanceProvider().get_snapshot(ticker), timeout=8.0)
+        except Exception:
+            snap = None
+        spot = float(getattr(snap, "price", None) or getattr(position, "current_price", 0.0) or 0.0)
+        cs: dict = {"spot": round(spot, 2) if spot else None}
+        if snap is not None:
+            cs["iv_rank"] = getattr(snap, "iv_rank", None)
+        # GEX regime.
+        try:
+            from trading_platform.services.options_flow import get_gex
+            _gex = await asyncio.wait_for(asyncio.to_thread(get_gex, ticker), timeout=5.0)
+            cs["gex_regime"] = (_gex or {}).get("regime")
+        except Exception:
+            pass
+        # Options flow.
+        try:
+            _flow = await asyncio.wait_for(get_flow_signals(ticker), timeout=5.0)
+            if _flow:
+                cs["flow"] = {"direction": getattr(_flow, "direction", None),
+                              "strength":  getattr(_flow, "strength", None)}
+        except Exception:
+            pass
+        out["current_signals"] = cs
+
+        # FRESH entry-brain read — the heart of the dialogue. Cached ~30 min/ticker for cost.
+        if self._stock_analyst is not None and snap is not None and spot > 0:
+            cached = self._exit_fresh_read_cache.get(ticker)
+            if cached and (_time_mod.monotonic() - cached[0]) < 1800:
+                out["entry_brain_now"] = cached[1]
+            else:
+                try:
+                    th = await asyncio.wait_for(self._stock_analyst.analyze(
+                        ticker=ticker,
+                        conviction_score=float(getattr(position, "conviction_at_entry", 50) or 50),
+                        snapshot=snap, macro_context=self._macro_context,
+                        gex=None, iv_premium=None, event_signal=None, sector_intel=None,
+                    ), timeout=60.0)
+                    fresh = {} if th is None else {
+                        "direction":      getattr(th, "direction", None),
+                        "confidence_pct": getattr(th, "confidence_pct", None),
+                        "magnitude_pct":  getattr(th, "magnitude_pct", None),
+                        "reasoning": (getattr(th, "scorecard_critique", None)
+                                      or getattr(th, "reasoning", "") or "")[:200],
+                    }
+                    out["entry_brain_now"] = fresh
+                    self._exit_fresh_read_cache[ticker] = (_time_mod.monotonic(), fresh)
+                except Exception as exc:
+                    logger.debug("Exit fresh entry-brain read failed for %s: %s", ticker, exc)
+        return out
 
     async def _universe_scan(self) -> None:
         """

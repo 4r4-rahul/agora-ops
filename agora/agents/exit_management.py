@@ -56,6 +56,18 @@ You are NOT trying to maximize P&L on this trade. You are optimizing ACROSS trad
 
 THE FUNDAMENTAL QUESTION: "Is the reason I opened this position still true?"
 
+YOU ARE NOT ALONE. The payload gives you the ENTRY BRAIN'S FRESH READ on this exact ticker,
+re-run RIGHT NOW (`entry_brain_now`: direction / confidence / reasoning), plus the live market
+signals it used (`current_signals`: GEX, options flow, IV-rank, momentum, recent news). Use them
+as GROUND TRUTH — do NOT guess whether the thesis still holds:
+  - entry_brain_now AGREES with the original direction (and confident) → thesis VALID → bias HOLD.
+  - entry_brain_now has FLIPPED or gone neutral/low-confidence → thesis WEAKENING/INVALIDATED.
+  - current_signals confirm the original driver (e.g. flow/GEX still supportive) → VALID.
+  - current_signals show the driver reversed (vol spike against you, flow flipped) → INVALIDATED.
+This is the two brains talking. When entry_brain_now and the live signals BOTH still support the
+trade, you must NOT close a winner on a soft "feels weak" — that is the over-confidence error you
+are calibrated against. Only close when the FRESH evidence says the reason is genuinely gone.
+
 - YES + not at target → HOLD
 - YES + partial target hit → TAKE_PARTIAL or TIGHTEN_STOP
 - NO (thesis invalidated) → CLOSE_NOW, even at a loss
@@ -160,7 +172,18 @@ class ExitIntelligenceAgent:
         self._client             = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
         self._model              = getattr(settings, "claude_model", _MODEL_FALLBACK)
         self._last_evaluated:    dict[str, datetime] = {}  # position_id → last eval time
+        # Signal provider (set by the session): async fn(position) -> dict with the CURRENT
+        # market read at exit time — live GEX/flow/IV/momentum + the entry brain's FRESH thesis
+        # ("if I analyzed this ticker now, what would I conclude?"). This is what lets the exit
+        # brain judge against current reality + talk to the entry brain, instead of guessing
+        # "new information" from only the stale entry thesis + P&L (the 79%-predicted/42%-
+        # delivered calibration gap).
+        self._signal_provider: Callable[[Any], Awaitable[dict]] | None = None
         logger.info("ExitIntelligenceAgent ready: model=%s shadow=%s", self._model, shadow_mode)
+
+    def set_signal_provider(self, provider: Callable[[Any], Awaitable[dict]]) -> None:
+        """Inject the session's current-signals + fresh-entry-brain-read provider."""
+        self._signal_provider = provider
 
     @property
     def shadow_mode(self) -> bool:
@@ -200,7 +223,15 @@ class ExitIntelligenceAgent:
         _cal_note = _load_cal_note(str(self._settings.db_path), "exit")
         if _cal_note:
             lessons = [_cal_note] + lessons
-        payload = self._build_payload(position, original_thesis, macro_context, lessons)
+        # Gather the CURRENT market read + the entry brain's FRESH thesis (fail-open — the exit
+        # brain still works on the base payload if this errors, so it can never break exits).
+        current_context: dict = {}
+        if self._signal_provider is not None:
+            try:
+                current_context = await self._signal_provider(position) or {}
+            except Exception as _sig_exc:
+                logger.debug("Exit signal provider failed for %s: %s", position.ticker, _sig_exc)
+        payload = self._build_payload(position, original_thesis, macro_context, lessons, current_context)
         decision_id = self._fetch_chain_id(position_id)
 
         t0 = time.monotonic()
@@ -341,6 +372,7 @@ class ExitIntelligenceAgent:
         original_thesis: dict,
         macro_context:   Any | None,
         lessons:         list[str] | None = None,
+        current_context: dict | None = None,
     ) -> dict:
         today = date.today()
         dte_remaining = (position.expiry_date - today).days
@@ -382,6 +414,10 @@ class ExitIntelligenceAgent:
             },
             "evaluation_time": datetime.now(tz=timezone.utc).isoformat(),
             "approved_lessons": lessons or [],
+            # CURRENT market read at exit time (vs the stale entry thesis above) — the live
+            # signals + the entry brain's FRESH thesis. Empty if the provider isn't wired.
+            "current_signals":  (current_context or {}).get("current_signals", {}),
+            "entry_brain_now":  (current_context or {}).get("entry_brain_now", {}),
         }
 
     def _write_journal(
