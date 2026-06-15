@@ -438,6 +438,14 @@ class AgoraSettings(BaseSettings):
                     "structure fingerprint (ticker+strategy+strikes+macro) so re-reviewing the same "
                     "structure reuses the verdict; a changed structure or macro flip re-runs.",
     )
+    agent_mcp_tools_enabled: bool = Field(
+        default=False,
+        description="Attach the MCP tool schemas (sqlite/search/flow) to the analyst & advocate "
+                    "requests. OFF by default: the tools were 0% used over a full week yet cost "
+                    "~870–1,890 input tokens per call (~$1/day of pure redundant tokens). The "
+                    "advocate's hallucination is already handled by the deterministic fact-grounding "
+                    "gate, not these unused tools. Flip ON only if you want the model to fact-check.",
+    )
 
     # ── StrategySelectorAgent (Phase 6 intelligence layer) ────────────────────
     strategy_selector_enabled: bool = Field(

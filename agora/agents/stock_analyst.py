@@ -192,11 +192,16 @@ class StockAnalystAgent:
         _tavily_key = getattr(self._settings, "tavily_api_key", None)
         # Only advertise the web-search tools when a key is configured — otherwise the
         # model wastes a tool-turn calling a dead tool that always returns "unavailable".
-        _tools = SQLITE_TOOLS + (SEARCH_TOOLS if _tavily_key else [])
-        _handlers = {
-            **sqlite_tool_handlers(_db),
-            **(search_tool_handlers(_tavily_key) if _tavily_key else {}),
-        }
+        # Tools were 0% used over a full week but cost ~870-1,433 input tokens/call — off by default
+        # (agent_mcp_tools_enabled). run_with_tools with tools=[] is a single normal call.
+        if getattr(self._settings, "agent_mcp_tools_enabled", False):
+            _tools = SQLITE_TOOLS + (SEARCH_TOOLS if _tavily_key else [])
+            _handlers = {
+                **sqlite_tool_handlers(_db),
+                **(search_tool_handlers(_tavily_key) if _tavily_key else {}),
+            }
+        else:
+            _tools, _handlers = [], {}
 
         try:
             response = await run_with_tools(

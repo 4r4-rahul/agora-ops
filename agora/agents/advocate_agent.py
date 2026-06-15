@@ -296,12 +296,17 @@ class AdvocateAgent:
         _db = str(self._settings.db_path)
         _tavily_key = getattr(self._settings, "tavily_api_key", None)
         # Drop web-search tools when no key — avoids a wasted tool-turn on a dead tool.
-        _tools = SQLITE_TOOLS + FLOW_TOOLS + (SEARCH_TOOLS if _tavily_key else [])
-        _handlers = {
-            **sqlite_tool_handlers(_db),
-            **flow_tool_handlers(),
-            **(search_tool_handlers(_tavily_key) if _tavily_key else {}),
-        }
+        # Tools 0% used over a full week (~1,327-1,890 input tok/call). Off by default — the
+        # fact-grounding GATE (deterministic) already handles hallucination, not these tools.
+        if getattr(self._settings, "agent_mcp_tools_enabled", False):
+            _tools = SQLITE_TOOLS + FLOW_TOOLS + (SEARCH_TOOLS if _tavily_key else [])
+            _handlers = {
+                **sqlite_tool_handlers(_db),
+                **flow_tool_handlers(),
+                **(search_tool_handlers(_tavily_key) if _tavily_key else {}),
+            }
+        else:
+            _tools, _handlers = [], {}
 
         _cached_system = [{"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}]
         try:
