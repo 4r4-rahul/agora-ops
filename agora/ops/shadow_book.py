@@ -93,20 +93,28 @@ def _hypothetical_win(strategy: str, direction: str, short_strike: float | None,
     """True=win, False=loss, None=can't decide. Coarse underlying-vs-profit-zone proxy."""
     s = (strategy or "").lower()
     d = (direction or "").lower()
+    # Unplumbed price: entry_debit_credit==0 means we don't know credit-vs-debit, so we can't
+    # pick the right proxy branch. Return None (unmeasurable) rather than mis-branching a credit
+    # spread onto the debit logic.
+    if not entry_cd:
+        return None
     is_credit = entry_cd < 0
     if is_credit and short_strike:
         if "bull" in s or d == "bullish":      # bull put: win if spot stays ≥ short put
             return spot_h >= short_strike
         if "bear" in s or d == "bearish":      # bear call: win if spot stays ≤ short call
             return spot_h <= short_strike
-    # debit vertical / long option → directional vs breakeven (fallback: short strike)
-    level = breakeven if breakeven else short_strike
-    if level is None:
+    # Debit vertical / long option → directional vs BREAKEVEN only. Do NOT fall back to
+    # short_strike: for a bear_put_spread the short strike is the max-PROFIT (lower) leg, so using
+    # it as the win line scores nearly every bearish debit as a LOSS — a bias that spuriously
+    # inflates BLOCK precision and could promote a fail-closed advocate on bad data. If breakeven
+    # is missing, leave the row UNMEASURABLE rather than guess.
+    if not breakeven or breakeven <= 0:
         return None
     if d == "bullish" or "call" in s or "bull" in s:
-        return spot_h > level
+        return spot_h > breakeven
     if d == "bearish" or "put" in s or "bear" in s:
-        return spot_h < level
+        return spot_h < breakeven
     return None
 
 

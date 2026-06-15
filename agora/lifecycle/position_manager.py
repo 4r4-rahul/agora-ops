@@ -94,6 +94,12 @@ class PositionManager:
         # of positions already scaled (one-time per position). Handler injected at startup.
         self._on_partial_close = None
         self._long_scaled: set[str] = set()
+        # Stale-mark safety backstop: count consecutive no-quote refresh cycles per position and
+        # cache the last good underlying spot, so a position blowing out DURING a chronic quote
+        # outage can still be stopped on a conservative intrinsic mark (the no-data HOLD guard
+        # would otherwise freeze its mark and suppress the hard stop to the 21-DTE date close).
+        self._stale_cycles: dict[str, int] = {}
+        self._last_spot: dict[str, float] = {}
 
     def set_macro_context(self, ctx: Any) -> None:
         """Called by session after every macro synthesis — keeps engine regime-aware."""
@@ -475,6 +481,11 @@ class PositionManager:
             if not result:
                 return
 
+            _pid  = position.position_id
+            _spot = float(result.get("spot", 0.0) or 0.0)
+            if _spot > 0:
+                self._last_spot[_pid] = _spot   # underlying is usually quoted even when options aren't
+
             # No-data guard: when the paper account has no live option quote, every leg's
             # bid/ask is 0 and current_mid sums to 0.0. Writing that 0.00 mark fabricates a
             # P&L — for a CREDIT spread (entry_price<0) unrealized=(0-(-credit))*100 = +max_gain,
@@ -482,10 +493,13 @@ class PositionManager:
             # -$1,374 bleed). Treat a missing/partial quote as a DATA OUTAGE: keep the last good
             # mark and HOLD. Only write a mark backed by a real quote on every leg.
             if not result.get("quote_ok", False):
-                logger.debug("Stale/missing mark for %s — %d/%d legs quoted; HOLD (keep last mark)",
-                             position.ticker, result.get("legs_quoted", 0), result.get("legs_total", 0))
+                self._stale_cycles[_pid] = self._stale_cycles.get(_pid, 0) + 1
+                logger.debug("Stale/missing mark for %s — %d/%d legs quoted (stale x%d); HOLD",
+                             position.ticker, result.get("legs_quoted", 0),
+                             result.get("legs_total", 0), self._stale_cycles[_pid])
                 return
 
+            self._stale_cycles[_pid] = 0   # fresh quote — clear the stale counter
             current_mid   = round(result["current_mid"], 4)
             updated_legs  = result["updated_legs"]
             unrealized    = round((current_mid - position.entry_price) * 100 * position.contracts, 2)
@@ -499,6 +513,28 @@ class PositionManager:
 
         except Exception as exc:
             logger.debug("Price refresh failed for %s: %s", position.ticker, exc)
+
+    def _intrinsic_unrealized(self, position: OpenPosition, spot: float) -> float | None:
+        """Conservative intrinsic (no time value) mark for a spread — used ONLY as a stale-quote
+        HARD-STOP backstop, never for profit-taking. Intrinsic ≤ true option value, so it can
+        never over-stop; near a genuine blowout (deep ITM) intrinsic ≈ true value, so it still
+        catches the tail. Needs only the (still-quoted) underlying spot + strikes. None on error."""
+        try:
+            legs = getattr(position, "legs", None)
+            if not legs or spot <= 0:
+                return None
+            spread_mid = 0.0
+            for lg in legs:
+                otype  = getattr(lg, "option_type", None)
+                strike = float(getattr(lg, "strike", 0.0) or 0.0)
+                action = getattr(lg, "action", None)
+                if strike <= 0 or otype not in ("call", "put"):
+                    return None
+                intrinsic = max(0.0, spot - strike) if otype == "call" else max(0.0, strike - spot)
+                spread_mid += intrinsic if action == "buy" else -intrinsic
+            return round((spread_mid - position.entry_price) * 100 * position.contracts, 2)
+        except Exception:
+            return None
 
     # ── Target checks ──────────────────────────────────────────────
 
@@ -572,6 +608,31 @@ class PositionManager:
                     f"Hard stop: 2× entry hit (unrealized=${position.unrealized_pnl:.0f} ≤ ${hard_stop:.0f})",
                 )
             return
+
+        # ── Stale-quote safety backstop ──────────────────────────────
+        # The no-data HOLD guard freezes a position's mark when quotes go missing, so a blowout
+        # that happens DURING a chronic outage is invisible to the mark-based hard stop above.
+        # After several consecutive no-quote cycles, re-derive a CONSERVATIVE intrinsic mark from
+        # the still-quoted underlying and apply the hard stop on that (never profit-taking). This
+        # closes the "no-stop tail" the C-suite flagged as the biggest risk of the mark guard.
+        _pid = position.position_id
+        if self._stale_cycles.get(_pid, 0) >= getattr(self._settings, "spread_stale_stop_cycles", 5):
+            _intr = self._intrinsic_unrealized(position, self._last_spot.get(_pid, 0.0))
+            # Defined-risk spreads cap at max_loss, so the 2×-credit hard stop is often unreachable;
+            # the meaningful backstop is "near max loss during an outage" — close to dodge short-leg
+            # assignment/pin and free capital. Trigger = whichever is REACHABLE: the 2× hard stop OR
+            # 95% of max loss.
+            _ml = abs(getattr(position, "max_loss_dollars", 0.0) or 0.0)
+            _stop_thr = max(hard_stop, -0.95 * _ml) if _ml > 0 else hard_stop
+            if _intr is not None and _intr <= _stop_thr:
+                self._profit_engine.clear_position(_pid)
+                await self._close_position(
+                    position,
+                    f"Stale-quote intrinsic stop: {self._stale_cycles[_pid]} stale cycles, "
+                    f"intrinsic=${_intr:.0f} ≤ ${_stop_thr:.0f} (max_loss=${_ml:.0f})",
+                    source="stale_model_stop",
+                )
+                return
 
         # ── LLM thesis re-validation (intelligence layer, single owner) ──────────────
         # Spreads use the analyst_journal thesis (agent's default lookup). Closes early

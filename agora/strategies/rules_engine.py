@@ -820,6 +820,22 @@ class StrategyRulesEngine:
                     (l.mid_price if l.action == "sell" else -l.mid_price) for l in legs
                 )
                 return round(sell_leg.strike - net_credit, 2)
+            elif strategy == StrategyType.BEAR_PUT_SPREAD:
+                # Debit: buy the higher-strike put, sell the lower. BE = long strike − net debit.
+                # Win below BE. Needed so the shadow-book proxy can measure bearish-debit BLOCKs
+                # instead of biasing them to losses (it previously fell back to the short strike).
+                buy_leg = next(l for l in legs if l.action == "buy")
+                net_debit = sum(
+                    (l.mid_price if l.action == "buy" else -l.mid_price) for l in legs
+                )
+                return round(buy_leg.strike - net_debit, 2)
+            elif strategy == StrategyType.BEAR_CALL_SPREAD:
+                # Credit: sell the lower-strike call, buy the higher. BE = short strike + net credit.
+                sell_leg = next(l for l in legs if l.action == "sell")
+                net_credit = sum(
+                    (l.mid_price if l.action == "sell" else -l.mid_price) for l in legs
+                )
+                return round(sell_leg.strike + net_credit, 2)
         except Exception:
             pass
         return None

@@ -508,6 +508,13 @@ class AgoraSettings(BaseSettings):
                     "a bare 'INVALIDATED' read (often off an empty/undocumented thesis). Code-gated, "
                     "not prompt-dependent.",
     )
+    spread_stale_stop_cycles: int = Field(
+        default=5, ge=2, le=60,
+        description="Consecutive no-quote refresh cycles (≈60s each) before the stale-quote "
+                    "intrinsic hard-stop backstop activates. Re-derives a conservative intrinsic "
+                    "mark from the still-quoted underlying to catch a blowout that happens while "
+                    "option quotes are missing (the no-data HOLD guard would otherwise freeze it).",
+    )
 
     # ── Scan engine ───────────────────────────────────────────────────────────
     use_async_scan_engine: bool = Field(
