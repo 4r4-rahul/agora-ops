@@ -454,11 +454,12 @@ class AgoraSettings(BaseSettings):
                     "verdict with NO LLM call, cutting volume ~92% (~$1/day). Changed strikes re-run.",
     )
     defender_max_tokens: int = Field(
-        default=900, ge=300, le=2000,
-        description="Max output tokens for the defender. The override decision uses ONLY "
-                    "thesis_strength + confidence; the verbose success_modes/most_likely_win JSON is "
-                    "journal-only. Was 2000 (output ~1351 tok = 74% of per-call cost); 900 + effort=low "
-                    "trims the journal narrative without touching the decision fields.",
+        default=2500, ge=300, le=4096,
+        description="Max output tokens for the defender. Headroom for adaptive-thinking reasoning + "
+                    "the answer JSON so neither is truncated (a truncated answer fails to parse -> a "
+                    "lost defense). Cost is driven by actual tokens, not this ceiling; the dedup cache "
+                    "(defender_cache_ttl_secs) is what makes per-call quality affordable, not throttling "
+                    "tokens — volume control beats quality-starving the high-stakes override decision.",
     )
     long_options_vetter_model: str = Field(
         default="claude-opus-4-8",

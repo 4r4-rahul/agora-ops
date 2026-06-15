@@ -149,7 +149,7 @@ class ThesisDefenderAgent:
         # LLM call per (ticker,strategy,strikes) per TTL — cuts defender volume ~92% (see config).
         self._cache: dict[str, tuple[float, Any]] = {}
         self._cache_ttl = float(getattr(settings, "defender_cache_ttl_secs", 14400))
-        self._max_tokens = int(getattr(settings, "defender_max_tokens", 900))
+        self._max_tokens = int(getattr(settings, "defender_max_tokens", 2500))
         self._ensure_table()
         logger.info("ThesisDefenderAgent ready: model=%s shadow=%s cache_ttl=%.0fs max_tok=%d",
                     _MODEL, shadow_mode, self._cache_ttl, self._max_tokens)
@@ -250,8 +250,11 @@ class ThesisDefenderAgent:
                 handlers=_handlers,
                 max_turns=3,
                 max_tokens=self._max_tokens,
-                thinking={"type": "disabled"},
-                output_config={"effort": "low"},
+                # Best-performance reasoning for a high-stakes call (override an advocate risk BLOCK).
+                # The dedup cache controls VOLUME (~92% fewer calls), so we spend the saved budget on
+                # decision QUALITY here rather than throttling it: adaptive thinking + medium effort.
+                thinking={"type": "adaptive"},
+                output_config={"effort": "medium"},
                 timeout=anthropic.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0),
             )
             latency_ms = int((time.monotonic() - t0) * 1000)
