@@ -616,8 +616,9 @@ class PositionManager:
         # the still-quoted underlying and apply the hard stop on that (never profit-taking). This
         # closes the "no-stop tail" the C-suite flagged as the biggest risk of the mark guard.
         _pid = position.position_id
-        if self._stale_cycles.get(_pid, 0) >= getattr(self._settings, "spread_stale_stop_cycles", 5):
-            _intr = self._intrinsic_unrealized(position, self._last_spot.get(_pid, 0.0))
+        _stale = getattr(self, "_stale_cycles", {})
+        if _stale.get(_pid, 0) >= getattr(self._settings, "spread_stale_stop_cycles", 5):
+            _intr = self._intrinsic_unrealized(position, getattr(self, "_last_spot", {}).get(_pid, 0.0))
             # Defined-risk spreads cap at max_loss, so the 2×-credit hard stop is often unreachable;
             # the meaningful backstop is "near max loss during an outage" — close to dodge short-leg
             # assignment/pin and free capital. Trigger = whichever is REACHABLE: the 2× hard stop OR
@@ -628,7 +629,7 @@ class PositionManager:
                 self._profit_engine.clear_position(_pid)
                 await self._close_position(
                     position,
-                    f"Stale-quote intrinsic stop: {self._stale_cycles[_pid]} stale cycles, "
+                    f"Stale-quote intrinsic stop: {_stale.get(_pid, 0)} stale cycles, "
                     f"intrinsic=${_intr:.0f} ≤ ${_stop_thr:.0f} (max_loss=${_ml:.0f})",
                     source="stale_model_stop",
                 )
