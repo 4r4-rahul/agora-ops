@@ -22,6 +22,7 @@ def run_all(db_path: str) -> None:
         _m004_long_journal,
         _m005_signal_stats,
         _m006_add_long_options_lesson,
+        _m007_long_journal_itm_markers,
     ]:
         try:
             fn(db_path)
@@ -240,3 +241,36 @@ def _m005_signal_stats(db_path: str) -> None:
             )
         """)
         logger.info("m005 applied: signal_stats table created")
+
+
+def _m007_long_journal_itm_markers(db_path: str) -> None:
+    """Add lifetime-learning markers so deep-ITM directional entries are distinguishable
+    from the OTM long path in long_journal.
+
+    Before this, an ITM entry wrote strategy='long_put'/'long_call' exactly like OTM and
+    dropped its dte_reason — so 'how did the ITM path perform?' was UN-answerable from the DB.
+    Two backward-compatible columns (NULL/0 for every legacy row):
+      • is_itm     — 1 when the deep-ITM path produced the entry (dte_reason='itm-directional')
+      • dte_reason — the DTE/path tag the agent already computes ('itm-directional', the OTM
+                     4-factor reason, etc.), previously computed-then-discarded.
+    Idempotent: only adds a column that isn't present yet."""
+    with sqlite3.connect(db_path, timeout=15) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='long_journal'"
+        ).fetchone()
+        if row is None:
+            return  # table not created yet — _m004 will build the current shape on first run
+        existing = {r[1] for r in conn.execute("PRAGMA table_info(long_journal)").fetchall()}
+        added = []
+        if "is_itm" not in existing:
+            conn.execute("ALTER TABLE long_journal ADD COLUMN is_itm INTEGER DEFAULT 0")
+            added.append("is_itm")
+        if "dte_reason" not in existing:
+            conn.execute("ALTER TABLE long_journal ADD COLUMN dte_reason TEXT")
+            added.append("dte_reason")
+        if added:
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_long_is_itm ON long_journal(is_itm, decided_at_utc)"
+            )
+            logger.info("m007 applied: long_journal +%s", "+".join(added))

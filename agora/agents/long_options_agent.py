@@ -1499,8 +1499,9 @@ class LongOptionsAgent:
                         strike, expiry, dte, delta_approx, premium_per_sh,
                         ivr, vix, regime, flow_direction,
                         momentum_score, conviction_score, signal_stack,
-                        outcome, block_reason, max_loss_dollars, max_gain_dollars, contracts
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        outcome, block_reason, max_loss_dollars, max_gain_dollars, contracts,
+                        is_itm, dte_reason
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """, (
                     position_id or "",
                     decision.ticker,
@@ -1524,6 +1525,9 @@ class LongOptionsAgent:
                     rec.max_loss_dollars if rec else 0,
                     rec.max_gain_dollars if rec else 0,
                     decision.contracts,
+                    # Lifetime ITM marker: the deep-ITM path is the only producer of this dte_reason.
+                    1 if getattr(decision, "dte_reason", "") == "itm-directional" else 0,
+                    getattr(decision, "dte_reason", "") or "",
                 ))
         except Exception as exc:
             logger.debug("long_journal write error: %s", exc)

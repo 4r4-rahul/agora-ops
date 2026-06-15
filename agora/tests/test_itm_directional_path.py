@@ -175,3 +175,53 @@ def test_itm_skips_premium_over_cap():
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+# ── Lifetime tracking: ITM entries are distinguishable in long_journal ─────────
+def test_itm_journaled_with_marker(tmp_path):
+    """A proceeded ITM entry persists is_itm=1 + dte_reason='itm-directional', so the path's
+    lifetime performance is attributable in the DB (vs being indistinguishable from OTM)."""
+    import sqlite3
+    from agora.ops.db_migrations import run_all
+    db = str(tmp_path / "j.db")
+    run_all(db)
+    s = _settings(long_options_itm_enabled=True)
+    s.db_path = db
+    agent = LongOptionsAgent(s)
+    dec = _call_itm(agent)
+    assert dec.outcome == "proceed", dec.block_reason
+    agent.journal(dec, db, position_id="ITM-1")
+    c = sqlite3.connect(db)
+    c.row_factory = sqlite3.Row
+    r = c.execute("SELECT is_itm, dte_reason, strategy FROM long_journal WHERE position_id='ITM-1'").fetchone()
+    assert r["is_itm"] == 1
+    assert r["dte_reason"] == "itm-directional"
+    assert r["strategy"] == "long_put"
+
+
+def test_otm_journaled_without_itm_marker(tmp_path):
+    """Control: an OTM long entry journals is_itm=0 — the marker truly separates the two paths."""
+    import sqlite3
+    from agora.ops.db_migrations import run_all
+    from agora.agents.long_options_agent import LongDecision
+    from agora.core.models import TradeRecommendation, SpreadLeg, StrategyPillar
+    from datetime import date, timedelta
+    db = str(tmp_path / "j.db")
+    run_all(db)
+    agent = LongOptionsAgent(_settings())
+    exp = date.today() + timedelta(days=30)
+    rec = TradeRecommendation(
+        session_id="s", ticker="AMD", strategy="long_call", pillar=StrategyPillar.DIRECTIONAL,
+        direction="bullish",
+        legs=[SpreadLeg(option_type="call", strike=110.0, expiration=exp, action="buy",
+                        contracts=1, delta=0.35, mid_price=2.0)],
+        contracts=1, entry_debit_credit=200.0, max_loss_dollars=200.0, max_gain_dollars=400.0,
+        reward_risk_ratio=2.0,
+    )
+    dec = LongDecision(ticker="AMD", strategy="long_call", outcome="proceed", block_reason="",
+                       recommendation=rec, dte=30, strike=110.0, delta_approx=0.35, premium=2.0,
+                       dte_reason="4factor:standard", contracts=1)
+    agent.journal(dec, db, position_id="OTM-1")
+    c = sqlite3.connect(db)
+    r = c.execute("SELECT is_itm, dte_reason FROM long_journal WHERE position_id='OTM-1'").fetchone()
+    assert r[0] == 0 and r[1] == "4factor:standard"
