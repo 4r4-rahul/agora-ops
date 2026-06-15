@@ -169,7 +169,10 @@ class ExecutiveAgent:
                 await self._run_patrol()
             except Exception as exc:
                 logger.error("%s patrol error: %s", self.TITLE, exc)
-            await asyncio.sleep(self.PATROL_INTERVAL_SEC)
+            # Configurable cadence (csuite_patrol_interval_min, default 60). Raise to cut C-suite
+            # LLM cost — routine officer self-audits are not time-critical.
+            _interval = getattr(self._settings, "csuite_patrol_interval_min", 60) * 60
+            await asyncio.sleep(_interval)
 
     async def _run_patrol(self) -> None:
         """

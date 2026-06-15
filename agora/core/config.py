@@ -438,6 +438,16 @@ class AgoraSettings(BaseSettings):
                     "structure fingerprint (ticker+strategy+strikes+macro) so re-reviewing the same "
                     "structure reuses the verdict; a changed structure or macro flip re-runs.",
     )
+    long_options_vetter_model: str = Field(
+        default="claude-opus-4-8",
+        description="Model for the long-options Opus vetter (the deliberate quality gate). Default "
+                    "Opus; set claude-sonnet-4-6 to trade quality for ~80% lower per-call cost.",
+    )
+    csuite_patrol_interval_min: int = Field(
+        default=60, ge=30, le=240,
+        description="Minutes between C-suite officer patrols. 60 = hourly (~90 calls/day, ~$0.5). "
+                    "Raise to 120 to halve C-suite LLM cost; routine officer reads are not time-critical.",
+    )
     agent_mcp_tools_enabled: bool = Field(
         default=False,
         description="Attach the MCP tool schemas (sqlite/search/flow) to the analyst & advocate "

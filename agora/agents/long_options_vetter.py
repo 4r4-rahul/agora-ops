@@ -77,6 +77,9 @@ VERDICT OPTIONS:
 
 Output ONLY valid JSON. No prose, no markdown, no code blocks. Just the JSON object."""
 
+# Prompt-cache the static system prompt so the (Opus) input isn't re-billed in full each call.
+_CACHED_SYSTEM = [{"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}]
+
 _PROMPT_TEMPLATE = """PROPOSED TRADE:
 Ticker: {ticker}
 Strategy: {strategy} ({direction})
@@ -133,9 +136,12 @@ class LongOptionsVetterAgent:
         self._client     = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
         self._shadow     = getattr(settings, "long_options_vetter_shadow_mode", True)
         self._min_conv   = getattr(settings, "long_options_vetter_min_conviction", 3)
+        # Model configurable — defaults to Opus (the deliberate quality gate for long options);
+        # set long_options_vetter_model=claude-sonnet-4-6 to trade quality for ~80% lower per-call cost.
+        self._model      = getattr(settings, "long_options_vetter_model", _MODEL)
         logger.info(
             "LongOptionsVetterAgent ready: model=%s shadow=%s min_conviction=%d",
-            _MODEL, self._shadow, self._min_conv,
+            self._model, self._shadow, self._min_conv,
         )
 
     @property
@@ -273,10 +279,10 @@ class LongOptionsVetterAgent:
         for i in range(attempts):
             try:
                 return await self._client.messages.create(
-                    model       = _MODEL,
+                    model       = self._model,
                     max_tokens  = 512,
                     thinking    = {"type": "adaptive"},
-                    system      = _SYSTEM,
+                    system      = _CACHED_SYSTEM,
                     messages    = [{"role": "user", "content": prompt}],
                     timeout     = anthropic.Timeout(connect=10.0, read=45.0, write=10.0, pool=10.0),
                 )
