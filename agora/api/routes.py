@@ -1388,6 +1388,22 @@ async def get_edge() -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+@router.get("/health/defender")
+async def get_defender_precision() -> JSONResponse:
+    """Thesis Defender's measured override precision over REAL fills, lifetime: of the BLOCKs it
+    moderated to CAUTION (strong defense + conf>=0.65), how many of the let-through trades actually
+    won? The metric that decides whether the defender earns its keep. Pure observability."""
+    session = get_session()
+    if session is None:
+        return JSONResponse({"error": "session not ready"}, status_code=503)
+    try:
+        from agora.ops.defender_metrics import defender_override_precision
+        return JSONResponse(defender_override_precision(str(session._settings.db_path)))
+    except Exception as exc:
+        logger.error("Defender precision error: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 @router.get("/health/promotion-readiness")
 async def get_promotion_readiness() -> JSONResponse:
     """
