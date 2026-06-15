@@ -81,6 +81,7 @@ class StrategyRulesEngine:
         vix: float | None = None,
         dynamic_params: Any | None = None,  # DynamicParams — overrides config defaults
         force_strategy_type: "StrategyType | None" = None,  # bypass _select_strategy (selector override)
+        macro_stance: str | None = None,                    # regime gate: bias credit direction with trend
     ) -> TradeRecommendation | None:
         """
         Select strategy and strikes based on conviction and market state.
@@ -106,7 +107,7 @@ class StrategyRulesEngine:
             eff_stop_loss   = self._settings.stop_loss_multiplier
             eff_dte_adj     = 0
 
-        direction = direction_override or self._infer_direction(conviction, gex)
+        direction = direction_override or self._infer_direction(conviction, gex, macro_stance)
         strategy_type, base_dte = self._select_strategy(conviction, direction, gex)
         if force_strategy_type is not None and force_strategy_type != strategy_type:
             if force_strategy_type not in _BUILDABLE_STRATEGIES:
@@ -328,11 +329,18 @@ class StrategyRulesEngine:
     # ── Strategy selection ─────────────────────────────────────────
 
     def _infer_direction(
-        self, conviction: ConvictionScore, gex: GexSignal | None
+        self, conviction: ConvictionScore, gex: GexSignal | None,
+        macro_stance: str | None = None,
     ) -> str:
         """Derive direction from pillar + GEX when not explicitly set."""
         pillar = conviction.pillar
         if pillar == StrategyPillar.VOL_PREMIUM:
+            # Regime gate (source-level complement to the StrategySelector flip): don't default to
+            # a BULLISH put-credit spread when the macro is risk_off — bias to the bearish credit
+            # (bear_call) so we sell premium WITH the trend, not against it. Gated by config.
+            if (str(macro_stance or "") == "risk_off"
+                    and getattr(self._settings, "block_bull_put_in_risk_off", True)):
+                return "bearish"
             return "neutral"   # credit spreads — direction chosen by GEX
         if pillar == StrategyPillar.EVENT_CPI:
             return "neutral"   # iron condor

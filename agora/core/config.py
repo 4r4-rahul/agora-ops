@@ -157,6 +157,7 @@ class AgoraSettings(BaseSettings):
     disagreement_resolver_floor: float = Field(default=40.0, description="Hard no-trade floor in DisagreementResolver. Lower for paper-mode validation.")
     min_credit_per_share: float = Field(default=0.50, description="Minimum credit collected per share for credit spreads. $0.50 avoids IBKR leg rejections in live; lower in paper mode.")
     min_credit_to_width_ratio: float = Field(default=0.30, ge=0.0, le=0.6, description="Binding edge gate for credit verticals (bull_put/bear_call): reject any spread whose credit/width is below this. Sub-0.30 credit spreads are negative-EV by construction (17/17 historical losers were 0.13-0.23; winner 0.61). Iron condors exempt.")
+    block_bull_put_in_risk_off: bool = Field(default=True, description="Regime gate: in a risk_off macro, build a BEARISH credit spread (bear_call) instead of defaulting VOL_PREMIUM to a bullish bull_put — sell premium WITH the trend. Source-level complement to the StrategySelector's bull_put->bear_call flip.")
     force_vol_selling_ok: bool = Field(default=False, description="Paper-mode override: bypass MacroContext.vol_selling_ok=False gate. Lets credit spreads through when IVR/VIX are just below threshold.")
     long_loop_parallel_enabled: bool = Field(
         default=False,

@@ -2978,6 +2978,7 @@ class AgoraSession:
                 iv_rank=snap.iv_rank,
                 vix=snap.vix,
                 dynamic_params=self._dynamic_params,
+                macro_stance=getattr(self._macro_context, "macro_stance", None),
             )
 
             if not recommendation:
