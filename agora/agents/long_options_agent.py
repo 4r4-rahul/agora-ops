@@ -383,13 +383,23 @@ class LongOptionsAgent:
         # Only enforce when we have real data.
         ivr_cap    = self._settings.long_options_ivr_cap
         active_ivr = per_ticker_ivr if per_ticker_ivr is not None else macro_ivr
+        # When OTM is priced out (IVR > cap) the ITM-directional path MAY still be viable —
+        # a deep-ITM (intrinsic-dominated) leg is largely vega-immune, so a rich IV that kills
+        # OTM doesn't kill ITM. Defer the skip and route to _try_itm_entry AFTER scoring (so we
+        # have direction/conviction). DARK by default: long_options_itm_enabled=False → this is
+        # never set true and the original hard-skip below fires unchanged.
+        _itm_mode = False
         if active_ivr is not None and active_ivr > ivr_cap:
-            return LongDecision(
-                ticker=ticker, strategy="skip", outcome="skipped",
-                block_reason=f"IVR={active_ivr:.0f} > cap {ivr_cap:.0f} — options too expensive",
-                recommendation=None, ivr=ivr_display, vix=vix, regime=regime,
-                per_ticker_ivr=per_ticker_ivr or 0.0,
-            )
+            _itm_ceiling = float(getattr(self._settings, "long_options_itm_ivr_cap", 85.0))
+            if getattr(self._settings, "long_options_itm_enabled", False) and active_ivr <= _itm_ceiling:
+                _itm_mode = True   # defer skip — ITM may still clear all its own guards
+            else:
+                return LongDecision(
+                    ticker=ticker, strategy="skip", outcome="skipped",
+                    block_reason=f"IVR={active_ivr:.0f} > cap {ivr_cap:.0f} — options too expensive",
+                    recommendation=None, ivr=ivr_display, vix=vix, regime=regime,
+                    per_ticker_ivr=per_ticker_ivr or 0.0,
+                )
 
         # ── 3. Signal scoring ─────────────────────────────────────────────────
         rsi_ob      = self._settings.long_options_rsi_overbought
@@ -430,6 +440,20 @@ class LongOptionsAgent:
             )
 
         opt_type = "call" if direction == "bullish" else "put"
+
+        # ── 3b. ITM-directional fork (DARK) ───────────────────────────────────
+        # If OTM was priced out but ITM is enabled & in-band, hand off to the fully
+        # self-contained ITM builder and return its verdict. The OTM flow below is
+        # NEVER reached in this branch (no double-build). Inert when itm disabled.
+        if _itm_mode:
+            return self._try_itm_entry(
+                ticker=ticker, spot=spot, options_chain=options_chain,
+                opt_type=opt_type, direction=direction, strategy=strategy,
+                conviction=conviction, quality=quality, signal_stack=signal_stack,
+                flow_dir=flow_dir, momentum=momentum, active_ivr=active_ivr,
+                ivr_display=ivr_display, vix=vix, regime=regime,
+                per_ticker_ivr=per_ticker_ivr, session_id=session_id,
+            )
 
         # ── 4. DTE selection — 4-factor professional formula ──────────────────
         hold_days  = self._settings.long_options_max_hold_days
@@ -686,6 +710,222 @@ class LongOptionsAgent:
             contracts=contracts,
             profit_target_pct=profit_target_pct,
         )
+
+    # ── ITM-directional path (DARK — long-options expert + 2 verifiers) ────────
+    def _try_itm_entry(
+        self,
+        *,
+        ticker:         str,
+        spot:           float,
+        options_chain:  dict[str, Any],
+        opt_type:       str,
+        direction:      str,
+        strategy:       Any,
+        conviction:     int,
+        quality:        float,
+        signal_stack:   dict,
+        flow_dir:       str | None,
+        momentum:       dict,
+        active_ivr:     float,
+        ivr_display:    float,
+        vix:            float,
+        regime:         str,
+        per_ticker_ivr: float | None,
+        session_id:     str,
+    ) -> LongDecision:
+        """Deep-ITM directional entry for sustained-trend, high-IV names where OTM is priced out.
+
+        Fully self-contained — it does NOT touch the OTM flow. Every verifier de-risking guard
+        is enforced here and only here. Returns a 'proceed' LongDecision only if ALL guards clear;
+        otherwise a 'skipped' LongDecision with a precise reason. Reached only when
+        long_options_itm_enabled=True, so it is completely inert by default.
+        """
+        s = self._settings
+        _skip = lambda why: LongDecision(  # noqa: E731 — terse local skip builder
+            ticker=ticker, strategy=str(strategy), outcome="skipped",
+            block_reason=f"ITM: {why}", recommendation=None,
+            ivr=ivr_display, vix=vix, regime=regime, per_ticker_ivr=per_ticker_ivr or 0.0,
+            flow_direction=flow_dir, conviction=conviction, signal_stack=signal_stack,
+        )
+
+        # ── G1. High-conviction only — no score-2 ITM ────────────────────────
+        min_conv = int(getattr(s, "long_options_itm_min_conviction", 3))
+        if conviction < min_conv:
+            return _skip(f"conviction {conviction} < {min_conv} (ITM is high-conviction only)")
+
+        # ── G2. Confirmed sustained trend (10d return + dual-SMA alignment) ───
+        ret_10d  = float(momentum.get("ret_10d", 0.0) or 0.0)
+        trend_min = float(getattr(s, "long_options_itm_trend_ret", 0.05))
+        sma20_ok = bool(momentum.get("above_sma20", False))
+        sma50_ok = bool(momentum.get("above_sma50", False))
+        if direction == "bullish":
+            if not (ret_10d >= trend_min and sma20_ok and sma50_ok):
+                return _skip(f"no confirmed uptrend (ret10d={ret_10d:.1%}<{trend_min:.0%} or below SMAs)")
+        else:  # bearish
+            if not (ret_10d <= -trend_min and not sma20_ok and not sma50_ok):
+                return _skip(f"no confirmed downtrend (ret10d={ret_10d:.1%} or above SMAs)")
+
+        # ── G3. Exhaustion guard — never chase a capitulation/blow-off ────────
+        rsi = float(momentum.get("rsi", 50.0) or 50.0)
+        if opt_type == "put" and rsi < int(getattr(s, "long_options_itm_rsi_put_max", 35)):
+            return _skip(f"RSI={rsi:.0f} too oversold for an ITM put (bounce risk)")
+        if opt_type == "call" and rsi > int(getattr(s, "long_options_itm_rsi_call_min", 65)):
+            return _skip(f"RSI={rsi:.0f} too overbought for an ITM call (blow-off risk)")
+
+        # ── G4. Flow must not OPPOSE the trade ───────────────────────────────
+        if flow_dir and flow_dir not in ("neutral", direction):
+            return _skip(f"flow {flow_dir} opposes {direction} — ITM needs alignment")
+
+        # ── G5. Expiry in the ITM DTE window (wider/longer than OTM) ──────────
+        dte_min = int(getattr(s, "long_options_itm_dte_min", 21))
+        dte_max = int(getattr(s, "long_options_itm_dte_max", 45))
+        today   = date.today()
+        cands   = []
+        for exp_str, chain in options_chain.items():
+            try:
+                exp_date = date.fromisoformat(exp_str)
+            except (ValueError, TypeError):
+                continue
+            d = (exp_date - today).days
+            if dte_min <= d <= dte_max:
+                cands.append((d, exp_date, chain))
+        if not cands:
+            return _skip(f"no expiry in ITM DTE window [{dte_min},{dte_max}]")
+        cands.sort(key=lambda x: abs(x[0] - (dte_min + dte_max) // 2))
+        dte, expiry, chain_slice = cands[0]
+        chain_df = chain_slice.get("calls" if opt_type == "call" else "puts")
+        if chain_df is None or (hasattr(chain_df, "empty") and chain_df.empty):
+            return _skip(f"empty {opt_type} chain for {expiry}")
+
+        # ── G6. ITM strike at target delta (intrinsic-dominated) ─────────────
+        target_delta = float(getattr(s, "long_options_itm_target_delta", 0.75))
+        strike, delta_approx = self._select_itm_strike(chain_df, opt_type, spot, expiry, target_delta)
+        if strike is None:
+            return _skip("no suitable ITM strike near target delta")
+        # ITM validation (mirror of the OTM check, inverted)
+        if opt_type == "call" and strike >= spot:
+            return _skip(f"call strike {strike} not ITM (spot={spot:.2f})")
+        if opt_type == "put" and strike <= spot:
+            return _skip(f"put strike {strike} not ITM (spot={spot:.2f})")
+
+        # ── G7. Liquidity — higher OI floor for thin deep strikes ────────────
+        min_oi = int(getattr(s, "long_options_itm_min_oi", 500))
+        oi_at_strike = self._get_open_interest(chain_df, strike)
+        if oi_at_strike < min_oi:
+            return _skip(f"OI={oi_at_strike} < {min_oi} at {strike} (deep strikes are thin)")
+
+        # ── G8. Premium fetch ────────────────────────────────────────────────
+        premium_per_sh = self._get_mid(chain_df, strike)
+        if premium_per_sh <= 0:
+            return _skip(f"zero premium for {ticker} {strike}{opt_type[0].upper()}")
+        premium_per_contract = premium_per_sh * 100
+
+        # ── G9. Tighter bid-ask gate — wide deep-ITM spreads erase the edge ──
+        max_ba = float(getattr(s, "long_options_itm_max_bid_ask_pct", 0.10))
+        bid_ask_pct = self._bid_ask_pct(chain_df, strike)
+        if bid_ask_pct > max_ba:
+            return _skip(f"bid-ask {bid_ask_pct:.0%} > {max_ba:.0%} — slippage kills ITM edge")
+
+        # ── G10. Sizing — 1 contract, tight per-trade premium cap ────────────
+        contracts   = 1
+        max_prem_pct = float(getattr(s, "long_options_itm_max_premium_pct", 0.05))
+        max_premium  = s.account_size * max_prem_pct
+        if premium_per_contract > max_premium:
+            return _skip(f"premium ${premium_per_contract:.0f} > ITM per-trade cap "
+                         f"${max_premium:.0f} ({max_prem_pct:.0%})")
+
+        # ── Build the ITM recommendation ─────────────────────────────────────
+        leg = SpreadLeg(
+            option_type=opt_type, strike=strike, expiration=expiry, action="buy",
+            contracts=contracts, delta=delta_approx, mid_price=premium_per_sh,
+        )
+        max_loss_dollars = round(premium_per_contract * contracts, 2)
+        profit_target_pct = self._conviction_profit_target(conviction)
+        _sl_pct = float(getattr(s, "long_options_stop_loss_pct", 0.50)) or 0.50
+        max_gain_dollars = round(max_loss_dollars * profit_target_pct, 2)
+        _pt_ivr_str = f"{per_ticker_ivr:.0f}" if per_ticker_ivr is not None else "N/A"
+        signals_readable = json.dumps(signal_stack)
+        rec = TradeRecommendation(
+            session_id=session_id, ticker=ticker, strategy=strategy,
+            pillar=StrategyPillar.DIRECTIONAL, direction=direction,
+            legs=[leg], contracts=contracts,
+            entry_debit_credit=round(premium_per_contract * contracts, 2),
+            max_loss_dollars=max_loss_dollars, max_gain_dollars=max_gain_dollars,
+            reward_risk_ratio=round(profit_target_pct / _sl_pct, 2),
+            breakeven_price=(
+                round(strike + premium_per_sh, 2) if opt_type == "call"
+                else round(strike - premium_per_sh, 2)
+            ),
+            stop_loss_pct=s.long_options_stop_loss_pct,
+            target_dte_close=max(7, dte - 5),
+            conviction_score=float(min(conviction * 20, 100)),
+            size_multiplier=float(contracts),
+            reasoning=(
+                f"ITM-directional {opt_type} | score={conviction} qual={quality:.1f} | "
+                f"contracts={contracts} | PT={profit_target_pct:.0%} | "
+                f"Δtarget={target_delta:.2f} (Δ={abs(delta_approx):.2f}) | "
+                f"IVR={ivr_display:.0f} (ptIVR={_pt_ivr_str}, OTM-priced-out) | "
+                f"DTE={dte} | strike={strike} ITM | prem=${premium_per_sh:.2f}/sh | "
+                f"RSI={rsi:.0f} ret10d={ret_10d:.1%} OI={oi_at_strike} | signals={signals_readable}"
+            ),
+        )
+        logger.info(
+            "LongOptions[ITM] [%s] %s %s%.0f exp=%s DTE=%d Δ=%.2f prem=$%.2f "
+            "contracts=%d score=%d IVR=%.0f RSI=%.0f ret10d=%.1f%%",
+            ticker, str(strategy).upper(), opt_type[0].upper(), strike, expiry, dte,
+            abs(delta_approx), premium_per_sh, contracts, conviction, active_ivr, rsi, ret_10d * 100,
+        )
+        return LongDecision(
+            ticker=ticker, strategy=str(strategy), outcome="proceed", block_reason="",
+            recommendation=rec, dte=dte, strike=strike, delta_approx=delta_approx,
+            premium=premium_per_sh, ivr=ivr_display, per_ticker_ivr=per_ticker_ivr or 0.0,
+            vix=vix, regime=regime, flow_direction=flow_dir,
+            momentum_score=momentum.get("rsi_norm", 0.5), conviction=conviction,
+            signal_quality=quality, signal_stack=signal_stack, dte_reason="itm-directional",
+            contracts=contracts, profit_target_pct=profit_target_pct,
+        )
+
+    def _select_itm_strike(
+        self,
+        chain_df:     Any,
+        opt_type:     str,
+        spot:         float,
+        expiry:       date,
+        target_delta: float,
+    ) -> tuple[float | None, float]:
+        """ITM mirror of _select_strike: pick the strike whose |delta| is nearest target_delta,
+        restricted to the IN-the-money side (calls below spot, puts above spot)."""
+        try:
+            df  = chain_df.copy()
+            dte = (expiry - date.today()).days
+            if opt_type == "call":
+                df = df[df["strike"] < spot * 0.999]   # ITM calls: strike below spot
+            else:
+                df = df[df["strike"] > spot * 1.001]   # ITM puts: strike above spot
+            if df.empty:
+                return None, 0.0
+            if "delta" in df.columns and df["delta"].notna().any():
+                df = df[df["delta"].notna()].copy()
+                df["_delta_abs"] = df["delta"].abs()
+            else:
+                if "impliedVolatility" not in df.columns:
+                    return None, 0.0
+                df = df[df["impliedVolatility"].notna() & (df["impliedVolatility"] > 0)].copy()
+                df["_delta_abs"] = df.apply(
+                    lambda r: abs(self._approx_delta(
+                        spot, float(r["strike"]), float(r["impliedVolatility"]), dte, opt_type
+                    )), axis=1,
+                )
+            if df.empty:
+                return None, 0.0
+            idx    = (df["_delta_abs"] - target_delta).abs().idxmin()
+            row    = df.loc[idx]
+            strike = float(row["strike"])
+            delta  = float(row["_delta_abs"])
+            return strike, (delta if opt_type == "call" else -delta)
+        except Exception as exc:
+            logger.debug("LongOptions ITM strike selection error: %s", exc)
+            return None, 0.0
 
     # ── Signal scoring ────────────────────────────────────────────────────────
 

@@ -346,11 +346,35 @@ def _seed_trade_records(db_path, rows):
     conn.close()
 
 
+def _seed_positions(db_path, rows, *, close_source="lifecycle"):
+    """Seed the positions table with REAL-CLOSE rows the breaker actually reads.
+
+    _get_todays_realized_pnl was repointed off trade_records (model marks that disagree in
+    SIGN with the fill) onto positions/_REAL_CLOSE — the single trustworthy P&L source. The
+    breaker tests must therefore seed positions, not trade_records. Each row is
+    (position_id, realized_pnl, close_date); close_source defaults to a trusted provenance so
+    the _REAL_CLOSE predicate counts it."""
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS positions ("
+        "  position_id TEXT, realized_pnl REAL, close_date TEXT, "
+        "  status TEXT, close_source TEXT"
+        ")"
+    )
+    conn.executemany(
+        "INSERT INTO positions (position_id, realized_pnl, close_date, status, close_source) "
+        "VALUES (?, ?, ?, 'closed', ?)",
+        [(pid, pnl, cd, close_source) for (pid, pnl, cd) in rows],
+    )
+    conn.commit()
+    conn.close()
+
+
 class TestCircuitBreakerRealizedPnl:
     def test_sums_only_todays_closes(self, settings):
         today = date.today().isoformat()
         yesterday = (date.today() - timedelta(days=1)).isoformat()
-        _seed_trade_records(settings.db_path, [
+        _seed_positions(settings.db_path, [
             ("a", -500.0, today),
             ("b", -300.0, today),
             ("c", +200.0, today),
@@ -402,7 +426,7 @@ class TestCircuitBreakerDailyLossThreshold:
     def test_trips_when_loss_exceeds_limit(self, settings):
         assert settings.daily_loss_limit_dollars == pytest.approx(2_000.0)
         # Realized -$1,500 today + unrealized drop of -$600 = -$2,100 < -$2,000 → TRIP.
-        _seed_trade_records(settings.db_path, [("x", -1_500.0, date.today().isoformat())])
+        _seed_positions(settings.db_path, [("x", -1_500.0, date.today().isoformat())])
         cb = CircuitBreakerAgent(settings=settings)
         daily_pnl = self._daily_pnl(cb, total_unrealized=-600.0, baseline=0.0)
         assert daily_pnl == pytest.approx(-2_100.0)
@@ -410,7 +434,7 @@ class TestCircuitBreakerDailyLossThreshold:
 
     def test_does_not_trip_when_loss_within_limit(self, settings):
         # Realized -$500 + unrealized -$1,000 = -$1,500 > -$2,000 → NO trip.
-        _seed_trade_records(settings.db_path, [("x", -500.0, date.today().isoformat())])
+        _seed_positions(settings.db_path, [("x", -500.0, date.today().isoformat())])
         cb = CircuitBreakerAgent(settings=settings)
         daily_pnl = self._daily_pnl(cb, total_unrealized=-1_000.0, baseline=0.0)
         assert daily_pnl == pytest.approx(-1_500.0)

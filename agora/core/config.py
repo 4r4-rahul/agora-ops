@@ -704,6 +704,24 @@ class AgoraSettings(BaseSettings):
                     "cheapest/highest-volume bucket and is left advisory-only otherwise. Floor "
                     "self-tightens as signal_stats fills; at current data no signal trips it.",
     )
+    # ── ITM-directional path (long-options expert + 2 verifiers — SHIPPED DARK) ──
+    # Deep-ITM (intrinsic-dominated) directional buying for sustained-trend high-IV names, where
+    # OTM long premium is locked out by the IVR cap but ITM is largely vega-immune. N=1 empirical
+    # basis -> enabled=False (shadow-first). All verifier de-risking baked in.
+    long_options_itm_enabled: bool = Field(default=False, description="DARK. Master switch for the deep-ITM directional path. Off until shadow-validated (>=30 ITM closes incl. adverse reversals).")
+    long_options_itm_ivr_cap: float = Field(default=85.0, ge=60.0, le=100.0, description="ITM-only IVR ceiling. ITM activates when IVR>long_options_ivr_cap (OTM locked out) but <= this. Above this, even ITM's small extrinsic + fat bid-ask are punishing.")
+    long_options_itm_target_delta: float = Field(default=0.75, ge=0.65, le=0.85, description="Target delta for the ITM leg (intrinsic-dominated). Strike is delta-driven; %ITM floats.")
+    long_options_itm_min_conviction: int = Field(default=3, ge=3, le=5, description="ITM requires high conviction (no score-2 ITM).")
+    long_options_itm_trend_ret: float = Field(default=0.05, ge=0.03, le=0.15, description="10-day return magnitude required for a CONFIRMED sustained trend before paying deep-ITM premium.")
+    long_options_itm_rsi_put_max: int = Field(default=35, ge=20, le=45, description="Exhaustion guard: do NOT buy an ITM PUT when RSI < this (capitulation bottom — a high-delta put there loses fast on the bounce).")
+    long_options_itm_rsi_call_min: int = Field(default=65, ge=55, le=80, description="Exhaustion guard: do NOT buy an ITM CALL when RSI > this (blow-off top).")
+    long_options_itm_max_premium_pct: float = Field(default=0.05, ge=0.02, le=0.15, description="Tighter per-trade premium cap for ITM (full premium is at risk on a high-delta single). 0.05 keeps a single bad ITM day inside the daily breaker.")
+    long_options_itm_max_positions: int = Field(default=1, ge=1, le=5, description="Max concurrent ITM positions — 1 by design (a single ITM contract IS the high-conviction bet; protects the daily breaker).")
+    long_options_itm_min_oi: int = Field(default=500, ge=100, le=2000, description="Higher OI floor for ITM — deep strikes are thin; slippage on a wide spread erases the vega edge.")
+    long_options_itm_max_bid_ask_pct: float = Field(default=0.10, ge=0.03, le=0.25, description="Tighter bid-ask gate for ITM — crossing a wide deep-ITM spread can erase ~40% of the vega advantage.")
+    long_options_itm_dte_min: int = Field(default=21, ge=14, le=45, description="ITM DTE window min — wider/longer than OTM (slow theta, multi-day trend).")
+    long_options_itm_dte_max: int = Field(default=45, ge=21, le=90, description="ITM DTE window max.")
+    long_options_itm_max_hold_days: int = Field(default=10, ge=5, le=20, description="ITM hold horizon (vs 5-day OTM) — high-delta rides the trend; slow theta.")
     long_options_min_oi: int = Field(
         default=200,
         description="Minimum open interest at the selected strike. Ensures marketable quotes "
