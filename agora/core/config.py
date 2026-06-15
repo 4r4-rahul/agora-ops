@@ -150,6 +150,7 @@ class AgoraSettings(BaseSettings):
     high_conviction_score: float = Field(default=80.0, description="Score for 1.5x size multiplier")
     disagreement_resolver_floor: float = Field(default=40.0, description="Hard no-trade floor in DisagreementResolver. Lower for paper-mode validation.")
     min_credit_per_share: float = Field(default=0.50, description="Minimum credit collected per share for credit spreads. $0.50 avoids IBKR leg rejections in live; lower in paper mode.")
+    min_credit_to_width_ratio: float = Field(default=0.30, ge=0.0, le=0.6, description="Binding edge gate for credit verticals (bull_put/bear_call): reject any spread whose credit/width is below this. Sub-0.30 credit spreads are negative-EV by construction (17/17 historical losers were 0.13-0.23; winner 0.61). Iron condors exempt.")
     force_vol_selling_ok: bool = Field(default=False, description="Paper-mode override: bypass MacroContext.vol_selling_ok=False gate. Lets credit spreads through when IVR/VIX are just below threshold.")
     long_loop_parallel_enabled: bool = Field(
         default=False,
@@ -494,6 +495,18 @@ class AgoraSettings(BaseSettings):
                     "trailing stop owns winners (it was built to let them run). The LLM only "
                     "adjudicates RED longs (thesis-break vs noise). Stops the day-1 churn that "
                     "cut e.g. META +$1,435 / ORCL +$1,325 on entry day.",
+    )
+    spread_exit_llm_min_hold_days: int = Field(
+        default=3, ge=1, le=10,
+        description="Min calendar days a CREDIT/DEBIT spread is held before the LLM may thesis-exit "
+                    "it. Spreads are theta trades on 30-45 DTE; the day-0 guard let the brain close "
+                    "39-DTE spreads on day 1. Deterministic stops/DTE still own the downside.",
+    )
+    spread_exit_require_kill: bool = Field(
+        default=True,
+        description="For spreads, honor an LLM CLOSE_NOW only on a HARD kill-condition trigger, not "
+                    "a bare 'INVALIDATED' read (often off an empty/undocumented thesis). Code-gated, "
+                    "not prompt-dependent.",
     )
 
     # ── Scan engine ───────────────────────────────────────────────────────────

@@ -184,6 +184,22 @@ class StrategyRulesEngine:
                             conviction.ticker, credit_per_share, credit_floor)
                 return None
 
+            # CREDIT/WIDTH gate (binding edge check for credit verticals). A genuine ~20-delta
+            # short (~80% POP) needs credit > ~0.20×width just to break even, so a sub-floor
+            # credit/width spread is negative-EV BY CONSTRUCTION — verified: 17/17 historical
+            # bull_put losers had cr_w 0.13-0.23, the lone winner 0.61. This is the reliable
+            # structural backstop (delta-derived POP is unusable — most persisted deltas are 0).
+            # Scoped to the two credit verticals; iron condors collect on both wings (different
+            # ratio math) and are exempt here.
+            if (width > 0 and strategy_type in (StrategyType.BULL_PUT_SPREAD,
+                                                StrategyType.BEAR_CALL_SPREAD)):
+                cr_w  = abs(debit_credit) / (width * 100)
+                cr_floor = self._settings.min_credit_to_width_ratio
+                if cr_w < cr_floor:
+                    logger.info("CREDIT/WIDTH gate: %s cr_w=%.2f < %.2f — negative-EV credit "
+                                "spread, skip", conviction.ticker, cr_w, cr_floor)
+                    return None
+
         # Cost-to-width gate: debit spreads where the premium exceeds the max allowed
         # fraction of the spread width are rejected (too expensive relative to potential gain).
         # Credit spreads are checked inversely — premium too small means we collect too little.

@@ -363,6 +363,16 @@ class IntelligentProfitEngine:
         if max_gain <= 0:
             return self._hold(pid, 0.0, 0.0, 0.0, 0.0, 0.0)
 
+        # No-data mark guard (defense-in-depth; primary fix is _refresh_position_price keeping the
+        # last good mark). A spread mark of exactly 0.00 is the missing-quote sentinel, not a real
+        # price — for a credit spread it fabricates unrealized=+max_gain → profit_pct=100% → a
+        # spurious LOCK_IN close on day 1. Returning here BEFORE state.hwm/ratchet mutate also
+        # prevents HWM being pinned at 100% (which would arm a spurious ratchet close on the next
+        # real mark). A genuinely near-worthless spread marks at 0.01-0.05 (not exactly 0.00) and
+        # still triggers normally; holding a truly-0.00 position one extra cycle costs nothing.
+        if position.current_price == 0.0:
+            return self._hold(pid, 0.0, 0.0, 0.0, 0.0, 0.0)
+
         profit_pct = position.unrealized_pnl / max_gain
 
         # ── Ensure state exists (positions opened before engine upgrade) ────────

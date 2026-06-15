@@ -398,6 +398,7 @@ class PositionManager:
             spot = float(info.get("regularMarketPrice") or info.get("currentPrice") or 0)
 
         current_mid = 0.0
+        n_quoted    = 0          # legs with a REAL bid/ask — used to reject a no-data 0.00 mark
         updated_legs: list[dict] = []
 
         for leg in legs:
@@ -425,6 +426,8 @@ class PositionManager:
                     bid = float(r.get("bid", 0) or 0)
                     ask = float(r.get("ask", 0) or 0)
                     mid = (bid + ask) / 2
+                    if bid > 0 or ask > 0:
+                        n_quoted += 1   # a real one/two-sided quote exists for this leg
 
                     delta = float(r.get("delta", 0) or 0)
                     gamma = float(r.get("gamma", 0) or 0)
@@ -453,7 +456,9 @@ class PositionManager:
 
             updated_legs.append(leg_dict)
 
-        return {"spot": spot, "current_mid": current_mid, "updated_legs": updated_legs}
+        return {"spot": spot, "current_mid": current_mid, "updated_legs": updated_legs,
+                "legs_quoted": n_quoted, "legs_total": len(legs),
+                "quote_ok": (spot > 0 and n_quoted == len(legs) and len(legs) > 0)}
 
     async def _refresh_position_price(self, position: OpenPosition) -> None:
         """
@@ -468,6 +473,17 @@ class PositionManager:
                 position.ticker, position.legs, date.today(),
             )
             if not result:
+                return
+
+            # No-data guard: when the paper account has no live option quote, every leg's
+            # bid/ask is 0 and current_mid sums to 0.0. Writing that 0.00 mark fabricates a
+            # P&L — for a CREDIT spread (entry_price<0) unrealized=(0-(-credit))*100 = +max_gain,
+            # which the profit engine reads as 100% profit and LOCK-IN-closes a day-1 spread (the
+            # -$1,374 bleed). Treat a missing/partial quote as a DATA OUTAGE: keep the last good
+            # mark and HOLD. Only write a mark backed by a real quote on every leg.
+            if not result.get("quote_ok", False):
+                logger.debug("Stale/missing mark for %s — %d/%d legs quoted; HOLD (keep last mark)",
+                             position.ticker, result.get("legs_quoted", 0), result.get("legs_total", 0))
                 return
 
             current_mid   = round(result["current_mid"], 4)
@@ -637,8 +653,15 @@ class PositionManager:
         # day-0-only, which let the LLM close 100% of longs on day 1 (cutting winners). Longs
         # now hold long_exit_llm_min_hold_days (default 2); the deterministic stops own the
         # downside until then. Shorts/spreads keep the day-0 guard.
-        _min_hold = getattr(self._settings, "long_exit_llm_min_hold_days", 2) if is_long else 1
+        _min_hold = (getattr(self._settings, "long_exit_llm_min_hold_days", 2) if is_long
+                     else getattr(self._settings, "spread_exit_llm_min_hold_days", 3))
         if (date.today() - position.entry_date).days < _min_hold:
+            return False
+        # Real-mark precondition: never let the exit brain act on a 0.00/missing mark. The payload
+        # would carry a fabricated P&L ("max loss"/"worthless") and the LLM closes a good position
+        # on bad data. Treat a 0.00 mark as a data outage and HOLD (the source guard normally
+        # prevents this; this is defense-in-depth for cold-start / never-quoted positions).
+        if position.current_price == 0.0:
             return False
         # Winner-lock (longs): a GREEN long belongs to the conviction-scaled trailing stop, which
         # was built to let winners run. Don't even evaluate it — never spend a token to (and never
@@ -660,6 +683,11 @@ class PositionManager:
             # "INVALIDATED" read, which the LLM fires too readily on intraday noise. Shorts/spreads
             # keep the original kill-or-invalidated rule.
             if _winner_lock:
+                strong = rec.kill_triggered
+            elif (not is_long) and getattr(self._settings, "spread_exit_require_kill", True):
+                # Credit spreads are theta trades: a bare "INVALIDATED" read (often off an empty/
+                # undocumented thesis) closed 39-DTE spreads on day 1. Require a HARD kill-condition
+                # trigger — the deterministic stops/DTE own everything else.
                 strong = rec.kill_triggered
             else:
                 strong = rec.kill_triggered or rec.thesis_validity == "INVALIDATED"
@@ -761,6 +789,13 @@ class PositionManager:
             return
 
         if position.entry_price <= 0 or position.contracts <= 0:
+            return
+
+        # No-data mark guard: a 0.00 long mark (missing quote) makes unrealized=(0-entry)*… read
+        # as pnl_pct=-100%, tripping a FALSE stop_loss below. Treat a 0.00 mark as a data outage
+        # and HOLD the mark-based checks (the date-based time stop above already had its turn).
+        if position.current_price == 0.0:
+            logger.debug("LongOptions stale mark [%s] (price=0.00) — HOLD mark-based checks", position.ticker)
             return
 
         pnl_pct = position.unrealized_pnl / (position.entry_price * position.contracts * 100)
