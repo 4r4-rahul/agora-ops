@@ -197,10 +197,11 @@ class CircuitBreakerAgent:
     async def _check_cycle(self) -> None:
         from datetime import date
         # PAPER-ONLY breaker bypass for data collection (double-guarded on trading_mode; live always
-        # enforces). The owner lifted loss limits to keep the engine running and gathering data.
-        if (str(getattr(self._settings, "trading_mode", "paper")) == "paper"
-                and getattr(self._settings, "paper_disable_loss_breakers", False)):
-            return
+        # enforces). The owner lifted the loss-limit TRIPS to keep the engine running — but the cycle
+        # MUST still run so the daily_pnl ledger keeps updating (reconciliation stays at $0) and the
+        # baselines stay fresh. Only the kill-switch trips below are gated, never the bookkeeping.
+        _breakers_off = (str(getattr(self._settings, "trading_mode", "paper")) == "paper"
+                         and getattr(self._settings, "paper_disable_loss_breakers", False))
         positions = self._position_mgr.get_open_positions() if self._position_mgr else []
 
         # ── Bad-mark guard (protects BOTH loss checks below) ──────────────────
@@ -233,7 +234,7 @@ class CircuitBreakerAgent:
                     f"P&L=${pos.unrealized_pnl:.0f}, max=${pos.max_loss_dollars:.0f}"
                 )
                 logger.critical("CIRCUIT BREAKER (position loss): %s", msg)
-                if self._risk:
+                if self._risk and not _breakers_off:
                     self._risk.trip_kill_switch(msg, tripped_by="circuit_breaker")
                 await self._alert("critical", f"🚨 Position loss limit: {msg}")
 
@@ -276,7 +277,7 @@ class CircuitBreakerAgent:
                 trades=len([p for p in positions if p.unrealized_pnl != 0]),
             )
 
-        if daily_pnl < -limit:
+        if daily_pnl < -limit and not _breakers_off:
             msg = (
                 f"Daily loss limit breached: ${daily_pnl:.0f} today "
                 f"(Δunrealized=${total_unrealized - self._daily_unrealized_baseline:.0f} "
