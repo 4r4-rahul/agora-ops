@@ -660,41 +660,44 @@ class PositionManager:
         except Exception as exc:
             logger.debug("long_peak save failed: %s", exc)
 
-    def _long_thesis_for(self, position_id: str) -> dict:
-        """Build an ExitIntelligenceAgent thesis dict from the long_journal entry, so the
-        agent can re-validate a long position with real context (its thesis lives in
-        long_journal, not analyst_journal). {} → agent evaluates on position state alone."""
+    def _long_thesis_for(self, position: "OpenPosition") -> dict:
+        """Build an ExitIntelligenceAgent thesis dict from the long_journal entry, so the agent
+        can re-validate a long with real entry context (its thesis lives in long_journal). Resolved
+        by position_id, else by the position's ticker+strike+expiry structure — the entry's thesis
+        is in long_journal but its position_id is unlinked for ~99% of longs (incl. healer-adopted
+        positions like the unmanaged TSM -$479). {} → agent evaluates on position state alone."""
         try:
-            with sqlite3.connect(str(self._settings.db_path), timeout=5) as conn:
-                row = conn.execute(
-                    """SELECT direction, conviction_score, signal_stack, decided_at_utc,
-                              regime, flow_direction
-                       FROM long_journal WHERE position_id=? AND outcome='proceed'
-                       ORDER BY journal_id DESC LIMIT 1""",
-                    (position_id,),
-                ).fetchone()
+            from agora.agents.long_options_agent import LongOptionsAgent as _LOA
+            leg = (getattr(position, "legs", None) or [None])[0]
+            strike = float(getattr(leg, "strike", 0) or 0) if leg is not None else None
+            expiry = str(getattr(position, "expiry_date", "") or "")
+            row = _LOA.find_entry_journal(
+                str(self._settings.db_path), position.position_id,
+                position.ticker, strike, expiry)
             if not row:
                 return {}
             try:
-                stack = json.loads(row[2] or "{}")
+                stack = json.loads(row.get("signal_stack") or "{}")
             except Exception:
                 stack = {}
             return {
-                "direction":       row[0],
+                "direction":       row.get("direction"),
                 "magnitude_pct":   None,
                 "horizon_days":    self._settings.long_options_max_hold_days,
-                "confidence_pct":  row[1],
+                "confidence_pct":  row.get("conviction_score"),
                 "strategy_family": "long_directional",
                 "kill_conditions": [
                     "directional thesis broken — trend or institutional flow reversed",
                     "underlying RSI hit an extreme against the position",
                     "expected catalyst passed with no follow-through",
                 ],
-                "reasoning_trace": f"entry signals={stack} | regime={row[4]} | flow={row[5]}",
-                "thesis_date":     row[3],
+                "reasoning_trace": (f"entry signals={stack} | regime={row.get('regime')} "
+                                    f"| flow={row.get('flow_direction')}"),
+                "thesis_date":     row.get("decided_at_utc"),
             }
         except Exception as exc:
-            logger.debug("_long_thesis_for failed [%s]: %s", position_id, exc)
+            logger.debug("_long_thesis_for failed [%s]: %s",
+                         getattr(position, "position_id", "?"), exc)
             return {}
 
     async def _maybe_llm_exit(self, position: OpenPosition, is_long: bool) -> bool:
@@ -737,7 +740,7 @@ class PositionManager:
             interval = getattr(self._settings, "exit_intelligence_interval_hours", 1.0)
             if not agent.should_evaluate(position.position_id, interval):
                 return False
-            thesis = self._long_thesis_for(position.position_id) if is_long else None
+            thesis = self._long_thesis_for(position) if is_long else None
             rec = await agent.evaluate(position, self._macro_ctx, thesis_override=thesis, act=False)
             if rec is None or agent.shadow_mode:
                 return False
@@ -771,8 +774,12 @@ class PositionManager:
         await self._close_position(position, reason, source=source)
         try:
             from agora.agents.long_options_agent import LongOptionsAgent as _LOA
+            leg = (getattr(position, "legs", None) or [None])[0]
+            _strike = float(getattr(leg, "strike", 0) or 0) if leg is not None else None
             _LOA.update_signal_stats(
-                str(self._settings.db_path), position.position_id, position.unrealized_pnl)
+                str(self._settings.db_path), position.position_id, position.unrealized_pnl,
+                ticker=position.ticker, strike=_strike,
+                expiry=str(getattr(position, "expiry_date", "") or ""))
         except Exception as exc:
             logger.debug("update_signal_stats failed [%s]: %s", position.ticker, exc)
         self._long_peak_pnl.pop(position.position_id, None)

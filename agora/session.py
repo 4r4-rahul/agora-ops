@@ -1842,7 +1842,13 @@ class AgoraSession:
                                     "event_day":         bool(getattr(rec, "event_day", False)),
                                 },
                             )
-                            agent.journal(decision, str(self._settings.db_path), position_id or "")
+                            # Link this fill to its existing entry-journal row (the decision was
+                            # already journaled above) instead of writing a SECOND, duplicate row.
+                            _leg0 = rec.legs[0] if getattr(rec, "legs", None) else None
+                            if _leg0 is not None and position_id:
+                                agent.link_position_id(
+                                    str(self._settings.db_path), position_id, ticker,
+                                    float(_leg0.strike), str(_leg0.expiration))
                             self._exec_quality.record_fill(ticker, fill_price, decision.premium, decision.strategy)
                             _submitted_this_cycle.add(ticker)
                         elif order_status in ("Cancelled", "ApiCancelled", "Inactive"):

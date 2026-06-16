@@ -1532,34 +1532,95 @@ class LongOptionsAgent:
         except Exception as exc:
             logger.debug("long_journal write error: %s", exc)
 
+    # ── Entry-journal lookup (single source for thesis + signal recovery) ──────
+    @staticmethod
+    def find_entry_journal(
+        db_path:     str,
+        position_id: str = "",
+        ticker:      str = "",
+        strike:      float | None = None,
+        expiry:      str = "",
+    ) -> dict | None:
+        """Locate the long_journal 'proceed' entry for a position.
+
+        Fast path: by position_id (only ~1% of entries get their fill recorded back to the journal).
+        Fallback: by ticker+strike+expiry structure — recovers the entry for the ~99% whose
+        position_id is unlinked (orphan-then-adopted positions, and entries whose fill-record write
+        never ran). The thesis genuinely EXISTS in long_journal; it's just keyed off an empty
+        position_id. Returns the row as a dict, or None if no entry was ever journaled."""
+        _cols = ("journal_id, position_id, ticker, strike, expiry, direction, conviction_score, "
+                 "signal_stack, decided_at_utc, regime, flow_direction, momentum_score")
+        try:
+            with sqlite3.connect(db_path, timeout=5) as conn:
+                conn.row_factory = sqlite3.Row
+                if position_id:
+                    r = conn.execute(
+                        f"SELECT {_cols} FROM long_journal WHERE position_id=? AND outcome='proceed' "
+                        "ORDER BY journal_id DESC LIMIT 1", (position_id,)).fetchone()
+                    if r is not None:
+                        return dict(r)
+                if ticker and strike is not None and expiry:
+                    r = conn.execute(
+                        f"SELECT {_cols} FROM long_journal WHERE ticker=? AND strike=? AND expiry=? "
+                        "AND outcome='proceed' ORDER BY journal_id DESC LIMIT 1",
+                        (ticker, float(strike), str(expiry))).fetchone()
+                    if r is not None:
+                        return dict(r)
+        except Exception as exc:
+            logger.debug("find_entry_journal error: %s", exc)
+        return None
+
+    @staticmethod
+    def link_position_id(
+        db_path: str, position_id: str, ticker: str, strike: float, expiry: str,
+    ) -> bool:
+        """Stamp a created position's id onto its existing entry-journal row (UPDATE), instead of
+        writing a SECOND, duplicate journal row. Matches the most-recent unlinked 'proceed' row for
+        this structure. Returns True if a row was linked."""
+        if not position_id:
+            return False
+        try:
+            with sqlite3.connect(db_path, timeout=5) as conn:
+                conn.execute("PRAGMA journal_mode=WAL")
+                cur = conn.execute(
+                    "UPDATE long_journal SET position_id=? WHERE journal_id = ("
+                    "  SELECT journal_id FROM long_journal WHERE ticker=? AND strike=? AND expiry=? "
+                    "    AND outcome='proceed' AND (position_id IS NULL OR position_id='') "
+                    "  ORDER BY journal_id DESC LIMIT 1)",
+                    (position_id, ticker, float(strike), str(expiry)))
+                return cur.rowcount > 0
+        except Exception as exc:
+            logger.debug("link_position_id error: %s", exc)
+            return False
+
     @staticmethod
     def update_signal_stats(
         db_path:      str,
         position_id:  str,
         realized_pnl: float,
+        ticker:       str = "",
+        strike:       float | None = None,
+        expiry:       str = "",
     ) -> None:
         """
         Called on position close. Reads the long_journal entry for this position
-        to determine which signals fired, then updates win_rate/pnl in signal_stats.
-        Skips silently if no journal entry found (e.g., legacy position).
+        (by position_id, else by ticker+strike+expiry structure) to determine which
+        signals fired, then updates win_rate/pnl in signal_stats. Skips silently if no
+        journal entry found (e.g., legacy position).
         """
         try:
+            entry = LongOptionsAgent.find_entry_journal(db_path, position_id, ticker, strike, expiry)
+            if entry is None:
+                return
+            try:
+                stack: dict = json.loads(entry["signal_stack"] or "{}")
+            except Exception:
+                return
+            direction = entry["direction"] or "bullish"
+            is_win    = realized_pnl > 0
+            now_utc   = datetime.now(timezone.utc).isoformat()
             with sqlite3.connect(db_path, timeout=10) as conn:
                 conn.execute("PRAGMA journal_mode=WAL")
-                row = conn.execute(
-                    "SELECT signal_stack, direction FROM long_journal "
-                    "WHERE position_id=? AND outcome='proceed' ORDER BY journal_id DESC LIMIT 1",
-                    (position_id,),
-                ).fetchone()
-                if row is None:
-                    return
-                try:
-                    stack: dict = json.loads(row[0] or "{}")
-                except Exception:
-                    return
-                direction = row[1] or "bullish"
-                is_win    = realized_pnl > 0
-                now_utc   = datetime.now(timezone.utc).isoformat()
 
                 for signal_name in stack:
                     # Upsert into signal_stats
