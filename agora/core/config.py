@@ -421,6 +421,16 @@ class AgoraSettings(BaseSettings):
         default=10,
         description="Hard cap on contracts per trade regardless of size_multiplier",
     )
+    csuite_close_min_hold_days: int = Field(
+        default=1, ge=0, le=10,
+        description="Min hold (days) before the CTO's DISCRETIONARY forced-closes (21-DTE "
+                    "management + CEO session-plan close_targets) may fire. Prevents day-0 "
+                    "insta-closing of a freshly-entered position whose thesis got no room — these "
+                    "closed -$245 (CEO-plan x7) / -$59 (21-DTE x3) at hold=0d (avg hold across ALL "
+                    "real closes is 0.5-0.8d vs 5-45 DTE horizons). The deterministic stop-loss "
+                    "still owns the downside during the hold; this gates only the discretionary "
+                    "overrides, mirroring the LLM-exit min-hold guards.",
+    )
     stop_loss_multiplier: float = Field(
         default=2.0,
         description="Exit when position P&L = -stop_loss_multiplier × initial credit/debit",

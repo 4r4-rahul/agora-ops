@@ -352,6 +352,19 @@ class CTOAgent(ExecutiveAgent):
             except Exception:
                 pass
 
+            # ── Min-hold guard for DISCRETIONARY forced-closes ──────────────────
+            # Never insta-close a freshly-entered position via the 21-DTE rule or a CEO session-plan
+            # target: those closed -$245 (CEO-plan x7) / -$59 (21-DTE x3) at hold=0d, giving the
+            # entry's thesis no room. The deterministic stop-loss (above) still owns the downside;
+            # this gates only the discretionary overrides, mirroring the LLM-exit min-hold.
+            try:
+                _entry = p.entry_date if isinstance(p.entry_date, _date) \
+                    else _date.fromisoformat(str(p.entry_date))
+                _held_days = (today - _entry).days
+            except Exception:
+                _held_days = 99
+            _disc_ok = _held_days >= int(getattr(self._settings, "csuite_close_min_hold_days", 1))
+
             # ── 21 DTE rule (pre-delegated authority) ──
             # SPREADS ONLY. Long options (long_call/long_put) are bought at 15-30 DTE BY DESIGN and
             # run their own 5-day-hold exit logic (time stop / conviction profit target / trailing
@@ -363,7 +376,7 @@ class CTOAgent(ExecutiveAgent):
                 expiry = p.expiry_date if isinstance(p.expiry_date, _date) \
                     else _date.fromisoformat(str(p.expiry_date))
                 dte = (expiry - today).days
-                if _strat not in ("long_call", "long_put") and dte <= 21:
+                if _disc_ok and _strat not in ("long_call", "long_put") and dte <= 21:
                     reason = f"21_dte_{dte}DTE"
                     logger.info("CTO auto-close: %s at %d DTE — closing", p.ticker, dte)
                     await self._close_cb(p, reason)
@@ -381,7 +394,7 @@ class CTOAgent(ExecutiveAgent):
             # ── Close targets from CEO session plan ──
             try:
                 plan = self.get_session_plan()
-                if p.ticker in plan.close_targets and self._close_cb:
+                if _disc_ok and p.ticker in plan.close_targets and self._close_cb:
                     logger.info("CTO auto-close: %s in CEO close_targets — closing", p.ticker)
                     await self._close_cb(p, "ceo_session_plan_target")
                     await self.notify_peers("position_closed", {
