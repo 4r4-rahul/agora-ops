@@ -795,6 +795,7 @@ async def place_legs_individually(
     market_data_type: int = 3,
     max_combo_spread_pct: float = 0.50,
     pricing_sanity_max_ratio: float = 2.0,
+    entry_marketable_start: bool = True,
 ) -> dict[str, Any]:
     """
     Submit each leg of a spread as a standalone option order.
@@ -945,15 +946,18 @@ async def place_legs_individually(
         # (defined-risk) leg is filled. If the long can't fill, we abort before selling anything.
         trades: list = [None] * len(qualified)
         orders: list = [None] * len(qualified)
-        limits = list(leg_mid)
-        # Single-leg Adaptive: start AT the marketable cross (ask+buffer), not mid. Adaptive only
-        # improves WITHIN the limit — at mid it can't cross a market above mid, which is why a
-        # mid-capped Adaptive order sat unfilled and cancelled. Starting at the cross lets IBKR's
-        # server-side Adaptive fill immediately at a fair price ≤ the limit, and the walk then finds
-        # itself already at the cross so it never modifies (mirrors the proven flatten pattern).
-        # Multi-leg credit spreads keep limits=leg_mid + the walk, unchanged.
-        if adaptive_single_leg and len(qualified) == 1:
+        # Marketable-start: begin AT the cross (ask+buffer for BUY / bid-buffer for SELL) so the
+        # order crosses the book immediately. Resting at mid does NOT cross on a paper account —
+        # that drove the ~2% fill rate (92% timeout + 122 leg-aborts/3d). The cross is the SAME
+        # bounded worst-case the walk below already targets, so this only changes WHEN we reach it
+        # (now, vs after a ~1.6-min walk that usually expired first). The walk stays as a safety net
+        # if the market moves past the cross. Single-leg Adaptive ALWAYS needs the cross (Adaptive
+        # only improves WITHIN the limit — at mid it can't cross a market above mid), so it starts
+        # there regardless of the flag.
+        if entry_marketable_start or (adaptive_single_leg and len(qualified) == 1):
             limits = list(leg_cross)
+        else:
+            limits = list(leg_mid)
         long_idx  = [i for i, (ls, _) in enumerate(qualified) if ls["action"].upper() == "BUY"]
         short_idx = [i for i, (ls, _) in enumerate(qualified) if ls["action"].upper() == "SELL"]
 

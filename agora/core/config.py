@@ -302,6 +302,17 @@ class AgoraSettings(BaseSettings):
                     "fills server-side within the limit. Scoped to single legs ONLY — the combo "
                     "repricing walk is untouched. Safe to leave ON; set OFF to revert to walk-only.",
     )
+    entry_marketable_start: bool = Field(
+        default=True,
+        description="Start leg-by-leg entry limits AT the marketable cross (natural ± a small "
+                    "buffer) instead of resting at the net mid and walking. Orders that sit at mid "
+                    "on a paper account simply don't cross the book — driving the ~2% fill rate "
+                    "(92% timeout, 122 'protective long leg unfilled' aborts/3d). The cross price is "
+                    "the SAME bounded worst-case the walk already targets; this just submits there "
+                    "immediately so it fills now. Single legs already did this; this unifies it for "
+                    "ALL legs (credit + paper-debit spreads). Live multi-leg still uses the atomic "
+                    "BAG path (unchanged). Set False to revert to mid-start + walk.",
+    )
     max_slippage_pct_of_width: float = Field(
         default=0.10,
         description="Repricing-walk slippage budget as a fraction of the spread's strike WIDTH. "

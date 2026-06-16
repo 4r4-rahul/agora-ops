@@ -177,6 +177,9 @@ async def submit_trade(rec: Any, settings: Any, session_id: str) -> dict:
     #     riskless combos.
     is_credit = entry_per_share < 0
     is_single_leg = len(getattr(rec, "legs", []) or []) == 1
+    # entry_marketable_start is ONLY a place_legs_individually param — set it inside the leg-by-leg
+    # branches, never on the place_bracket_order (BAG) path which doesn't accept it.
+    _marketable = getattr(settings, "entry_marketable_start", True)
     if is_single_leg:
         # A single long leg (long_call/long_put) must NOT be wrapped in a BAG combo: IBKR cannot
         # MODIFY a combo order via re-place, so the reprice walk was rejected with Error 103
@@ -184,12 +187,20 @@ async def submit_trade(rec: Any, settings: Any, session_id: str) -> dict:
         # also silently ignored on BAGs. Native single-leg orders are repriceable and fill.
         fn = place_legs_individually
         kwargs["adaptive_single_leg"] = getattr(settings, "use_adaptive_single_leg", True)
-        logger.info("Single-leg %s %s → native leg order + Adaptive=%s (BAG can't reprice; Error 103)",
+        kwargs["entry_marketable_start"] = _marketable
+        logger.info("Single-leg %s %s → native leg order + Adaptive=%s",
                     rec.ticker, getattr(rec.strategy, "value", rec.strategy),
                     kwargs["adaptive_single_leg"])
-    elif settings.trading_mode == "paper" and is_credit:
+    elif settings.trading_mode == "paper":
+        # PAPER: route ALL spreads (credit AND debit) leg-by-leg. Credit BAGs hit the riskless-combo
+        # Error 201; debit BAGs hit Error 103 on the walk-modify (can't reprice a combo) and froze at
+        # 0% fill. Legging in (long protective leg first, then short) sidesteps both AND lets each leg
+        # start at its marketable cross — the only paper path that actually fills. Leg-gap risk is
+        # simulated/acceptable in paper. LIVE keeps the atomic BAG below (no naked-leg gap on real $).
         fn = place_legs_individually
-        logger.info("PAPER credit spread %s → leg-by-leg (avoids riskless-combo Error 201)", rec.ticker)
+        kwargs["entry_marketable_start"] = _marketable
+        logger.info("PAPER %s spread %s → leg-by-leg marketable-start=%s",
+                    "credit" if is_credit else "debit", rec.ticker, _marketable)
     else:
         fn = place_bracket_order
         kwargs["max_slippage_pct_of_width"] = getattr(settings, "max_slippage_pct_of_width", 0.10)
