@@ -1388,6 +1388,29 @@ async def get_edge() -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+@router.post("/health/fill-canary")
+async def run_fill_canary_endpoint() -> JSONResponse:
+    """Broker fill-engine canary: place + flatten a 1-lot maximally-marketable SPY ATM call and
+    report whether it filled. Isolates the IBKR paper-account fill engine from our pricing/walk —
+    a marketable order that fills means the low strategy fill rate is upstream (us), not the broker.
+    Places a REAL (paper) round-trip order, so it's POST + on-demand, never auto-run."""
+    session = get_session()
+    if session is None:
+        return JSONResponse({"error": "session not ready"}, status_code=503)
+    try:
+        from agora.ops.fill_canary import run_fill_canary
+        s = session._settings
+        res = await run_fill_canary(
+            host=s.ibkr_host, port=s.ibkr_port, client_id=99,
+            market_data_type=getattr(s, "ibkr_market_data_type", 1),
+            db_path=str(s.db_path),
+        )
+        return JSONResponse(res)
+    except Exception as exc:
+        logger.error("fill-canary error: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 @router.get("/health/defender")
 async def get_defender_precision() -> JSONResponse:
     """Thesis Defender's measured override precision over REAL fills, lifetime: of the BLOCKs it
