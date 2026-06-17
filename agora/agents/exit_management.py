@@ -48,6 +48,32 @@ logger = logging.getLogger(__name__)
 PROMPT_VERSION = "1.0.0"
 _MODEL_FALLBACK = "claude-sonnet-4-6"  # used only if settings not available
 
+# Forced structured output: the model returns the decision as this tool's input, which the API
+# validates against the schema — guaranteeing valid JSON. Replaces free-text + _extract_json, which
+# was crashing ~80% of TSM/TXN evals on malformed/empty JSON ("Expecting ',' line 12" / "char 0").
+_EXIT_DECISION_TOOL = {
+    "name": "exit_decision",
+    "description": "Return the structured exit decision for the open position.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "thesis_validity": {"type": "string", "enum": ["VALID", "WEAKENING", "INVALIDATED"]},
+            "thesis_validity_reasoning": {"type": "string"},
+            "kill_condition_status": {"type": "string",
+                                      "enum": ["NONE_TRIGGERED", "APPROACHING", "TRIGGERED"]},
+            "recommendation": {"type": "string",
+                               "enum": ["HOLD", "TIGHTEN_STOP", "TAKE_PARTIAL", "CLOSE_NOW", "ROLL"]},
+            "recommendation_reasoning": {"type": "string"},
+            "specific_action": {"type": "object",
+                                "description": "e.g. {\"close_reason\": \"...\"} when CLOSE_NOW"},
+            "confidence_pct": {"type": "integer"},
+            "key_risks_to_watch": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["thesis_validity", "kill_condition_status", "recommendation",
+                     "recommendation_reasoning"],
+    },
+}
+
 # ── System prompt (spec §13.4) ────────────────────────────────────────────────
 
 _SYSTEM = """You are an options position manager. You receive the ORIGINAL THESIS from entry plus CURRENT STATE. Compare them. Recommend optimal action.
@@ -241,21 +267,27 @@ class ExitIntelligenceAgent:
         try:
             response = await self._client.messages.create(
                 model=self._model,
-                max_tokens=1024,
+                max_tokens=2000,
                 system=_SYSTEM,
                 messages=[{"role": "user", "content": _compress(payload)}],
+                tools=[_EXIT_DECISION_TOOL],
+                tool_choice={"type": "tool", "name": "exit_decision"},
                 timeout=anthropic.Timeout(connect=30.0, read=60.0, write=30.0, pool=30.0),
             )
             latency_ms = int((time.monotonic() - t0) * 1000)
             in_tok  = response.usage.input_tokens  if response.usage else 0
             out_tok = response.usage.output_tokens if response.usage else 0
-            cost    = (in_tok * 5.0 + out_tok * 25.0) / 1_000_000
+            cost    = (in_tok * 3.0 + out_tok * 15.0) / 1_000_000   # Sonnet 4.6
 
-            text_blocks = [b for b in response.content if b.type == "text"]
-            raw_text = text_blocks[-1].text if text_blocks else "{}"
-            # Robust extraction — tolerant of a prose preamble before the ```json fence
-            # (the "Expecting value" parse failures this agent was hitting in production).
-            raw_output = _extract_json(raw_text)
+            # Forced-tool structured output: the decision IS the validated tool input — guaranteed
+            # valid JSON (no more malformed/empty-JSON parse crashes). Fall back to text + robust
+            # extraction only if no tool block is returned.
+            tool_blocks = [b for b in response.content if b.type == "tool_use"]
+            if tool_blocks:
+                raw_output = tool_blocks[0].input or {}
+            else:
+                text_blocks = [b for b in response.content if b.type == "text"]
+                raw_output = _extract_json(text_blocks[-1].text if text_blocks else "{}")
             rec = _parse_recommendation(raw_output)
 
             # Fact-grounding monitor — verify the exit agent's event claims vs the calendar.
