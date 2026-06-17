@@ -89,6 +89,8 @@ def _make_session() -> Any:
     s._macro_context.vol_selling_ok = True
     s._macro_context.confidence     = 0.7
     s._exec_cooldowns   = {}
+    s._inflight_tickers = set()   # M1 idempotency wrapper (added after this fixture was written)
+    s._error_201_blocked = set()  # per-session Error-201 block set (reject path)
 
     # Settings
     s._settings = MagicMock()
@@ -104,6 +106,10 @@ def _make_session() -> Any:
     s._settings.max_per_correlation_group = 2
     s._settings.min_rr_ratio              = 0.3
     s._settings.min_credit_spread_rr_ratio = 0.3
+    # Global exposure ceiling (gate #3, added after this fixture was written) — non-binding here.
+    s._settings.max_total_open_positions       = 1000
+    s._settings.max_total_capital_deployed_pct = 1.0    # 1.0 = capital check skipped
+    s._settings.account_size                   = 10_000.0
 
     # Entry timing — PERMIT by default
     s._entry_timing = MagicMock()
@@ -128,9 +134,22 @@ def _make_session() -> Any:
     # Risk council — approved by default
     s._risk = MagicMock()
     s._risk.approve_trade.return_value = {"approved": True, "reason": "All checks passed", "checks": {}}
+    s._risk.is_kill_switch_active.return_value = False   # _entry_gate kill-switch check (added later)
 
-    # Exec quality — records silently
+    # Correlation monitor — no correlated exposure by default (gate added to _entry_gate later)
+    s._correlation_monitor = MagicMock()
+    _corr = MagicMock()
+    _corr.risk_level = "none"
+    _corr.conviction_adj = 0
+    _corr.block_reason = ""
+    s._correlation_monitor.check.return_value = _corr
+
+    # Event-risk surgical gate — allow by default (added to _entry_gate later)
+    s._event_risk_assessment = MagicMock(return_value=("allow", ""))
+
+    # Exec quality — records silently; never skips by default (re-submission storm guard added later)
     s._exec_quality = MagicMock()
+    s._exec_quality.should_skip_symbol.return_value = (False, "")
 
     # Orphan reconciler — needed when Error 201 triggers reconcile_now()
     s._orphan_reconciler = MagicMock()
@@ -143,11 +162,22 @@ def _make_session() -> Any:
     s._strategy_selector = None
     s._advocate = None
     s._exit_agent = None
+    s._defender = None          # debate gate's defender (added after this fixture was written)
+    s._price_target = None      # post-fill price-target enrichment (added later) → skipped
 
     return s
 
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
+
+@pytest.fixture(autouse=True)
+def _no_ibkr_reprice():
+    """reprice_legs() (added to the submit path after this suite was written) makes a real IBKR
+    connection. Stub it to None everywhere so the gate-sequence tests stay hermetic — None means
+    'keep the yfinance economics', which is the no-op path these tests assume."""
+    with patch("agora.session.reprice_legs", new_callable=AsyncMock, return_value=None):
+        yield
+
 
 class TestSubmitRecommendationGateSequence:
     """Each test flips exactly one gate and verifies submit_trade is NOT called."""
@@ -190,6 +220,9 @@ class TestSubmitRecommendationGateSequence:
         with patch("agora.session.get_macro_calendar") as mock_cal, \
              patch("agora.session.submit_trade", new_callable=AsyncMock) as mock_submit:
             mock_cal.return_value.should_trade.return_value = (False, "FOMC avoid day")
+            # The pre-gate sizing step reads position_size_multiplier() before the avoid-day
+            # block fires inside _entry_gate — give it a real number (1.0 = no resize).
+            mock_cal.return_value.position_size_multiplier.return_value = 1.0
             await s._submit_recommendation(rec, "AAPL", 150.0)
 
         mock_submit.assert_not_awaited()
