@@ -48,7 +48,20 @@ def _make_db() -> str:
             );
             CREATE TABLE positions (
                 position_id TEXT PRIMARY KEY,
-                max_loss_dollars REAL
+                status TEXT DEFAULT 'closed',
+                close_date TEXT,
+                close_source TEXT,
+                realized_pnl REAL,
+                max_loss_dollars REAL,
+                max_gain_dollars REAL,
+                strategy TEXT,
+                legs_json TEXT DEFAULT '[]'
+            );
+            -- Production keys analyst/strategy/advocate attribution on the EXACT decision_id via
+            -- decision_chains.chain_id -> positions.position_id (created by position_manager in prod).
+            CREATE TABLE decision_chains (
+                chain_id TEXT,
+                position_id TEXT
             );
             CREATE TABLE analyst_journal (
                 journal_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -150,7 +163,10 @@ def _make_db() -> str:
                 latency_ms INTEGER DEFAULT 0,
                 shadow_mode INTEGER DEFAULT 1,
                 action_taken TEXT,
-                exit_alpha_pct REAL
+                exit_alpha_pct REAL,
+                pnl_pct_of_max REAL,
+                outcome_pnl REAL,
+                action_quality TEXT
             );
             CREATE TABLE calibration_log (
                 log_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -192,6 +208,26 @@ def _now_iso(delta_hours: float = 0.0) -> str:
 
 def _entry_date(delta_days: int = 5) -> str:
     return (date.today() - timedelta(days=delta_days)).isoformat()
+
+
+def _close_position(conn, position_id: str, realized_pnl: float, max_loss: float = 200.0,
+                    max_gain: float = 150.0, close_source: str = "thesis_exit",
+                    strategy: str = "bull_put_spread") -> None:
+    """Insert a genuinely-closed position (status/close_date/close_source satisfy _REAL_CLOSE),
+    the source of truth the attributor reads realized_pnl from."""
+    conn.execute(
+        """INSERT INTO positions (position_id, status, close_date, close_source, realized_pnl,
+           max_loss_dollars, max_gain_dollars, strategy, legs_json)
+           VALUES (?, 'closed', ?, ?, ?, ?, ?, ?, '[]')""",
+        (position_id, _entry_date(0), close_source, realized_pnl, max_loss, max_gain, strategy),
+    )
+
+
+def _link_chain(conn, chain_id: str, position_id: str) -> None:
+    """Link a decision_id (journal) to its closed position — the exact-key join the analyst/
+    strategy/advocate attributors use (replaced the old fuzzy ticker+time match)."""
+    conn.execute("INSERT INTO decision_chains (chain_id, position_id) VALUES (?,?)",
+                 (chain_id, position_id))
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -240,9 +276,8 @@ class TestAnalystAttribution:
                 "INSERT INTO trade_records VALUES (?,?,?,?,?)",
                 ("trade-1", ticker, entry, _entry_date(0), realized_pnl),
             )
-            conn.execute(
-                "INSERT INTO positions VALUES (?,?)", ("trade-1", max_loss),
-            )
+            _close_position(conn, "trade-1", realized_pnl, max_loss=max_loss)
+            _link_chain(conn, "chain-1", "trade-1")
             conn.execute(
                 """INSERT INTO analyst_journal (decision_id, ticker, decided_at_utc,
                    decision, direction, magnitude_pct, confidence_pct, strategy_family)
@@ -308,7 +343,8 @@ class TestStrategyAdvocateAttribution:
         with sqlite3.connect(db_path) as conn:
             conn.execute("INSERT INTO trade_records VALUES (?,?,?,?,?)",
                          ("t-1", "SPY", entry, _entry_date(0), realized_pnl))
-            conn.execute("INSERT INTO positions VALUES (?,?)", ("t-1", 200.0))
+            _close_position(conn, "t-1", realized_pnl, max_loss=200.0)
+            _link_chain(conn, "c-1", "t-1")
             conn.execute(
                 """INSERT INTO analyst_journal (decision_id, ticker, decided_at_utc,
                    decision, direction, confidence_pct, strategy_family)
@@ -378,7 +414,7 @@ class TestExitAttribution:
         with sqlite3.connect(db) as conn:
             conn.execute("INSERT INTO trade_records VALUES (?,?,?,?,?)",
                          ("pos-1", "QQQ", entry, _entry_date(0), 80.0))
-            conn.execute("INSERT INTO positions VALUES (?,?)", ("pos-1", 150.0))
+            _close_position(conn, "pos-1", 80.0, max_loss=150.0)
             # 3 exit journal rows for this position (hourly evaluations)
             for _ in range(3):
                 conn.execute(
@@ -400,21 +436,23 @@ class TestExitAttribution:
 class TestCalibrationLog:
     def _seed_analyst_rows(self, db_path: str, n_win: int, n_loss: int,
                             confidence: int = 70) -> None:
+        # Each row must trace to a genuinely-closed chain or _purge_fabricated_attribution strips
+        # its attribution (correct prod behaviour). So seed a real closed position + decision_chain
+        # per row and leave thesis_played_out NULL — attribute_closed_trades sets it from the P&L.
         with sqlite3.connect(db_path) as conn:
-            for i in range(n_win):
-                conn.execute(
-                    """INSERT INTO analyst_journal (ticker, decided_at_utc, decision,
-                       confidence_pct, thesis_played_out, confidence_was_calibrated)
-                       VALUES (?,?,?,?,?,?)""",
-                    (f"T{i}", _now_iso(), "thesis", confidence, 1, 1),
-                )
-            for i in range(n_loss):
-                conn.execute(
-                    """INSERT INTO analyst_journal (ticker, decided_at_utc, decision,
-                       confidence_pct, thesis_played_out, confidence_was_calibrated)
-                       VALUES (?,?,?,?,?,?)""",
-                    (f"L{i}", _now_iso(), "thesis", confidence, 0, 0),
-                )
+            for win, n in ((True, n_win), (False, n_loss)):
+                tag = "W" if win else "L"
+                pnl = 120.0 if win else -90.0
+                for i in range(n):
+                    pid, cid = f"p{tag}{i}", f"c{tag}{i}"
+                    _close_position(conn, pid, pnl)
+                    _link_chain(conn, cid, pid)
+                    conn.execute(
+                        """INSERT INTO analyst_journal (decision_id, ticker, decided_at_utc,
+                           decision, direction, confidence_pct)
+                           VALUES (?,?,?,?,?,?)""",
+                        (cid, f"{tag}{i}", _now_iso(), "thesis", "bullish", confidence),
+                    )
 
     def test_calibration_log_written_after_attribution(self):
         db = _make_db()

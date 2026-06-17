@@ -549,11 +549,18 @@ def attribute_closed_trades(db_path: str) -> dict:
 
             # Analyst / strategy / advocate are attributed by EXACT decision_id join (no fuzzy
             # ticker+time match, no dependence on the leaky chain.realized_pnl) — they self-query.
-            total["analyst"] = _attribute_analyst(conn)
-            if _table_exists(db_path, "strategy_journal"):
-                total["strategy"] = _attribute_strategy(conn)
-            if _table_exists(db_path, "advocate_journal"):
-                total["advocate"] = _attribute_advocate(conn)
+            # All three JOIN decision_chains, so a DB without that table (a brand-new DB before the
+            # first chain is logged) would otherwise raise and abort the ENTIRE pass — including the
+            # downstream calibration / value-monitor / perf-snapshot. Gate on its existence so the
+            # pass degrades gracefully. (In production position_manager creates it, so this is a
+            # no-op there; it only matters for fresh/partial DBs.)
+            _has_chains = _table_exists(db_path, "decision_chains")
+            if _has_chains:
+                total["analyst"] = _attribute_analyst(conn)
+                if _table_exists(db_path, "strategy_journal"):
+                    total["strategy"] = _attribute_strategy(conn)
+                if _table_exists(db_path, "advocate_journal"):
+                    total["advocate"] = _attribute_advocate(conn)
             if _table_exists(db_path, "long_vetter_log"):
                 total["vetter"] = _attribute_vetter(conn)
             # Exit attribution still keys off closed-trade fills.
@@ -795,6 +802,10 @@ def get_promotion_readiness(db_path: str) -> dict[str, Any]:
 
             # ── Exit agent: ≥20 attributed, decision_accuracy ≥60% ───────────
             if _table_exists(db_path, "exit_journal"):
+                # Self-heal: a pre-quality-columns exit_journal (older or freshly-created DB that
+                # has never run an attribution pass) lacks action_quality — reading it would raise
+                # and fail the whole readiness report. Idempotent ALTER, same as attribute pass.
+                _ensure_exit_journal_quality_cols(conn)
                 ev = conn.execute(
                     """SELECT COUNT(*),
                               SUM(CASE WHEN action_quality IN

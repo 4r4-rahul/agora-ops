@@ -80,7 +80,10 @@ class TestComputeSharpe:
 
 def _make_trade_db(pnl_rows: list[tuple]) -> str:
     """
-    Create a temp SQLite DB with trade_records and return its path.
+    Create a temp SQLite DB with a `positions` table — the REAL-fills source compute_health now
+    reads (was trade_records model marks, which logged fiction Sharpe). Each row is inserted as a
+    genuine agent-driven close (status='closed', close_source='thesis_exit') so it satisfies the
+    _REAL_CLOSE predicate the query gates on.
     pnl_rows: list of (pillar, regime, realized_pnl, days_ago)
     """
     tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
@@ -88,18 +91,21 @@ def _make_trade_db(pnl_rows: list[tuple]) -> str:
     tmp.close()
     with sqlite3.connect(db_path) as conn:
         conn.execute("""
-            CREATE TABLE trade_records (
-                id INTEGER PRIMARY KEY,
-                pillar TEXT,
+            CREATE TABLE positions (
+                position_id  INTEGER PRIMARY KEY,
+                pillar       TEXT,
                 regime_at_entry TEXT,
                 realized_pnl REAL,
-                close_date TEXT
+                close_date   TEXT,
+                status       TEXT DEFAULT 'closed',
+                close_source TEXT DEFAULT 'thesis_exit'
             )
         """)
         for pillar, regime, pnl, days_ago in pnl_rows:
             close_date = (date.today() - timedelta(days=days_ago)).isoformat()
             conn.execute(
-                "INSERT INTO trade_records (pillar, regime_at_entry, realized_pnl, close_date) VALUES (?,?,?,?)",
+                """INSERT INTO positions (pillar, regime_at_entry, realized_pnl, close_date,
+                   status, close_source) VALUES (?,?,?,?, 'closed', 'thesis_exit')""",
                 (pillar, regime, pnl, close_date),
             )
         conn.commit()
@@ -147,7 +153,8 @@ class TestComputeHealth:
         ensure_table(db)
         with sqlite3.connect(db) as conn:
             conn.execute(
-                "INSERT INTO trade_records (pillar, regime_at_entry, realized_pnl, close_date) VALUES (?,?,?,NULL)",
+                """INSERT INTO positions (pillar, regime_at_entry, realized_pnl, close_date,
+                   status, close_source) VALUES (?,?,?,NULL,'open',NULL)""",
                 ("vol_premium", "neutral", 500.0),
             )
         result = compute_health(db)
@@ -229,15 +236,18 @@ class TestStrategyHealthPatrol:
         agent._ceo = None
         agent._running = False
         ensure_table(db_path)
-        # trade_records must exist for compute_health() to query
+        # positions (real fills) must exist for compute_health() to query — it was migrated off
+        # trade_records (model marks) to honest, fill-sourced P&L.
         with sqlite3.connect(db_path) as conn:
             conn.execute("""
-                CREATE TABLE IF NOT EXISTS trade_records (
-                    id INTEGER PRIMARY KEY,
-                    pillar TEXT,
+                CREATE TABLE IF NOT EXISTS positions (
+                    position_id  INTEGER PRIMARY KEY,
+                    pillar       TEXT,
                     regime_at_entry TEXT,
                     realized_pnl REAL,
-                    close_date TEXT
+                    close_date   TEXT,
+                    status       TEXT DEFAULT 'closed',
+                    close_source TEXT DEFAULT 'thesis_exit'
                 )
             """)
         return agent
@@ -249,9 +259,9 @@ class TestStrategyHealthPatrol:
             for i, pnl in enumerate(pnls):
                 close_date = (date.today() - timedelta(days=i)).isoformat()
                 conn.execute(
-                    """INSERT INTO trade_records
-                       (pillar, regime_at_entry, realized_pnl, close_date)
-                       VALUES (?,?,?,?)""",
+                    """INSERT INTO positions
+                       (pillar, regime_at_entry, realized_pnl, close_date, status, close_source)
+                       VALUES (?,?,?,?, 'closed', 'thesis_exit')""",
                     (pillar, regime, pnl, close_date),
                 )
 
@@ -352,10 +362,18 @@ def _make_rec(
     direction: str = "neutral",
     conviction: float = 60.0,
     expiry_days: int = 30,
+    strategy: str | None = None,
 ) -> Any:
     rec = MagicMock()
     rec.pillar = MagicMock()
     rec.pillar.value = pillar
+    # The earnings-span and vol-selling checks key on the STRATEGY TYPE (credit spreads), not the
+    # pillar. Map the legacy pillar intent to a representative strategy so those checks fire:
+    # vol_premium → a credit spread, anything else → a non-credit long.
+    if strategy is None:
+        strategy = "bull_put_spread" if pillar == "vol_premium" else "long_call"
+    rec.strategy = MagicMock()
+    rec.strategy.value = strategy
     rec.ticker = "AAPL"
     rec.direction = direction
     rec.conviction_score = conviction
@@ -474,6 +492,15 @@ class TestDevilsAdvocateMacroOpposing:
 
 class TestDevilsAdvocateVolSelling:
 
+    @pytest.fixture(autouse=True)
+    def _no_force_vol_selling(self):
+        # Free-paper mode sets force_vol_selling_ok=True, which makes the gate fall open. Pin it
+        # off so the block path is exercised. The check reads get_settings() lazily inside the fn.
+        fake = MagicMock()
+        fake.force_vol_selling_ok = False
+        with patch("agora.core.config.get_settings", return_value=fake):
+            yield
+
     def test_passes_for_non_credit_pillar(self):
         rec = _make_rec(pillar="catalyst")
         ctx = _make_macro(vol_ok=False)
@@ -500,6 +527,14 @@ class TestDevilsAdvocateVolSelling:
 
 
 class TestDevilsAdvocateConvictionFloor:
+
+    @pytest.fixture(autouse=True)
+    def _fixed_floor(self):
+        # The runtime floor is now dynamic (settings.disagreement_resolver_floor, lowered in
+        # paper mode). Pin it to the documented reference value so these boundary tests exercise
+        # the gate LOGIC (below→block, at/above→pass) independent of the live config.
+        with patch("agora.ops.devils_advocate._get_conviction_floor", return_value=_CONVICTION_FLOOR):
+            yield
 
     def test_passes_above_floor(self):
         rec = _make_rec(conviction=_CONVICTION_FLOOR + 1)
@@ -649,34 +684,68 @@ def _make_calibrator_db(trade_rows: list[tuple], chain_rows: list[tuple]) -> str
     """
     trade_rows: (pillar, regime, conviction, pnl, days_ago)
     chain_rows: (conviction, strategy, pnl, days_ago)
+
+    Both calibration sources read positions/_REAL_CLOSE now (was trade_records model marks and
+    decision_chains.realized_pnl, which flip sign vs the fills). So we build a `positions` table of
+    genuinely-closed trades, and link each decision_chains row to one of those SAME positions —
+    chains are the conviction-quintile VIEW of the closed trades, not a separate population (so
+    they must not inflate total_closed_trades, which counts positions).
     """
     tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
     db_path = tmp.name
     tmp.close()
     with sqlite3.connect(db_path) as conn:
         conn.execute("""
-            CREATE TABLE trade_records (
-                pillar TEXT, regime_at_entry TEXT, conviction_at_entry REAL,
-                realized_pnl REAL, close_date TEXT
+            CREATE TABLE positions (
+                position_id  TEXT PRIMARY KEY,
+                pillar       TEXT,
+                regime_at_entry TEXT,
+                conviction_at_entry REAL,
+                realized_pnl REAL,
+                close_date   TEXT,
+                status       TEXT DEFAULT 'closed',
+                close_source TEXT DEFAULT 'thesis_exit'
             )
         """)
         conn.execute("""
             CREATE TABLE decision_chains (
-                conviction REAL, strategy TEXT, realized_pnl REAL,
-                started_at TEXT, outcome TEXT
+                chain_id    TEXT,
+                position_id TEXT,
+                conviction  REAL,
+                strategy    TEXT,
+                realized_pnl REAL,
+                started_at  TEXT,
+                outcome     TEXT
             )
         """)
-        for pillar, regime, conviction, pnl, days_ago in trade_rows:
+        pids: list[str] = []
+        for i, (pillar, regime, conviction, pnl, days_ago) in enumerate(trade_rows):
+            pid = f"pos-{i}"
             conn.execute(
-                "INSERT INTO trade_records VALUES (?,?,?,?,?)",
-                (pillar, regime, conviction, pnl,
+                """INSERT INTO positions (position_id, pillar, regime_at_entry, conviction_at_entry,
+                   realized_pnl, close_date, status, close_source)
+                   VALUES (?,?,?,?,?,?, 'closed','thesis_exit')""",
+                (pid, pillar, regime, conviction, pnl,
                  (date.today() - timedelta(days=days_ago)).isoformat()),
             )
-        for conviction, strategy, pnl, days_ago in chain_rows:
+            pids.append(pid)
+        for j, (conviction, strategy, pnl, days_ago) in enumerate(chain_rows):
+            started = (date.today() - timedelta(days=days_ago)).isoformat()
+            if pids:
+                pid = pids[j % len(pids)]   # reuse a real closed position (no count inflation)
+            else:
+                # No trades — a chain still needs a position to join to.
+                pid = f"cpos-{j}"
+                conn.execute(
+                    """INSERT INTO positions (position_id, pillar, regime_at_entry,
+                       conviction_at_entry, realized_pnl, close_date, status, close_source)
+                       VALUES (?,?,?,?,?,?, 'closed','thesis_exit')""",
+                    (pid, "vol_premium", "neutral", conviction, pnl, started),
+                )
             conn.execute(
-                "INSERT INTO decision_chains VALUES (?,?,?,?,?)",
-                (conviction, strategy, pnl,
-                 (date.today() - timedelta(days=days_ago)).isoformat(), "filled"),
+                """INSERT INTO decision_chains (chain_id, position_id, conviction, strategy,
+                   realized_pnl, started_at, outcome) VALUES (?,?,?,?,?,?, 'filled')""",
+                (f"chain-{j}", pid, conviction, strategy, pnl, started),
             )
     return db_path
 
