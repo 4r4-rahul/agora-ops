@@ -1142,6 +1142,14 @@ class PositionManager:
                 "action": l.action,
                 "contracts": l.contracts,
                 "mid_price": l.mid_price,
+                # Persist per-leg greeks too: get_open_positions reads delta/gamma/theta/vega back
+                # (with 0.0 defaults), and get_portfolio_greeks aggregates them for the risk
+                # council's delta/vega/theta limits. Omitting them here reloaded every position with
+                # ZERO greeks, silently disabling those limits after any DB round-trip.
+                "delta": l.delta,
+                "gamma": l.gamma,
+                "theta": l.theta,
+                "vega": l.vega,
             }
             for l in position.legs
         ])
