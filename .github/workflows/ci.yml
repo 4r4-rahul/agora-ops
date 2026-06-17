@@ -1,0 +1,62 @@
+name: CI
+
+# Continuous correctness + security gate. Introduced 2026-06-17.
+# Blocking gates: tests, dependency CVE audit, static security (HIGH). Lint is advisory for now.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["main"]
+  schedule:
+    - cron: "0 13 * * 1"   # weekly Monday re-audit — catches newly-disclosed CVEs in pinned deps
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-and-security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      # ── Blocking: correctness ──────────────────────────────────────────────
+      - name: Tests
+        run: pytest tests agora/tests -q -p no:warnings
+
+      # ── Blocking: known-CVE audit of installed deps ───────────────────────
+      # The two ignored advisories have NO upstream fix as of 2026-06-17 (tracked in SECURITY.md);
+      # drop the --ignore-vuln flags the moment a patched release ships.
+      - name: Dependency vulnerability audit
+        run: |
+          pip-audit \
+            --ignore-vuln CVE-2026-45829 \
+            --ignore-vuln CVE-2025-3000 \
+            --progress-spinner off
+
+      # ── Blocking: static security analysis (HIGH severity) ────────────────
+      - name: Static security scan (bandit)
+        run: bandit -c pyproject.toml -r agora --severity-level high -q
+
+      # ── Blocking: secret scan ─────────────────────────────────────────────
+      - name: Secret scan
+        run: |
+          detect-secrets scan --baseline .secrets.baseline \
+            --exclude-files '\.venv/|\.git/|/__pycache__/'
+
+      # ── Advisory: lint (does not fail the build yet) ──────────────────────
+      - name: Lint (advisory)
+        continue-on-error: true
+        run: ruff check agora

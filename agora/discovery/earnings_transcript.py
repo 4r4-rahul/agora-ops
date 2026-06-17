@@ -193,7 +193,7 @@ class EarningsTranscriptAgent:
         entity = source.get("entity_name", "Unknown")
         file_num = source.get("file_num", "")
 
-        h = hashlib.md5(file_num.encode()).hexdigest()
+        h = hashlib.md5(file_num.encode(), usedforsecurity=False).hexdigest()
         if h in self._seen_hashes:
             return
         self._seen_hashes.add(h)
@@ -313,7 +313,7 @@ class EarningsTranscriptAgent:
         Falls back gracefully if Files API is unavailable.
         """
         import io as _io
-        text_hash = hashlib.md5(text.encode()).hexdigest()
+        text_hash = hashlib.md5(text.encode(), usedforsecurity=False).hexdigest()
         if text_hash in self._file_id_cache:
             return self._file_id_cache[text_hash]
         try:

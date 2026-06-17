@@ -1,0 +1,52 @@
+# Tool configuration ONLY (no [build-system]/[project] — the app installs via requirements.txt,
+# so nothing here changes how the application is built or installed). These sections configure the
+# quality + security toolchain (pytest, coverage, bandit, ruff) introduced 2026-06-17.
+
+[tool.pytest.ini_options]
+# Pin the agora test roots; trading_platform/ keeps its own pytest.ini (asyncio_mode=auto).
+testpaths = ["tests", "agora/tests"]
+# agora async tests carry explicit @pytest.mark.asyncio markers → strict (the default).
+asyncio_mode = "strict"
+addopts = "-q -ra"
+
+[tool.coverage.run]
+source = ["agora"]
+branch = true
+omit = ["*/tests/*", "*/__pycache__/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]
+
+# ── Static security analysis (bandit) ─────────────────────────────────────────
+[tool.bandit]
+exclude_dirs = ["tests", "agora/tests", ".venv", "trading_platform/tests"]
+# B101 (assert) — used as intentional invariants in prod + everywhere in tests; not a security risk.
+# B110/B112 (try/except pass|continue) — deliberate fail-safe patterns around optional I/O.
+# B608 — REVIEWED 2026-06-17: every flagged query interpolates a hardcoded column-list literal
+#        (_cols/_COLS) with all runtime values bound via "?" placeholders — no user input reaches
+#        the SQL string, so these are not injectable. Kept out of the gate to avoid false-positive
+#        noise; re-audit if any query starts interpolating a non-constant.
+skips = ["B101", "B110", "B112", "B608"]
+
+# ── Lint + format (ruff) — advisory in CI, not a merge gate yet ───────────────
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+exclude = [".venv", "trading_platform", "agora/backtester"]
+
+[tool.ruff.lint]
+# Start conservative: pyflakes (F), bug-bear (B), security (S/flake8-bandit), import sort (I),
+# pyupgrade (UP). Expand once the existing backlog is burned down.
+select = ["F", "E9", "B", "S", "I", "UP"]
+# Asserts (S101) and the reviewed SQL f-strings (S608) mirror the bandit skips above.
+ignore = ["S101", "S608", "E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = ["S", "B"]

@@ -208,7 +208,7 @@ class SmartMoneyAgent:
         form_type = source.get("form_type", "")
         accession = hit.get("_id", "")
 
-        h = hashlib.md5(file_num.encode()).hexdigest()
+        h = hashlib.md5(file_num.encode(), usedforsecurity=False).hexdigest()
         if h in self._seen_hashes:
             return
         self._seen_hashes.add(h)
@@ -413,7 +413,7 @@ class SmartMoneyAgent:
         file_num = source.get("file_num", "")
         file_date_str = source.get("file_date", date.today().isoformat())
 
-        h = hashlib.md5(file_num.encode()).hexdigest()
+        h = hashlib.md5(file_num.encode(), usedforsecurity=False).hexdigest()
         if h in self._seen_hashes:
             return
         self._seen_hashes.add(h)
@@ -445,7 +445,7 @@ class SmartMoneyAgent:
 
             # Don't re-fire if we already processed this cluster today
             cluster_key = f"cluster_{ticker}_{date.today().isoformat()}"
-            h = hashlib.md5(cluster_key.encode()).hexdigest()
+            h = hashlib.md5(cluster_key.encode(), usedforsecurity=False).hexdigest()
             if h in self._seen_hashes:
                 continue
             self._seen_hashes.add(h)

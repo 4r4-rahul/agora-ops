@@ -1,0 +1,45 @@
+# Local pre-commit enforcement of the security + quality gate.
+#   pip install -r requirements-dev.txt && pre-commit install
+# Runs automatically on `git commit`; run on everything with `pre-commit run --all-files`.
+# Introduced 2026-06-17.
+
+minimum_pre_commit_version: "3.5.0"
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=1024"]
+      - id: detect-private-key          # blocks committing a private key outright
+      - id: check-yaml
+      - id: check-toml
+
+  # Secret scanning — guards against the API-key/token leak class (see SECURITY.md history).
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ["--baseline", ".secrets.baseline"]
+        exclude: '\.venv/|/__pycache__/'
+
+  # Static security analysis — gated on HIGH severity (0 today after the MD5 remediation).
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.9.4
+    hooks:
+      - id: bandit
+        args: ["-c", "pyproject.toml", "-r", "agora", "--severity-level", "high", "-q"]
+        pass_filenames: false
+
+  # Lint + format (advisory locally — does not block the commit while the backlog is burned down).
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.17
+    hooks:
+      - id: ruff
+        args: ["--exit-zero"]          # report only, don't fail the commit yet
+      - id: ruff-format
+        args: ["--check", "--diff"]
+        verbose: true

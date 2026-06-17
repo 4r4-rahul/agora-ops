@@ -209,7 +209,7 @@ class CatalystDiscoveryAgent:
         file_num = source.get("file_num", "")
 
         # Dedup by file number — persisted to SQLite so session restart is safe
-        h = hashlib.md5(file_num.encode()).hexdigest()
+        h = hashlib.md5(file_num.encode(), usedforsecurity=False).hexdigest()
         if self._is_seen(h):
             return
         self._mark_seen(h)

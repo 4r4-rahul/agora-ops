@@ -1,0 +1,18 @@
+# Development + security toolchain (NOT installed in production).
+#   pip install -r requirements-dev.txt
+# Introduced 2026-06-17 alongside the security-hardening pass. Pinned for reproducible CI.
+
+-r requirements.txt
+
+# Test
+pytest-cov==7.1.0
+pytest-asyncio==1.3.0
+
+# Security / supply chain
+pip-audit==2.10.1        # known-CVE scan of installed deps (PyPI advisory DB + OSV)
+bandit==1.9.4            # static security analysis (CWE)
+detect-secrets==1.5.0    # secret/credential scanning (leak-history guard)
+
+# Lint / format / hooks
+ruff==0.15.17            # lint + format (replaces flake8/isort/black)
+pre-commit==4.6.0        # local enforcement of the above before each commit
