@@ -84,7 +84,7 @@ MEMORY_TOOLS: list[dict] = [
 
 # ── Handler factory ────────────────────────────────────────────────────────────
 
-def memory_tool_handlers(store: "SemanticTradeStore") -> dict[str, Any]:
+def memory_tool_handlers(store: SemanticTradeStore) -> dict[str, Any]:
     """
     Returns a dict mapping tool name -> callable handler.
     Each handler accepts keyword arguments matching the tool's input_schema.

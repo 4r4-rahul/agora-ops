@@ -20,12 +20,11 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from datetime import datetime, timezone
-from typing import Any
+from datetime import UTC, datetime
 
 import anthropic
 
-from agora.ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
+from agora.ops.llm_cost_log import log_message as _log_msg
 from agora.ops.payload_compressor import compress_payload as _compress
 
 logger = logging.getLogger(__name__)
@@ -106,7 +105,7 @@ class PerformanceAnalystAgent:
             import os
             key = os.getenv("ANTHROPIC_API_KEY", "")
             if not key:
-                raise RuntimeError("ANTHROPIC_API_KEY not set")
+                raise RuntimeError("ANTHROPIC_API_KEY not set") from None
             return key
 
     async def analyze(self) -> dict:
@@ -175,7 +174,7 @@ class PerformanceAnalystAgent:
         without_features = [r for r in swing if r.get("method") == "fallback"]
 
         return {
-            "analysis_date": datetime.now(tz=timezone.utc).isoformat()[:10],
+            "analysis_date": datetime.now(tz=UTC).isoformat()[:10],
             "total_rows": total,
             "swing_decisions": swing,
             "advocate_verdicts": advocate,
@@ -210,7 +209,7 @@ class PerformanceAnalystAgent:
             cols = ["ticker", "decision_ts", "raw_score", "direction", "go", "option_type",
                     "confidence", "outcome", "pnl_pct", "method",
                     "key_thesis", "what_kills_trade", "post_trade_audit"]
-            return [dict(zip(cols, r)) for r in rows]
+            return [dict(zip(cols, r, strict=False)) for r in rows]
         except Exception as exc:
             logger.debug("fetch_swing: %s", exc)
             return []
@@ -227,7 +226,7 @@ class PerformanceAnalystAgent:
                 ).fetchall()
             cols = ["decision_id", "ticker", "decided_at_utc", "verdict",
                     "verdict_confidence", "trade_taken", "realized_pnl", "advocate_was_right"]
-            return [dict(zip(cols, r)) for r in rows]
+            return [dict(zip(cols, r, strict=False)) for r in rows]
         except Exception as exc:
             logger.debug("fetch_advocate: %s", exc)
             return []
@@ -245,7 +244,7 @@ class PerformanceAnalystAgent:
                 ).fetchall()
             cols = ["decision_id", "ticker", "decided_at_utc", "thesis_strength",
                     "confidence", "go_recommendation", "shadow_mode"]
-            return [dict(zip(cols, r)) for r in rows]
+            return [dict(zip(cols, r, strict=False)) for r in rows]
         except Exception as exc:
             logger.debug("fetch_defender (table may not exist yet): %s", exc)
             return []
@@ -264,7 +263,7 @@ class PerformanceAnalystAgent:
             cols = ["decision_id", "ticker", "decided_at_utc", "direction",
                     "confidence_pct", "strategy_family", "thesis_played_out",
                     "magnitude_realized_pct"]
-            return [dict(zip(cols, r)) for r in rows]
+            return [dict(zip(cols, r, strict=False)) for r in rows]
         except Exception as exc:
             logger.debug("fetch_analyst: %s", exc)
             return []
@@ -283,7 +282,7 @@ class PerformanceAnalystAgent:
                 ).fetchall()
             cols = ["signal_name", "direction", "total_trades", "wins", "losses",
                     "win_rate", "avg_pnl", "total_pnl"]
-            return [dict(zip(cols, r)) for r in rows]
+            return [dict(zip(cols, r, strict=False)) for r in rows]
         except Exception as exc:
             logger.debug("fetch_long_signal_stats (table may not exist yet): %s", exc)
             return []
@@ -300,7 +299,7 @@ class PerformanceAnalystAgent:
                 ).fetchall()
             cols = ["decision_id", "ticker", "decided_at_utc", "decision",
                     "strategy_type", "realized_pnl"]
-            return [dict(zip(cols, r)) for r in rows]
+            return [dict(zip(cols, r, strict=False)) for r in rows]
         except Exception as exc:
             logger.debug("fetch_strategy: %s", exc)
             return []
@@ -333,8 +332,8 @@ class PerformanceAnalystAgent:
                             agent, text,
                             json.dumps([pattern[:200]]),
                             round(conf, 3), _SAMPLE,
-                            datetime.now(tz=timezone.utc).isoformat(),
-                            datetime.now(tz=timezone.utc).isoformat(),
+                            datetime.now(tz=UTC).isoformat(),
+                            datetime.now(tz=UTC).isoformat(),
                         ),
                     )
                 written += 1

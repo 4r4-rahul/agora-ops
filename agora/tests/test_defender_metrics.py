@@ -82,8 +82,10 @@ def test_no_overrides_is_safe(tmp_path):
 def test_defender_dedup_cache(tmp_path, monkeypatch):
     """Re-scans block the same setup 12-26x/day; the agent must defend an identical
     (ticker,strategy,strikes) only ONCE per TTL and reuse the verdict with no LLM call."""
-    import asyncio, time
+    import asyncio
+    import time
     from types import SimpleNamespace
+
     from agora.agents import thesis_defender as TD
 
     s = SimpleNamespace(db_path=str(tmp_path / "d.db"), anthropic_api_key="sk-test",

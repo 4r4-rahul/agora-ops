@@ -10,10 +10,8 @@ import sqlite3
 import tempfile
 import types
 
-import pytest
-
-from agora.agents.performance_analyst import _parse_json, _win_rate
 import agora.agents.performance_analyst as pa
+from agora.agents.performance_analyst import _parse_json, _win_rate
 
 
 # ── _win_rate ─────────────────────────────────────────────────────────────────

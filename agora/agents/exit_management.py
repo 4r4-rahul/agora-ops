@@ -31,16 +31,17 @@ import json
 import logging
 import sqlite3
 import time
-
-from agora.core.json_extract import extract_json as _extract_json
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
-from typing import Any, Callable, Awaitable
+from datetime import UTC, date, datetime
+from typing import Any
 
 import anthropic
 
-from agora.ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
-from agora.ops.lessons_store import load_approved_lessons as _load_lessons, load_calibration_note as _load_cal_note
+from agora.core.json_extract import extract_json as _extract_json
+from agora.ops.lessons_store import load_approved_lessons as _load_lessons
+from agora.ops.lessons_store import load_calibration_note as _load_cal_note
+from agora.ops.llm_cost_log import log_message as _log_msg
 from agora.ops.payload_compressor import compress_payload as _compress
 
 logger = logging.getLogger(__name__)
@@ -311,7 +312,7 @@ class ExitIntelligenceAgent:
 
             self._write_journal(decision_id, position, rec, raw_output,
                                 in_tok, out_tok, cost, latency_ms)
-            self._last_evaluated[position_id] = datetime.now(tz=timezone.utc)
+            self._last_evaluated[position_id] = datetime.now(tz=UTC)
 
             logger.info(
                 "ExitAgent [%s/%s] %s | validity=%s | kill=%s%s",
@@ -346,7 +347,7 @@ class ExitIntelligenceAgent:
         last = self._last_evaluated.get(position_id)
         if last is None:
             return True
-        elapsed = (datetime.now(tz=timezone.utc) - last).total_seconds()
+        elapsed = (datetime.now(tz=UTC) - last).total_seconds()
         return elapsed >= interval_hours * 3600
 
     # ── DB helpers ────────────────────────────────────────────────────────────
@@ -444,7 +445,7 @@ class ExitIntelligenceAgent:
                 "confidence": macro_context.confidence      if macro_context else None,
                 "key_risk":   macro_context.key_risk        if macro_context else None,
             },
-            "evaluation_time": datetime.now(tz=timezone.utc).isoformat(),
+            "evaluation_time": datetime.now(tz=UTC).isoformat(),
             "approved_lessons": lessons or [],
             # CURRENT market read at exit time (vs the stale entry thesis above) — the live
             # signals + the entry brain's FRESH thesis. Empty if the provider isn't wired.
@@ -482,7 +483,7 @@ class ExitIntelligenceAgent:
                         decision_id or "",
                         position.position_id,
                         position.ticker,
-                        datetime.now(tz=timezone.utc).isoformat(),
+                        datetime.now(tz=UTC).isoformat(),
                         PROMPT_VERSION, self._model,
                         json.dumps({"ticker": position.ticker}, default=str),
                         rec.thesis_validity           if rec else "error",

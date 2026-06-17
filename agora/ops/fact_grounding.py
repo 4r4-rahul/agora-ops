@@ -30,7 +30,7 @@ from __future__ import annotations
 import logging
 import re
 import sqlite3
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +119,7 @@ def check_event_claims(text: str, source: str = "", ticker: str = "") -> list[di
                 "actual_event_days": real_days if real_days is not None else -1,
                 "actual_next_event": f"{next_desc} in {next_days}d",
                 "issue": (f"agent asserted {ev.upper()} is imminent, but the next {ev.upper()} is "
-                          f"{('%dd out' % real_days) if real_days is not None else 'not scheduled'}; "
+                          f"{(f'{real_days}d out') if real_days is not None else 'not scheduled'}; "
                           f"the actual next macro event is {next_desc} in {next_days}d"),
                 "severity": "high",
             })
@@ -202,7 +202,7 @@ def scan(text: str, db_path: str, source: str, ticker: str = "") -> list[dict]:
         with sqlite3.connect(db_path, timeout=10) as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             _ensure_table(conn)
-            now = datetime.now(timezone.utc).isoformat()
+            now = datetime.now(UTC).isoformat()
             for d in divs:
                 conn.execute(
                     """INSERT INTO fact_divergence_log

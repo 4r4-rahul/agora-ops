@@ -7,18 +7,14 @@ add_position INSERT is robust to the schema addition (explicit columns, not posi
 """
 from __future__ import annotations
 
-import os
 import sqlite3
-import tempfile
 from datetime import date, timedelta
 from pathlib import Path
 
-import pytest
-
-from agora.ops.db_migrations import run_all
-from agora.core.models import OpenPosition, StrategyType, StrategyPillar, SpreadLeg
-from agora.lifecycle.position_manager import PositionManager
 from agora.core.config import AgoraSettings
+from agora.core.models import OpenPosition, SpreadLeg, StrategyPillar, StrategyType
+from agora.lifecycle.position_manager import PositionManager
+from agora.ops.db_migrations import run_all
 
 _E = "2026-06-17T14:32:07.812000+00:00"
 _X = "2026-06-17T15:48:22.119000+00:00"

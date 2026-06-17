@@ -23,7 +23,8 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import anthropic
 
@@ -49,7 +50,7 @@ async def run_with_tools(
     """
     msgs = list(messages)
 
-    for turn in range(max_turns):
+    for _turn in range(max_turns):
         response = await client.messages.create(
             model=model,
             system=system,

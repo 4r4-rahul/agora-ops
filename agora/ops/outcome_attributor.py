@@ -49,8 +49,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
-from datetime import date, datetime, timedelta, timezone
-from math import sqrt
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -342,7 +341,7 @@ def _attribute_exit(conn: sqlite3.Connection, trades: list[tuple]) -> int:
       HOLD       + final_pnl <= 0                 → HOLD_WRONG
     """
     attributed = 0
-    for trade_id, ticker, entry_date_str, realized_pnl, _max_loss, max_gain in trades:
+    for trade_id, _ticker, _entry_date_str, realized_pnl, _max_loss, max_gain in trades:
         rows = conn.execute(
             """SELECT journal_id, recommendation, pnl_pct_of_max
                FROM exit_journal
@@ -386,7 +385,7 @@ def _write_calibration(conn: sqlite3.Connection, agent_name: str,
     Compute Brier score for one agent and append a calibration_log row.
     Only runs if there are ≥5 attributed samples since last calibration write.
     """
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=sample_window_days)).isoformat()
+    cutoff = (datetime.now(UTC) - timedelta(days=sample_window_days)).isoformat()
 
     if agent_name == "analyst":
         rows = conn.execute(
@@ -416,7 +415,7 @@ def _write_calibration(conn: sqlite3.Connection, agent_name: str,
             """INSERT INTO calibration_log (agent_name, measured_at_utc, sample_window_days,
                sample_size, actual_win_rate, predicted_win_rate, calibration_gap)
                VALUES (?,?,?,?,?,NULL,NULL)""",
-            (agent_name, datetime.now(timezone.utc).isoformat(), sample_window_days, len(rows),
+            (agent_name, datetime.now(UTC).isoformat(), sample_window_days, len(rows),
              actual_win_rate),
         )
         return
@@ -449,7 +448,7 @@ def _write_calibration(conn: sqlite3.Connection, agent_name: str,
            sample_size, brier_score, predicted_win_rate, actual_win_rate,
            calibration_gap, drift_alert)
            VALUES (?,?,?,?,?,?,?,?,?)""",
-        (agent_name, datetime.now(timezone.utc).isoformat(), sample_window_days, len(buckets),
+        (agent_name, datetime.now(UTC).isoformat(), sample_window_days, len(buckets),
          brier, avg_pred, actual_wr, gap, drift_alert),
     )
     if drift_alert:
@@ -746,7 +745,7 @@ def get_promotion_readiness(db_path: str) -> dict[str, Any]:
                 # Recall    = BLOCK was_right / total actual losers
                 block_right = sum(r[0] for r in av if r[1] == "BLOCK" and r[2] == 1)
                 block_wrong = sum(r[0] for r in av if r[1] == "BLOCK" and r[2] == 0)
-                pass_right  = sum(r[0] for r in av if r[1] == "PASS"  and r[2] == 1)
+                sum(r[0] for r in av if r[1] == "PASS"  and r[2] == 1)
                 pass_wrong  = sum(r[0] for r in av if r[1] == "PASS"  and r[2] == 0)
                 total_attr  = sum(r[0] for r in av)
                 total_block = block_right + block_wrong
@@ -943,8 +942,8 @@ class ScheduledAttributor:
             # evidence bar, so high-confidence learnings flow into agent context instead of
             # stranding behind manual approval (bounded §17 relaxation — see lessons_store).
             try:
-                from agora.ops.lessons_store import auto_approve_lessons
                 from agora.core.config import get_settings
+                from agora.ops.lessons_store import auto_approve_lessons
                 auto_approve_lessons(self._db_path, get_settings())
             except Exception as _aex:
                 logger.debug("auto_approve_lessons skipped: %s", _aex)
@@ -1006,8 +1005,8 @@ class ScheduledAttributor:
 
     async def _run_calibrator(self) -> None:
         try:
-            import json
             from pathlib import Path
+
             from agora.ops.conviction_calibrator import calibrate
             Path(self._cal_output).parent.mkdir(parents=True, exist_ok=True)
             result = calibrate(self._db_path, self._cal_output)
@@ -1021,7 +1020,7 @@ class ScheduledAttributor:
                 summary += f"  • {note[:160]}\n"
             if n < result.get("min_trades_for_proposal", 50):
                 summary += "  ⚠️ Insufficient data for weight proposals — collecting more trades.\n"
-            summary += f"  Full report: `.agora/calibration_report.json`"
+            summary += "  Full report: `.agora/calibration_report.json`"
             logger.info("ConvictionCalibrator complete: %d trades", n)
             await self._send_webhook(summary)
         except Exception as exc:

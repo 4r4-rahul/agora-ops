@@ -92,7 +92,6 @@ def market_tool_handlers() -> dict[str, Any]:
     async def get_current_snapshot(ticker: str) -> dict:
         try:
             import yfinance as yf
-            import pandas as pd
             tk = yf.Ticker(ticker.upper())
             hist = await asyncio.to_thread(lambda: tk.history(period="60d"))
             if hist.empty:

@@ -13,7 +13,7 @@ Each pattern returns a structured signal dict ready for the conviction scorer.
 from __future__ import annotations
 
 import logging
-from datetime import date, timedelta
+from datetime import date
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -88,7 +88,7 @@ class EventPatternEngine:
             return []
 
         upcoming = self._cal.upcoming_events(days=10)
-        fomc_events = [e for e in upcoming if "fomc" in e.event_date.__class__.__name__.lower()
+        [e for e in upcoming if "fomc" in e.event_date.__class__.__name__.lower()
                        or (hasattr(e, "event_type") and "fomc" in str(e.event_type).lower())]
 
         # Fallback: check days_to_next_event for FOMC-related events

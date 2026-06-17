@@ -28,7 +28,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
@@ -38,7 +38,7 @@ from pydantic import BaseModel, ValidationError
 
 from ..core.config import AgoraSettings, get_settings
 from ..core.session_plan import SessionPlan
-from ..ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
+from ..ops.llm_cost_log import log_message as _log_msg
 
 
 class _SessionPlanSchema(BaseModel):
@@ -53,8 +53,7 @@ class _SessionPlanSchema(BaseModel):
     notes: str = ""
 
 if TYPE_CHECKING:
-    from ..lifecycle.position_manager import PositionManager
-    from ..risk.risk_council import RiskCouncil
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -555,7 +554,7 @@ class CEOAgent:
         state = self._collect_state()
         realized = state.get("realized_pnl_today", 0.0)
         daily_lim = self._settings.daily_loss_limit_dollars or 500
-        open_pos = state.get("open_positions", 0)
+        state.get("open_positions", 0)
 
         old_plan = self._session_plan
 

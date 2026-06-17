@@ -21,7 +21,7 @@ import asyncio
 import json
 import logging
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -186,14 +186,13 @@ class SectorMomentumAgent:
         results = await asyncio.gather(*tasks.values(), return_exceptions=True)
         return {
             ticker: (r if not isinstance(r, Exception) else {})
-            for ticker, r in zip(tasks.keys(), results)
+            for ticker, r in zip(tasks.keys(), results, strict=False)
         }
 
     async def _fetch_etf_data(self, ticker: str) -> dict:
         """Fetch 4-week return, RSI, IV rank for one ETF."""
         try:
             import yfinance as yf
-            import numpy as np
             tk = yf.Ticker(ticker)
             hist = tk.history(period="3mo", interval="1d")
             if hist.empty or len(hist) < 30:

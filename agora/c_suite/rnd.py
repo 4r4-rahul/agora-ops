@@ -19,8 +19,8 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from .base import ExecutiveAgent
 from ..core.config import AgoraSettings
+from .base import ExecutiveAgent
 
 logger = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
@@ -284,7 +284,6 @@ class RNDAgent(ExecutiveAgent):
         """
         findings: list[tuple[str, str, str]] = []
         import sqlite3 as _sql
-        from datetime import datetime as _dt
 
         now_et = datetime.now(tz=ET)
         is_market_hours = 9 <= now_et.hour < 16
@@ -575,7 +574,6 @@ class RNDAgent(ExecutiveAgent):
         # Event pattern engine active signals
         if self._event_engine:
             try:
-                from datetime import date
                 # Check a sample of universe tickers for active event signals
                 active = []
                 for ticker in self._settings.etf_universe[:5]:

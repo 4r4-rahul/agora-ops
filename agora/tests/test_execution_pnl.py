@@ -13,9 +13,6 @@ SimpleNamespace — no network, no ib_insync live calls.
 """
 import types
 
-import pytest
-
-
 # ── Fake broker objects (mirror ib_insync's Fill / Execution / Contract / Order) ──
 
 def _fill(conid, shares, price, side=None):

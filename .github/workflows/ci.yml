@@ -56,7 +56,10 @@ jobs:
           detect-secrets scan --baseline .secrets.baseline \
             --exclude-files '\.venv/|\.git/|/__pycache__/'
 
-      # ── Advisory: lint (does not fail the build yet) ──────────────────────
-      - name: Lint (advisory)
-        continue-on-error: true
+      # ── Blocking: lint (backlog burned to zero 2026-06-17) ────────────────
+      - name: Lint (ruff)
         run: ruff check agora
+
+      # ── Blocking: type check (incremental scope, see pyproject [tool.mypy].files) ──
+      - name: Type check (mypy)
+        run: mypy

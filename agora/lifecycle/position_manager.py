@@ -27,22 +27,20 @@ import asyncio
 import json
 import logging
 import sqlite3
-from datetime import date, datetime, time, timedelta, timezone
-from pathlib import Path
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from ..core.config import AgoraSettings, get_settings
-from ..ops.llm_cost_log import ensure_table as _ensure_llm_cost_table
-from ..ops.decision_chains import update_close as _decision_chain_close
 from ..core.models import (
     OpenPosition,
     PositionStatus,
     SpreadLeg,
     StrategyPillar,
     StrategyType,
-    TradeRecord,
 )
+from ..ops.decision_chains import update_close as _decision_chain_close
+from ..ops.llm_cost_log import ensure_table as _ensure_llm_cost_table
 from .profit_engine import IntelligentProfitEngine
 
 logger = logging.getLogger(__name__)
@@ -139,7 +137,7 @@ class PositionManager:
                 "UPDATE positions SET contracts=?, max_loss_dollars=?, max_gain_dollars=?, "
                 "last_reviewed=? WHERE position_id=?",
                 (new_ct, row[1] * ratio, row[2] * ratio,
-                 datetime.now(tz=timezone.utc).isoformat(), position_id),
+                 datetime.now(tz=UTC).isoformat(), position_id),
             )
             self._db.execute(
                 "INSERT OR IGNORE INTO trade_records VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -387,6 +385,7 @@ class PositionManager:
     ) -> dict:
         """Synchronous yfinance work — runs in a thread pool via asyncio.to_thread()."""
         import yfinance as yf
+
         from trading_platform.services.options_flow import compute_bs_greeks
 
         tk = yf.Ticker(ticker)
@@ -681,7 +680,7 @@ class PositionManager:
         except Exception as exc:
             logger.debug("long_peak save failed: %s", exc)
 
-    def _long_thesis_for(self, position: "OpenPosition") -> dict:
+    def _long_thesis_for(self, position: OpenPosition) -> dict:
         """Build an ExitIntelligenceAgent thesis dict from the long_journal entry, so the agent
         can re-validate a long with real entry context (its thesis lives in long_journal). Resolved
         by position_id, else by the position's ticker+strike+expiry structure — the entry's thesis
@@ -1055,7 +1054,7 @@ class PositionManager:
             _real_cp  = float(_row[1]) if _row and _row[1] is not None else round(position.current_price, 4)
             self._db.execute(
                 "UPDATE positions SET close_source=?, last_reviewed=? WHERE position_id=?",
-                (source, datetime.now(tz=timezone.utc).isoformat(), position.position_id),
+                (source, datetime.now(tz=UTC).isoformat(), position.position_id),
             )
             self._db.commit()
             logger.info("CLOSED (real fill): %s | reason: %s | realized=$%.0f close=%.2f",
@@ -1075,7 +1074,7 @@ class PositionManager:
                 round(position.current_price, 4),
                 source,
                 round(position.unrealized_pnl, 2),
-                datetime.now(tz=timezone.utc).isoformat(),
+                datetime.now(tz=UTC).isoformat(),
                 position.position_id,
             ),
         )
@@ -1110,7 +1109,7 @@ class PositionManager:
                 *[asyncio.to_thread(self._fetch_spot_sync, pos.ticker) for pos in near_expiry],
                 return_exceptions=True,
             )
-            for pos, spot_or_exc in zip(near_expiry, spots):
+            for pos, spot_or_exc in zip(near_expiry, spots, strict=False):
                 dte  = (pos.expiry_date - today).days
                 spot = float(spot_or_exc) if isinstance(spot_or_exc, (int, float)) else 0.0
                 if spot <= 0:
@@ -1183,7 +1182,7 @@ class PositionManager:
             position.unrealized_pnl,
             position.realized_pnl,
             position.rolled_count,
-            datetime.now(tz=timezone.utc).isoformat(),
+            datetime.now(tz=UTC).isoformat(),
             json.dumps(position.ibkr_order_ids),
             position.notes,
             getattr(position, "direction", "neutral"),
@@ -1202,7 +1201,7 @@ class PositionManager:
 
     def add_journal_entry(
         self,
-        position: "OpenPosition",
+        position: OpenPosition,
         spot_at_entry: float = 0.0,
         why_traded: str = "",
         macro_at_entry: str = "",
@@ -1301,7 +1300,7 @@ class PositionManager:
     ) -> None:
         self._db.execute(
             "UPDATE positions SET current_price=?, unrealized_pnl=?, last_reviewed=? WHERE position_id=?",
-            (current_price, unrealized_pnl, datetime.now(tz=timezone.utc).isoformat(), position_id),
+            (current_price, unrealized_pnl, datetime.now(tz=UTC).isoformat(), position_id),
         )
         self._db.commit()
 
@@ -1329,7 +1328,7 @@ class PositionManager:
                 round(close_price, 4),
                 date.today().isoformat(),
                 source,
-                datetime.now(tz=timezone.utc).isoformat(),
+                datetime.now(tz=UTC).isoformat(),
                 (exit_ts_utc or None),
                 position_id,
             ),
@@ -1373,7 +1372,7 @@ class PositionManager:
         except Exception as exc:
             logger.debug("trade_record write error (mark_closed path): %s", exc)
 
-    def get_open_position_by_ticker(self, ticker: str) -> "OpenPosition | None":
+    def get_open_position_by_ticker(self, ticker: str) -> OpenPosition | None:
         """Return the first active position for a ticker, or None."""
         for p in self.get_open_positions():
             if p.ticker == ticker:

@@ -69,7 +69,7 @@ import logging
 import math
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from typing import Any
 
 import numpy as np
@@ -1121,12 +1121,12 @@ class LongOptionsAgent:
             stack["gex"] = gex_regime
 
         # ── Macro stance (staleness gate: treat as neutral if context > 4h old) ──
-        from datetime import datetime as _dt, timezone as _tz
+        from datetime import datetime as _dt
         _macro_ts = getattr(macro_context, "timestamp", None)
         _macro_stale = False
         if _macro_ts:
             try:
-                _age_h = (_dt.now(tz=_tz.utc) - _macro_ts).total_seconds() / 3600
+                _age_h = (_dt.now(tz=UTC) - _macro_ts).total_seconds() / 3600
                 _macro_stale = _age_h > 4.0
             except Exception:
                 pass
@@ -1243,7 +1243,6 @@ class LongOptionsAgent:
 
         # Factor 3: Catalyst ceiling — expire before catalyst to avoid binary risk
         if days_to_catalyst is not None and 5 <= days_to_catalyst < base:
-            orig_base = base
             base = max(hold_days + 3, days_to_catalyst - 2)
             reasons.append(f"catalyst={days_to_catalyst}d→ceil→{base}d")
 
@@ -1525,7 +1524,7 @@ class LongOptionsAgent:
                     decision.ticker,
                     decision.strategy,
                     rec.direction if rec else "",
-                    datetime.now(timezone.utc).isoformat(),
+                    datetime.now(UTC).isoformat(),
                     decision.strike,
                     str(rec.legs[0].expiration) if rec else "",
                     decision.dte,
@@ -1636,7 +1635,7 @@ class LongOptionsAgent:
                 return
             direction = entry["direction"] or "bullish"
             is_win    = realized_pnl > 0
-            now_utc   = datetime.now(timezone.utc).isoformat()
+            now_utc   = datetime.now(UTC).isoformat()
             with sqlite3.connect(db_path, timeout=10) as conn:
                 conn.execute("PRAGMA journal_mode=WAL")
 

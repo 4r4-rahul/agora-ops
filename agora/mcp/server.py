@@ -23,14 +23,13 @@ Tools exposed:
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
 from fastmcp import FastMCP
 
-from .sqlite_tools import sqlite_tool_handlers
-from .search_tools import search_tool_handlers
 from .edgar_tools import edgar_tool_handlers
 from .market_tools import market_tool_handlers
+from .search_tools import search_tool_handlers
+from .sqlite_tools import sqlite_tool_handlers
 
 # ── Resolve config ────────────────────────────────────────────────────────────
 _DB_PATH     = os.environ.get("AGORA_DB_PATH", ".agora/agora.db")

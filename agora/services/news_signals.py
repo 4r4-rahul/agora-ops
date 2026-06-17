@@ -31,14 +31,14 @@ import re
 import sqlite3
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
 _TICKER_RE = re.compile(r"\$([A-Z]{1,5})\b")
 _CACHE_TTL  = 30.0   # seconds
 
-_cache: tuple[float, "NewsContext"] | None = None
+_cache: tuple[float, NewsContext] | None = None
 
 
 # ── Data classes ──────────────────────────────────────────────────────────────
@@ -63,7 +63,7 @@ class NewsContext:
     halted_tickers: set[str]               = field(default_factory=set)
     macro_event:    MacroEvent | None      = None
     ticker_flags:   dict[str, TickerFlag]  = field(default_factory=dict)
-    last_checked:   datetime               = field(default_factory=lambda: datetime.now(timezone.utc))
+    last_checked:   datetime               = field(default_factory=lambda: datetime.now(UTC))
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -95,7 +95,7 @@ def invalidate_cache() -> None:
 # ── Parser ────────────────────────────────────────────────────────────────────
 
 def _build_context(db_path: str, lookback_minutes: int) -> NewsContext:
-    since = (datetime.now(timezone.utc) - timedelta(minutes=lookback_minutes)).isoformat()
+    since = (datetime.now(UTC) - timedelta(minutes=lookback_minutes)).isoformat()
     with sqlite3.connect(db_path, timeout=10) as conn:
         conn.execute("PRAGMA journal_mode=WAL")
         rows = conn.execute(
@@ -104,7 +104,7 @@ def _build_context(db_path: str, lookback_minutes: int) -> NewsContext:
             (since,),
         ).fetchall()
 
-    ctx = NewsContext(last_checked=datetime.now(timezone.utc))
+    ctx = NewsContext(last_checked=datetime.now(UTC))
 
     # Track halt/resume per ticker so a later "resumed" cancels an earlier "halt"
     halt_state: dict[str, bool] = {}   # ticker → True=halted, False=resumed
@@ -264,9 +264,9 @@ def _handle_ticker_flag(
 def _parse_ts(ts_str: str) -> datetime:
     try:
         dt = datetime.fromisoformat(ts_str)
-        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
     except Exception:
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
 
 
 def _first_match(text: str, patterns: list[str]) -> str:

@@ -180,12 +180,17 @@ def heal(db_path: str, position_mgr: Any, host: str = "127.0.0.1", port: int = 7
       • QTY_MISMATCH → reported, not auto-mutated (a partial fill needs a human/engine decision).
 
     Read-mostly on a clean book (no-op). Returns a summary dict. Never raises."""
-    from datetime import date as _date, datetime as _dt, timedelta as _td, timezone as _tz
     from ib_insync import IB
-    from agora.core.models import (OpenPosition, SpreadLeg, StrategyType,
-                                   StrategyPillar, PositionStatus)
 
-    out = {"ghosts_closed": 0, "orphans_adopted": 0, "qty_mismatch": 0, "errors": []}
+    from agora.core.models import (
+        OpenPosition,
+        PositionStatus,
+        SpreadLeg,
+        StrategyPillar,
+        StrategyType,
+    )
+
+    out: dict[str, Any] = {"ghosts_closed": 0, "orphans_adopted": 0, "qty_mismatch": 0, "errors": []}
     ib = IB()
     try:
         ib.connect(host, port, clientId=client_id, timeout=15)
@@ -256,7 +261,8 @@ def _adopt_group(position_mgr, sym, expiry, legs, detailed, OpenPosition, Spread
                  StrategyType, StrategyPillar, PositionStatus) -> bool:
     """Build and persist an OpenPosition from orphan broker legs so the engine tracks it."""
     import uuid
-    from datetime import date as _date, datetime as _dt, timedelta as _td
+    from datetime import date as _date
+    from datetime import timedelta as _td
     exp_d = _date(int(expiry[:4]), int(expiry[4:6]), int(expiry[6:8]))
     spread_legs, debit = [], 0.0
     for o in legs:

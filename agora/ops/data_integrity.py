@@ -140,14 +140,14 @@ class DataIntegrityAgent:
                     # IVR proxy: compare current IV to 52-week range
                     # yfinance doesn't give IVR directly; we use a heuristic:
                     # (current IV - 52w_iv_low) / (52w_iv_high - 52w_iv_low)
-                    iv_now = float(
+                    float(
                         info.get("impliedVolatility")
                         or info.get("annualHoldingsReturnYTD")
                         or 0
                     )
                     # Simpler: trust what the IvPremiumScreen computes via realtime options
                     # For sanity check, we just look for the "too uniform" pattern
-                    iv_pct = float(info.get("regularMarketVolume") or 0)
+                    float(info.get("regularMarketVolume") or 0)
 
                     # The actual check: did yfinance return IVR=100 for this ticker?
                     # We detect this by reading from options chain ATM IV vs 52w high

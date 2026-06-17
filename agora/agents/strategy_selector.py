@@ -31,14 +31,14 @@ import logging
 import sqlite3
 import time
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from typing import Any
 
 import anthropic
 from pydantic import BaseModel
 
-from agora.ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
 from agora.ops.lessons_store import load_approved_lessons as _load_lessons
+from agora.ops.llm_cost_log import log_message as _log_msg
 from agora.ops.payload_compressor import compress_payload as _compress
 
 logger = logging.getLogger(__name__)
@@ -144,7 +144,7 @@ class StrategySelectorAgent:
         self._shadow_mode = shadow_mode
         self._client      = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
         # cache: key → (cached_at, StrategySelection)
-        self._cache: dict[str, tuple[datetime, "StrategySelection"]] = {}
+        self._cache: dict[str, tuple[datetime, StrategySelection]] = {}
         logger.info("StrategySelectorAgent ready: model=%s shadow=%s", _MODEL, shadow_mode)
 
     @property
@@ -178,7 +178,7 @@ class StrategySelectorAgent:
         _pillar    = str(getattr(conviction, "pillar", ""))
         _direction = str(getattr(thesis, "direction", "") if thesis else "")
         _cache_key = f"{ticker}|{_conv_band}|{_pillar}|{_direction}"
-        _now = datetime.now(timezone.utc)
+        _now = datetime.now(UTC)
         if _cache_key in self._cache:
             _cached_at, _cached_sel = self._cache[_cache_key]
             if (_now - _cached_at).total_seconds() < self._CACHE_TTL_SECS:
@@ -352,7 +352,7 @@ class StrategySelectorAgent:
                     (
                         decision_id or "",
                         ticker,
-                        datetime.now(tz=timezone.utc).isoformat(),
+                        datetime.now(tz=UTC).isoformat(),
                         PROMPT_VERSION, _MODEL,
                         json.dumps({"ticker": ticker}, default=str),
                         selection.decision if selection else "error",

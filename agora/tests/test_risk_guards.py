@@ -15,7 +15,7 @@ touches sqlite uses a pytest tmp_path DB via settings override — the real
 from __future__ import annotations
 
 import sqlite3
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 
 import pytest
 
@@ -30,7 +30,6 @@ from agora.core.models import (
 )
 from agora.risk.circuit_breaker import CircuitBreakerAgent
 from agora.risk.compliance import ComplianceAgent
-
 
 # ── Fixtures / builders ───────────────────────────────────────────────────────
 

@@ -22,16 +22,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from typing import Any, Callable, Coroutine
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import anthropic
 
 from ..core.config import AgoraSettings, get_settings
 from ..core.json_extract import extract_json as _extract_json
-from ..ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
+from ..ops.llm_cost_log import log_message as _log_msg
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +142,7 @@ class EarningsCalendarAgent:
                 *[self._get_earnings_date(t) for t in batch],
                 return_exceptions=True,
             )
-            for ticker, result in zip(batch, results):
+            for ticker, result in zip(batch, results, strict=False):
                 if isinstance(result, date) and today <= result <= horizon:
                     all_upcoming.append((ticker, result))
                     logger.info("Earnings upcoming: %s on %s (T-%d)",
@@ -347,6 +348,7 @@ class EarningsCalendarAgent:
         """
         try:
             import yfinance as yf
+
             from trading_platform.services.market_data.yfinance_provider import _YF_OPTIONS_LOCK
 
             with _YF_OPTIONS_LOCK:
@@ -406,8 +408,8 @@ class EarningsCalendarAgent:
         Uses yfinance earnings history + price data.
         """
         try:
-            import yfinance as yf
             import pandas as pd
+            import yfinance as yf
 
             tk = yf.Ticker(ticker)
 
@@ -492,7 +494,7 @@ class EarningsCalendarAgent:
 
     def _get_sector_peers(self, ticker: str) -> list[str]:
         """Map ticker to its sector peer group."""
-        for sector, peers in _SECTOR_PEERS.items():
+        for _sector, peers in _SECTOR_PEERS.items():
             if ticker in peers:
                 return [p for p in peers if p != ticker]
         return []

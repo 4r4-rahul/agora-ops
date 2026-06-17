@@ -23,18 +23,16 @@ Claude API features used:
 
 from __future__ import annotations
 
-import json
 import logging
 import time as _time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any
+from datetime import UTC, datetime
 
 import anthropic
 
 from ..core.config import AgoraSettings, get_settings
 from ..core.json_extract import extract_json as _extract_json
-from ..ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
+from ..ops.llm_cost_log import log_message as _log_msg
 from ..ops.payload_compressor import compress_text as _compress_text
 
 logger = logging.getLogger(__name__)
@@ -76,7 +74,7 @@ class MacroContext:
     size_bias: str = "maintain"
     key_risk: str = ""
     reasoning: str = ""
-    timestamp: datetime = field(default_factory=lambda: datetime.now(tz=timezone.utc))
+    timestamp: datetime = field(default_factory=lambda: datetime.now(tz=UTC))
     method: str = "claude"
 
 

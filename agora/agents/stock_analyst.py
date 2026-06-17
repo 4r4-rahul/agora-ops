@@ -21,17 +21,17 @@ import re
 import sqlite3
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import anthropic
 
-from agora.ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
-from agora.ops.lessons_store import load_approved_lessons as _load_lessons
-from agora.ops.payload_compressor import compress_payload as _compress
-from agora.mcp.sqlite_tools import SQLITE_TOOLS, sqlite_tool_handlers
 from agora.mcp.search_tools import SEARCH_TOOLS, search_tool_handlers
+from agora.mcp.sqlite_tools import SQLITE_TOOLS, sqlite_tool_handlers
 from agora.mcp.tool_runner import run_with_tools
+from agora.ops.lessons_store import load_approved_lessons as _load_lessons
+from agora.ops.llm_cost_log import log_message as _log_msg
+from agora.ops.payload_compressor import compress_payload as _compress
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +122,7 @@ class StockAnalystAgent:
         # scan cycle, yet the analyst was re-called for the SAME ticker ~27x/day (TLT 44x), a
         # ~$12/day leak. Cache by ticker + conviction-band + macro stance; re-journal on hit so
         # attribution stays intact while the LLM call is skipped.
-        self._cache: dict[str, tuple[datetime, "AnalystThesis"]] = {}
+        self._cache: dict[str, tuple[datetime, AnalystThesis]] = {}
         self._cache_ttl = int(getattr(settings, "analyst_cache_ttl_secs", 3600))
         logger.info(
             "StockAnalystAgent ready: model=%s shadow=%s",
@@ -163,7 +163,7 @@ class StockAnalystAgent:
         _conv_band = int(conviction_score // 5) * 5
         _stance = str(getattr(macro_context, "macro_stance", "") or "")
         _ckey = f"{ticker}|{_conv_band}|{_stance}"
-        _now = datetime.now(timezone.utc)
+        _now = datetime.now(UTC)
         _hit = self._cache.get(_ckey)
         if _hit and (_now - _hit[0]).total_seconds() < self._cache_ttl:
             _cached = _hit[1]
@@ -390,7 +390,7 @@ class StockAnalystAgent:
                     (
                         decision_id or "",
                         ticker,
-                        datetime.now(tz=timezone.utc).isoformat(),
+                        datetime.now(tz=UTC).isoformat(),
                         PROMPT_VERSION,
                         self._model,
                         json.dumps(payload, default=str),

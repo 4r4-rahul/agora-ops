@@ -9,14 +9,11 @@ FIRED in the trade's direction are credited.
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
-import tempfile
 
-import pytest
-
+from agora.agents.long_options_agent import LongOptionsAgent as L
+from agora.agents.long_options_agent import _signal_fired_in_dir as fired
 from agora.ops.db_migrations import run_all
-from agora.agents.long_options_agent import LongOptionsAgent as L, _signal_fired_in_dir as fired
 
 
 def test_fired_detection():

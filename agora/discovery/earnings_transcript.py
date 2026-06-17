@@ -30,7 +30,7 @@ import hashlib
 import json
 import logging
 import re
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -450,7 +450,7 @@ class EarningsTranscriptAgent:
                 catalyst_type=CatalystType.EARNINGS_BEAT
                 if result.beat_quality in ("strong", "moderate")
                 else CatalystType.EARNINGS_MISS,
-                filing_time=datetime.now(tz=timezone.utc),
+                filing_time=datetime.now(tz=UTC),
                 headline=f"Derivative: {result.entity_name} {result.beat_quality} earnings — {result.sector_contagion} sector read-through",
                 direction=direction,
                 strength="moderate",   # derivatives are always moderate — primary ticker absorbed the move

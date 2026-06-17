@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -30,15 +30,29 @@ from agora.agents import (
     SectorMomentumAgent,
     SignalInput,
 )
-from agora.agents.premarket_setup import PreMarketSetupAgent, PositionAlert
-from agora.agents.sector_intelligence import SectorIntelligenceAgent
+from agora.agents.advocate_agent import AdvocateAgent
+from agora.agents.exit_management import ExitIntelligenceAgent
+from agora.agents.premarket_setup import PositionAlert, PreMarketSetupAgent
 from agora.agents.price_target import PriceTargetAgent
+from agora.agents.sector_intelligence import SectorIntelligenceAgent
+from agora.agents.stock_analyst import StockAnalystAgent
+from agora.agents.strategy_selector import StrategySelectorAgent
+from agora.agents.thesis_defender import ThesisDefenderAgent
+from agora.c_suite import CFOAgent, CIOAgent, COOAgent, CROAgent, CTOAgent, RNDAgent
+from agora.c_suite.ctech import CTechAgent
 from agora.core.config import AgoraSettings, get_settings
-from agora.core.models import Catalyst, OpenPosition, PositionStatus, StrategyPillar
+from agora.core.events import AgentEventBus
+from agora.core.models import Catalyst, StrategyPillar
 from agora.core.pnl import (
     realized_pnl as _calc_realized_pnl,
+)
+from agora.core.pnl import (
     select_entry_price as _calc_entry_price,
+)
+from agora.core.pnl import (
     signed_mid_from_total as _calc_signed_mid,
+)
+from agora.core.pnl import (
     startup_sync_close as _calc_startup_sync_close,
 )
 from agora.discovery.analyst_revision import AnalystRevisionTracker
@@ -49,48 +63,48 @@ from agora.discovery.ibkr_news import IBKRNewsAgent
 from agora.discovery.market_interest import MarketInterestAgent
 from agora.discovery.smart_money import SmartMoneyAgent
 from agora.discovery.universe_discovery import UniverseDiscoveryAgent
-from agora.lifecycle.position_manager import PositionManager
 from agora.execution.ibkr_bridge import close_trade, enrich_chain, reprice_legs, submit_trade
+from agora.lifecycle.position_manager import PositionManager
 from agora.ops.agent_performance import AgentPerformanceMonitor
 from agora.ops.attribution import PnlAttributor, PsiMonitor
-from agora.ops.system_health import SystemHealthAgent
-from agora.ops.execution_quality import ExecutionQualityAgent
 from agora.ops.data_integrity import DataIntegrityAgent
-from agora.ops.pillar_health import PillarHealthAgent
-from agora.ops.orphan_reconciler import OrphanOrderReconciler
-from agora.ops.ibkr_knowledge_agent import IBKRKnowledgeAgent
 from agora.ops.decision_chains import (
-    log_decision as _log_chain, update_close as _close_chain,
-    start_chain as _start_chain, complete_chain as _complete_chain,
+    complete_chain as _complete_chain,
+)
+from agora.ops.decision_chains import (
     link_position as _link_position,
 )
-from agora.ops.strategy_health import StrategyHealthAgent
+from agora.ops.decision_chains import (
+    log_decision as _log_chain,
+)
+from agora.ops.decision_chains import (
+    start_chain as _start_chain,
+)
 from agora.ops.devils_advocate import run as _devils_advocate
-from agora.ops.outcome_attributor import ScheduledAttributor, attribute_closed_trades
 from agora.ops.discord_commander import DiscordCommander
-from agora.c_suite import CROAgent, CIOAgent, CTOAgent, COOAgent, CFOAgent, RNDAgent
-from agora.c_suite.ctech import CTechAgent
-from agora.core.events import AgentEventBus
+from agora.ops.dynamic_params import DynamicParams, compute_dynamic_params
+from agora.ops.execution_quality import ExecutionQualityAgent
+from agora.ops.ibkr_knowledge_agent import IBKRKnowledgeAgent
 from agora.ops.live_readiness import LiveReadinessMeter
+from agora.ops.orphan_reconciler import OrphanOrderReconciler
+from agora.ops.outcome_attributor import ScheduledAttributor
+from agora.ops.pillar_health import PillarHealthAgent
+from agora.ops.strategy_health import StrategyHealthAgent
+from agora.ops.system_health import SystemHealthAgent
 from agora.risk.circuit_breaker import CircuitBreakerAgent
 from agora.risk.compliance import ComplianceAgent
 from agora.risk.entry_timing import EntryTimingGate
-from trading_platform.services.macro_calendar import get_macro_calendar
 from agora.risk.risk_council import RiskCouncil
-from agora.signals.event_patterns import EventPatternEngine
-from agora.signals.iv_premium import IvPremiumScreen
-from agora.signals.sector_momentum_intraday import IntradaySectorMomentumDetector, SECTOR_MAP as _SECTOR_MAP
-from agora.signals.vol_regime import VolRegimeClassifier
-from agora.strategies.rules_engine import StrategyRulesEngine
-from agora.ops.dynamic_params import DynamicParams, compute_dynamic_params
 from agora.scan import ScanPriority, UniverseScanEngine
 from agora.scan.market_snapshot import get_market_snapshot
-from agora.agents.stock_analyst import StockAnalystAgent
-from agora.agents.strategy_selector import StrategySelectorAgent, StrategySelection
-from agora.agents.advocate_agent import AdvocateAgent
-from agora.agents.thesis_defender import ThesisDefenderAgent
-from agora.agents.exit_management import ExitIntelligenceAgent
 from agora.services.flow_detector import get_flow_signals
+from agora.signals.event_patterns import EventPatternEngine
+from agora.signals.iv_premium import IvPremiumScreen
+from agora.signals.sector_momentum_intraday import SECTOR_MAP as _SECTOR_MAP
+from agora.signals.sector_momentum_intraday import IntradaySectorMomentumDetector
+from agora.signals.vol_regime import VolRegimeClassifier
+from agora.strategies.rules_engine import StrategyRulesEngine
+from trading_platform.services.macro_calendar import get_macro_calendar
 
 logger = logging.getLogger(__name__)
 
@@ -298,8 +312,8 @@ class AgoraSession:
         self._uw_listener    = None
         self._uw_market_intel = None
         if self._settings.discord_bot_token and self._settings.discord_uw_channel_id:
-            from agora.ops.uw_discord_listener import UWDiscordListener
             from agora.agents.uw_market_intel import UWMarketIntelAgent
+            from agora.ops.uw_discord_listener import UWDiscordListener
             self._uw_listener = UWDiscordListener(
                 token=self._settings.discord_bot_token,
                 channel_id=self._settings.discord_uw_channel_id,
@@ -855,7 +869,7 @@ class AgoraSession:
         while self._running:
             try:
                 with open(hb_path, "w") as fh:
-                    fh.write(str(int(datetime.now(tz=timezone.utc).timestamp())))
+                    fh.write(str(int(datetime.now(tz=UTC).timestamp())))
             except Exception as exc:
                 logger.debug("heartbeat write failed: %s", exc)
             # Every ~5 min, surface the shared-snapshot cache effectiveness (#1/#2): a high hit
@@ -1000,7 +1014,7 @@ class AgoraSession:
 
     # ── Earnings proximity ─────────────────────────────────────────
 
-    async def _get_next_earnings(self, ticker: str) -> "date | None":
+    async def _get_next_earnings(self, ticker: str) -> date | None:
         """
         Fetch and cache next earnings date.
 
@@ -1014,7 +1028,7 @@ class AgoraSession:
         if ticker in self._earnings_date_cache:
             return self._earnings_date_cache[ticker]
 
-        result: "date | None" = None
+        result: date | None = None
 
         # 1. IBKR Fundamental Data (CalendarReport)
         try:
@@ -1031,6 +1045,7 @@ class AgoraSession:
         if result is None:
             try:
                 from datetime import date as _date
+
                 import yfinance as yf
 
                 def _fetch():
@@ -1158,12 +1173,11 @@ class AgoraSession:
                     ),
                     timeout=8.0,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 vix   = float(getattr(self, "_last_macro_vix", 0.0) or 20.0)
                 vix3m = vix
                 logger.warning("Macro VIX fetch >8s — using last-known VIX=%.2f (avoids heartbeat stall)", vix)
             logger.info("Macro VIX fetch: %.1fs | VIX=%.2f VIX3M=%.2f", _t.monotonic()-_scan_start, vix, vix3m)
-            spy_info = {}  # no longer needed for price; snapshot covers it
 
             from trading_platform.services.market_data.yfinance_provider import YFinanceProvider
             provider = YFinanceProvider()
@@ -1364,7 +1378,9 @@ class AgoraSession:
           C. 50% flat stop  — cut when option loses 50% of purchase price (pre-trail)
           D. 50% profit target — take profit before trail activates (optional direct exit)
         """
-        from datetime import time as _time, date as _date, timedelta
+        from datetime import date as _date
+        from datetime import time as _time
+        from datetime import timedelta
         # Market data now comes from the shared snapshot (get_market_snapshot); the long loop
         # no longer touches yfinance directly (#1/#2).
 
@@ -1504,7 +1520,7 @@ class AgoraSession:
                         chain_dict: dict = {}
                         today_d = _date.today()
                         filled: set[int] = set()
-                        for exp in ms.expiries(t):
+                        for exp in ms.expiries(t):  # noqa: B023 (reviewed: immediate-consume / shared object)
                             try:
                                 exp_date = _date.fromisoformat(exp)
                             except ValueError:
@@ -1512,7 +1528,7 @@ class AgoraSession:
                             dte = (exp_date - today_d).days
                             for i, (lo, hi) in enumerate(_DTE_BRACKETS):
                                 if i not in filled and lo <= dte <= hi:
-                                    c = ms.option_chain(t, exp)
+                                    c = ms.option_chain(t, exp)  # noqa: B023 (reviewed: immediate-consume / shared object)
                                     if c is not None:
                                         chain_dict[exp] = c
                                         filled.add(i)
@@ -1534,7 +1550,7 @@ class AgoraSession:
                 # Spot price (shared snapshot — same value the spread pipeline sees, #2)
                 try:
                     spot = await asyncio.wait_for(
-                        asyncio.to_thread(lambda t=ticker: get_market_snapshot().spot(t)),
+                        asyncio.to_thread(lambda t=ticker: get_market_snapshot().spot(t)),  # noqa: B023 (reviewed: immediate-consume / shared object)
                         timeout=10.0,
                     )
                 except Exception:
@@ -1547,8 +1563,7 @@ class AgoraSession:
                 closes_series = None
                 try:
                     def _compute_momentum(t: str, s: float) -> tuple[dict, Any]:
-                        import pandas as pd
-                        hist = get_market_snapshot().history(t, period="3mo", interval="1d")
+                        hist = get_market_snapshot().history(t, period="3mo", interval="1d")  # noqa: B023 (reviewed: immediate-consume / shared object)
                         if hist.empty or len(hist) < 22:
                             return {}, None
                         closes = hist["Close"].dropna()
@@ -1743,13 +1758,13 @@ class AgoraSession:
                                         rec.entry_debit_credit = round(
                                             decision.premium * 100 * adj, 2
                                         )
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         logger.warning("LongOptionsVetter timeout [%s] — proceeding", ticker)
                     except Exception as vex:
                         logger.debug("LongOptionsVetter error [%s]: %s", ticker, vex)
 
                 # Per-cycle dedupe gate
-                if ticker in _submitted_this_cycle:
+                if ticker in _submitted_this_cycle:  # noqa: B023 (reviewed: immediate-consume / shared object)
                     logger.debug("LongOptions [%s] skipped — already submitted this cycle", ticker)
                     return
 
@@ -1859,7 +1874,7 @@ class AgoraSession:
                                     str(self._settings.db_path), position_id, ticker,
                                     float(_leg0.strike), str(_leg0.expiration))
                             self._exec_quality.record_fill(ticker, fill_price, decision.premium, decision.strategy)
-                            _submitted_this_cycle.add(ticker)
+                            _submitted_this_cycle.add(ticker)  # noqa: B023 (reviewed: immediate-consume / shared object)
                         elif order_status in ("Cancelled", "ApiCancelled", "Inactive"):
                             self._exec_quality.record_reject(
                                 ticker, str(order.get("error_code", "")),
@@ -1879,7 +1894,7 @@ class AgoraSession:
                 async def _guarded(_t: str) -> None:
                     if not self._running:
                         return
-                    async with _sem:
+                    async with _sem:  # noqa: B023 (reviewed: immediate-consume / shared object)
                         try:
                             await _process_one(_t)
                         except Exception as _wexc:
@@ -1913,8 +1928,8 @@ class AgoraSession:
         Runs even when uw_alerts table is empty — get_news_context() returns
         an empty NewsContext silently in that case.
         """
-        from agora.services.news_signals import get_news_context, NewsContext
         from agora.execution.ibkr_bridge import close_trade as _close_trade
+        from agora.services.news_signals import get_news_context
 
         _alerted_halts:  set[str] = set()   # suppress repeated Discord alerts per halt
         _last_macro_ts:  str      = ""      # track which macro event we've already applied
@@ -1996,7 +2011,7 @@ class AgoraSession:
 
                 def _download_batch() -> Any:
                     return yf.download(
-                        " ".join(universe),
+                        " ".join(universe),  # noqa: B023 (reviewed: immediate-consume / shared object)
                         period="1d",
                         interval="5m",
                         auto_adjust=True,
@@ -2264,7 +2279,8 @@ class AgoraSession:
         # Also load a user-editable JSON file (.agora/scheduled_catalysts.json) so events can be
         # added/removed WITHOUT a restart — it's re-read each cycle. Merged with the config list.
         try:
-            import json as _json, os as _os
+            import json as _json
+            import os as _os
             _f = _os.path.join(_os.path.dirname(str(self._settings.db_path)) or ".",
                                "scheduled_catalysts.json")
             if _os.path.exists(_f):
@@ -2503,7 +2519,7 @@ class AgoraSession:
         _cd_secs = int(getattr(self._settings, "evaluate_ticker_cooldown_secs", 0) or 0)
         if _cd_secs <= 0 or scan_priority < ScanPriority.BACKGROUND:
             return False
-        now = datetime.now(tz=timezone.utc)
+        now = datetime.now(tz=UTC)
         _until = self._eval_cooldowns.get(ticker)
         if _until and now < _until:
             logger.debug(
@@ -2609,7 +2625,12 @@ class AgoraSession:
             gex_raw = get_gex(ticker, snap.price)
 
             # Regime signal (reuse macro context regime)
-            from agora.core.models import GexRegime, GexSignal, IvPremiumSignal, Regime, VolRegimeSignal
+            from agora.core.models import (
+                GexRegime,
+                GexSignal,
+                IvPremiumSignal,
+                Regime,
+            )
             _STANCE_TO_REGIME = {
                 "risk_on":  Regime.LOW_VOL,
                 "neutral":  Regime.NORMAL,
@@ -2979,7 +3000,7 @@ class AgoraSession:
                 chain_dict = await asyncio.wait_for(
                     asyncio.to_thread(_fetch_chains_sync, ticker), timeout=45.0
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 _complete_chain(str(self._settings.db_path), _chain_id, "timeout")
                 logger.warning("Options chain fetch timed out for %s — skipping ticker", ticker)
                 return
@@ -3193,7 +3214,7 @@ class AgoraSession:
         # Same story arrives from multiple IBKR providers (DJ-N, DJ-RTG, DJ-RTPRO)
         # with distinct articleIds — the base-ID split can't catch cross-provider dupes.
         cooldown_key = (catalyst.ticker, str(catalyst.catalyst_type))
-        now_utc = datetime.now(tz=timezone.utc)
+        now_utc = datetime.now(tz=UTC)
         last_emit = self._catalyst_cooldown.get(cooldown_key)
         if last_emit and (now_utc - last_emit).total_seconds() < self._CATALYST_COOLDOWN_SECS:
             logger.info(
@@ -3246,6 +3267,7 @@ class AgoraSession:
         # Get options chain and spot — blocking yfinance in thread pool
         try:
             import yfinance as yf
+
             from trading_platform.services.market_data.yfinance_provider import _YF_OPTIONS_LOCK
 
             def _fetch_catalyst_data(t: str) -> tuple[dict, float]:
@@ -3272,7 +3294,7 @@ class AgoraSession:
                 chain_dict, spot = await asyncio.wait_for(
                     asyncio.to_thread(_fetch_catalyst_data, catalyst.ticker), timeout=45.0
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning("Options chain fetch timed out for catalyst %s — skipping", catalyst.ticker)
                 return
             if not chain_dict or spot <= 0:
@@ -3352,8 +3374,9 @@ class AgoraSession:
 
         try:
             import yfinance as yf
-            from trading_platform.services.market_data.yfinance_provider import _YF_OPTIONS_LOCK
+
             from agora.core.models import ConvictionScore
+            from trading_platform.services.market_data.yfinance_provider import _YF_OPTIONS_LOCK
 
             def _fetch_preearnings(t: str, initial_spot: float) -> tuple[dict, float]:
                 _chain: dict = {}
@@ -3378,7 +3401,7 @@ class AgoraSession:
                 chain_dict, spot = await asyncio.wait_for(
                     asyncio.to_thread(_fetch_preearnings, setup.ticker, setup.spot), timeout=45.0
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning("Options chain fetch timed out for pre-earnings %s — skipping", setup.ticker)
                 return
             if not chain_dict or spot <= 0:
@@ -3464,8 +3487,9 @@ class AgoraSession:
 
         try:
             import yfinance as yf
-            from trading_platform.services.market_data.yfinance_provider import _YF_OPTIONS_LOCK
+
             from agora.core.models import ConvictionScore
+            from trading_platform.services.market_data.yfinance_provider import _YF_OPTIONS_LOCK
 
             def _fetch_postearnings(t: str) -> tuple[dict, float]:
                 _chain: dict = {}
@@ -3488,7 +3512,7 @@ class AgoraSession:
                 chain_dict, spot = await asyncio.wait_for(
                     asyncio.to_thread(_fetch_postearnings, result.ticker), timeout=45.0
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning("Options chain fetch timed out for post-earnings %s — skipping", result.ticker)
                 return
             if not chain_dict or spot <= 0:
@@ -3858,8 +3882,8 @@ class AgoraSession:
 
         # Execution cooldown — block re-submission of a ticker that recently failed to fill.
         _cooldown_until = self._exec_cooldowns.get(ticker)
-        if _cooldown_until and datetime.now(tz=timezone.utc) < _cooldown_until:
-            _mins_left = (_cooldown_until - datetime.now(tz=timezone.utc)).seconds // 60
+        if _cooldown_until and datetime.now(tz=UTC) < _cooldown_until:
+            _mins_left = (_cooldown_until - datetime.now(tz=UTC)).seconds // 60
             logger.debug("ENTRY SKIPPED by exec cooldown: %s — %d min remaining", ticker, _mins_left)
             return
 
@@ -4187,7 +4211,7 @@ class AgoraSession:
             # the ~20-attempts/ticker/day storm). Block re-submission for 2 hours.
             # (Error 201 has its own per-session block below.)
             if error_code != "201":
-                _cooldown_until = datetime.now(tz=timezone.utc) + timedelta(seconds=self._EXEC_COOLDOWN_SECS)
+                _cooldown_until = datetime.now(tz=UTC) + timedelta(seconds=self._EXEC_COOLDOWN_SECS)
                 self._exec_cooldowns[ticker] = _cooldown_until
                 logger.info(
                     "EXEC COOLDOWN set: %s blocked until %s (unfilled after repricing walk)",
@@ -4309,7 +4333,7 @@ class AgoraSession:
             # the ~20-attempts/ticker/day storm (the old 90s auto-retry re-evaluated the
             # ticker with no cooldown, looping all day). The orphan reconciler cancels any
             # order still open in TWS; the cooldown lets the spread settle before we retry.
-            _cooldown_until = datetime.now(tz=timezone.utc) + timedelta(seconds=self._EXEC_COOLDOWN_SECS)
+            _cooldown_until = datetime.now(tz=UTC) + timedelta(seconds=self._EXEC_COOLDOWN_SECS)
             self._exec_cooldowns[ticker] = _cooldown_until
             logger.info(
                 "EXEC COOLDOWN set (pending): %s blocked until %s",
@@ -4365,7 +4389,7 @@ class AgoraSession:
         spot: float = 0.0,
         fill_price: float = 0.0,
         net_entry_signed: float | None = None,
-        target_close_date_override: "date | None" = None,
+        target_close_date_override: date | None = None,
         extra_metadata: dict | None = None,
         entry_ts_utc: str = "",
     ) -> str:
@@ -4375,6 +4399,7 @@ class AgoraSession:
         # per-strategy config, so the per-position copy is not persisted here yet.
         _ = extra_metadata
         from datetime import date, timedelta
+
         from .core.models import OpenPosition, PositionStatus
         expiry = rec.legs[0].expiration if rec.legs else (date.today() + timedelta(days=45))
         # entry_price must use the SIGNED net value per share so the P&L formula
@@ -4453,8 +4478,9 @@ class AgoraSession:
         sync ib_insync work on a dedicated thread (its own clientId 73) so it never races the
         execution path. Never raises."""
         try:
-            from agora.ops.position_reconciler import heal
             from concurrent.futures import ThreadPoolExecutor
+
+            from agora.ops.position_reconciler import heal
             if getattr(self, "_heal_executor", None) is None:
                 self._heal_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pos-heal")
 
@@ -4514,7 +4540,6 @@ class AgoraSession:
         _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ibkr-startup-sync")
 
         async def _poll() -> list[dict]:
-            import asyncio as _aio
 
             def _sync():
                 import asyncio as _aio2
@@ -4623,7 +4648,7 @@ class AgoraSession:
             )
             logger.info(
                 "STARTUP SYNC: closed %s | net_close=$%.4f entry=$%.4f pnl=$%.2f",
-                ticker, net_close_signed, pos.entry_price, realized_pnl,
+                ticker, close_price, pos.entry_price, realized_pnl,
             )
             closed += 1
 
@@ -4662,7 +4687,8 @@ class AgoraSession:
             tripped_at_str = kill_state.get("tripped_at", "")
             if not tripped_at_str:
                 return
-            from datetime import datetime, timezone as _tz, date as _date
+            from datetime import date as _date
+            from datetime import datetime
             tripped_dt = datetime.fromisoformat(tripped_at_str)
             if tripped_dt.date() < _date.today():
                 self._risk.reset_kill_switch(reset_by="session_startup_daily_reset")
@@ -4790,8 +4816,9 @@ class AgoraSession:
         # Reopen with same direction / pillar but new expiry
         try:
             import yfinance as yf
-            from trading_platform.services.market_data.yfinance_provider import _YF_OPTIONS_LOCK
+
             from agora.core.models import ConvictionScore
+            from trading_platform.services.market_data.yfinance_provider import _YF_OPTIONS_LOCK
 
             # Infer direction from the old strategy name (bull_put_spread → bullish, etc.)
             strat_name = position.strategy.value if hasattr(position.strategy, "value") else str(position.strategy)
@@ -4830,7 +4857,7 @@ class AgoraSession:
                 chain_dict, spot = await asyncio.wait_for(
                     asyncio.to_thread(_fetch_roll_data, position.ticker), timeout=45.0
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning("Options chain fetch timed out for roll %s — skipping", position.ticker)
                 return
             if not chain_dict or spot <= 0:

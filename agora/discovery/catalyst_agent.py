@@ -23,8 +23,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -33,10 +32,10 @@ import httpx
 
 from ..core.config import AgoraSettings, get_settings
 from ..core.json_extract import extract_json as _extract_json
-from ..ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
 from ..core.models import Catalyst, CatalystType
 from ..mcp.edgar_tools import edgar_tool_handlers
 from ..mcp.search_tools import search_tool_handlers
+from ..ops.llm_cost_log import log_message as _log_msg
 
 logger = logging.getLogger(__name__)
 
@@ -340,7 +339,7 @@ class CatalystDiscoveryAgent:
             return Catalyst(
                 ticker=ticker,
                 catalyst_type=catalyst_type,
-                filing_time=datetime.now(tz=timezone.utc),
+                filing_time=datetime.now(tz=UTC),
                 headline=data.get("reason", f"{entity} — {catalyst_type_str}"),
                 direction=data.get("direction", "neutral"),
                 strength=data.get("strength", "weak"),

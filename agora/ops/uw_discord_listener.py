@@ -29,10 +29,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import re
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from agora.services.flow_detector import FlowSignals, SweepData
@@ -311,7 +310,7 @@ def _alerts_to_flow_signals(
     put_premium  = sum(a["premium_usd"] for a in alerts if a["opt_type"] == "put")
     call_vol = sum(a["contracts"] for a in alerts if a["opt_type"] == "call")
     put_vol  = sum(a["contracts"] for a in alerts if a["opt_type"] == "put")
-    total_vol = call_vol + put_vol
+    call_vol + put_vol
 
     sweeps = [
         SweepData(
@@ -368,7 +367,7 @@ def _alerts_to_flow_signals(
         direction=direction,
         strength=strength,
         summary=summary,
-        timestamp=datetime.now(tz=timezone.utc),
+        timestamp=datetime.now(tz=UTC),
     )
     sig._uw_meta = {  # type: ignore[attr-defined]
         "source":           "unusual_whales_discord",
@@ -439,9 +438,10 @@ class UWDiscordListener:
     def _persist_messages(self, msgs: list[dict]) -> None:
         """Write raw Discord messages to uw_alerts for UWMarketIntelAgent."""
         import sqlite3 as _sqlite3
+
         from agora.agents.uw_market_intel import _classify, _extract_tickers
 
-        now_utc = datetime.now(timezone.utc).isoformat()
+        now_utc = datetime.now(UTC).isoformat()
         rows = []
         for msg in msgs:
             msg_id  = msg.get("id", "")

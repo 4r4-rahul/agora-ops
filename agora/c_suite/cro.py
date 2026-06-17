@@ -17,8 +17,8 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from .base import ExecutiveAgent
 from ..core.config import AgoraSettings
+from .base import ExecutiveAgent
 
 logger = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
@@ -371,7 +371,6 @@ class CROAgent(ExecutiveAgent):
         try:
             if self._position_mgr:
                 import sqlite3 as _sql
-                from datetime import date as _date
                 db_path = str(self._settings.db_path)
                 conn = _sql.connect(db_path, check_same_thread=False)
                 realized = conn.execute(
@@ -438,7 +437,7 @@ class CROAgent(ExecutiveAgent):
           delta/vega limit breach → publish event for CTO to stop directional entries
         """
         keys = {k for k, _, _ in findings}
-        sevs = {k: s for k, s, _ in findings}
+        {k: s for k, s, _ in findings}
 
         # Kill switch active → notify CTO to stop new entries laterally
         if "kill_switch_active" in keys:

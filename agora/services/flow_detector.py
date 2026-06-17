@@ -5,8 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 import yfinance as yf
 
@@ -36,7 +35,7 @@ class FlowSignals:
     direction: str               # "bullish" | "bearish" | "neutral"
     strength: str                # "strong" | "moderate" | "weak"
     summary: str                 # 1-sentence human readable
-    timestamp: datetime = field(default_factory=lambda: datetime.now(tz=timezone.utc))
+    timestamp: datetime = field(default_factory=lambda: datetime.now(tz=UTC))
 
 
 def _compute_direction(call_put_vol_ratio: float, net_premium_skew: float) -> str:
@@ -74,7 +73,7 @@ def _build_summary(
 async def get_flow_signals(
     ticker: str,
     account_size: float = 25_000.0,
-) -> Optional[FlowSignals]:
+) -> FlowSignals | None:
     """Fetch and merge options flow signals from all available sources.
 
     Runs UW Discord + yfinance concurrently and merges:
@@ -86,7 +85,7 @@ async def get_flow_signals(
     Returns None only if yfinance also fails.
     """
     # ── Run UW Discord check + yfinance chain fetch concurrently ──────
-    uw_sig: Optional[FlowSignals] = None
+    uw_sig: FlowSignals | None = None
     try:
         from agora.services.unusual_whales_client import get_flow_signals as _uw_get
         uw_sig = await _uw_get(ticker, account_size)

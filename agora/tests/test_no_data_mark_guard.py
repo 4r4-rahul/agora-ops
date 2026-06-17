@@ -12,6 +12,7 @@ C-suite required scenarios:
   4. _maybe_llm_exit precondition: 0.00 mark -> never acts.
 """
 from __future__ import annotations
+
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from types import SimpleNamespace
@@ -48,7 +49,7 @@ def test_stale_mark_no_lockin_no_hwm_poison():
     # HWM must NOT be pinned to 100% (guard returns before hwm mutation)
     st = eng._states["p_stale"]
     assert st.hwm == 0.0, f"HWM poisoned to {st.hwm} — guard placed too late (after hwm mutate)"
-    print("OK 1: stale 0.00 mark -> HOLD, HWM not pinned (=%.2f)" % st.hwm)
+    print(f"OK 1: stale 0.00 mark -> HOLD, HWM not pinned (={st.hwm:.2f})")
 
 
 def test_real_worthless_mark_still_locks_in():
@@ -62,7 +63,7 @@ def test_real_worthless_mark_still_locks_in():
     assert st.hwm > 0.0, "real mark must pass the guard and update HWM"
     assert d.should_close or d.rule in ("LOCK_IN", "SHORT_DTE", "PROFIT_TARGET", "RATCHET"), \
         f"real 95% win should trigger a profit close, got {d.rule}"
-    print("OK 2: real 0.05 mark @95%% -> %s fires (HWM=%.2f)" % (d.rule, st.hwm))
+    print(f"OK 2: real 0.05 mark @95% -> {d.rule} fires (HWM={st.hwm:.2f})")
 
 
 def test_credit_width_gate_logic():
@@ -75,11 +76,12 @@ def test_credit_width_gate_logic():
     ok_hi, cr_hi = passes(-200.0, 5.0)   # $2.00 credit on $5 width -> 0.40
     assert not ok_lo, f"cr_w {cr_lo} should be rejected"
     assert ok_hi, f"cr_w {cr_hi} should pass"
-    print("OK 3: cr_w gate rejects %.2f (loser cohort), passes %.2f" % (cr_lo, cr_hi))
+    print(f"OK 3: cr_w gate rejects {cr_lo:.2f} (loser cohort), passes {cr_hi:.2f}")
 
 
 def test_llm_exit_precondition_zero_mark():
     import asyncio
+
     from agora.lifecycle.position_manager import PositionManager
     pm = PositionManager.__new__(PositionManager)
     pm._settings = SimpleNamespace(long_exit_llm_min_hold_days=2, spread_exit_llm_min_hold_days=3,

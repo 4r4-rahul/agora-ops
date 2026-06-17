@@ -11,10 +11,10 @@ Provides four categories of tools that agents can call during reasoning:
   server        — FastMCP server exposing all tools (run standalone)
 """
 
-from .sqlite_tools import SQLITE_TOOLS, sqlite_tool_handlers
-from .search_tools import SEARCH_TOOLS, search_tool_handlers
 from .edgar_tools import EDGAR_TOOLS, edgar_tool_handlers
 from .market_tools import MARKET_TOOLS, market_tool_handlers
+from .search_tools import SEARCH_TOOLS, search_tool_handlers
+from .sqlite_tools import SQLITE_TOOLS, sqlite_tool_handlers
 from .tool_runner import run_with_tools
 
 __all__ = [

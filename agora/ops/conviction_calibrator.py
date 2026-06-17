@@ -234,7 +234,7 @@ def _propose_weights(
     )
 
     # Normalize each row to sum=1.0 (floating point safety)
-    for regime, pw in proposed.items():
+    for _regime, pw in proposed.items():
         total = sum(pw.values())
         if abs(total - 1.0) > 0.001:
             largest = max(pw, key=pw.get)

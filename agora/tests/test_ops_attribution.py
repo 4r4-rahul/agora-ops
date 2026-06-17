@@ -13,14 +13,12 @@ _REAL_CLOSE SQL string are exercised.
 from __future__ import annotations
 
 import sqlite3
-from datetime import date
 
 import pytest
 
 from agora.core.config import get_settings
 from agora.ops.execution_quality import ExecutionQualityAgent
 from agora.ops.outcome_attributor import _REAL_CLOSE
-
 
 # ── Fixtures ───────────────────────────────────────────────────────────────────
 

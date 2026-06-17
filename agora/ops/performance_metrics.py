@@ -16,10 +16,10 @@ Non-negotiables (learned the hard way — the books read +$12,740 while reality 
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
-from agora.ops.edge_dashboard import _REAL_CLOSE, _wilson_lower, MIN_SAMPLE
+from agora.ops.edge_dashboard import _REAL_CLOSE, MIN_SAMPLE, _wilson_lower
 
 
 def _rows(conn: sqlite3.Connection, window_sql: str = "") -> list[float]:
@@ -70,7 +70,7 @@ def compute_metrics(db_path: str) -> dict[str, Any]:
             d30 = _metrics_from(_rows(conn, "AND close_date >= date('now','-30 day')"))
             return {"overall": allt, "last_20": last20, "last_30d": d30,
                     "min_sample": MIN_SAMPLE,
-                    "computed_at_utc": datetime.now(tz=timezone.utc).isoformat()}
+                    "computed_at_utc": datetime.now(tz=UTC).isoformat()}
     except Exception as exc:
         return {"error": str(exc)}
 
@@ -172,7 +172,7 @@ def snapshot_daily(db_path: str) -> dict[str, Any]:
         o = full.get("overall", {})
         recon = reconcile_books(db_path)
         w20 = full.get("last_20", {}).get("net_realized")
-        today = datetime.now(tz=timezone.utc).date().isoformat()
+        today = datetime.now(tz=UTC).date().isoformat()
         with sqlite3.connect(db_path, timeout=10) as conn:
             conn.execute(_SNAPSHOT_DDL)
             conn.execute(
@@ -195,7 +195,7 @@ def snapshot_daily(db_path: str) -> dict[str, Any]:
                  o.get("expectancy"), o.get("profit_factor"), o.get("payoff_ratio"),
                  o.get("net_realized"), 1 if o.get("is_profitable") else 0,
                  recon.get("book_realized"), recon.get("drift"), 1 if recon.get("reconciled") else 0,
-                 w20, datetime.now(tz=timezone.utc).isoformat()),
+                 w20, datetime.now(tz=UTC).isoformat()),
             )
         return {"snapshot_date": today, "expectancy": o.get("expectancy"),
                 "net": o.get("net_realized"), "recon": recon.get("status")}

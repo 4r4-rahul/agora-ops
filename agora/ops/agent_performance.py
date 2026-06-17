@@ -21,7 +21,6 @@ import logging
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import date, timedelta
-from typing import Any
 
 from ..core.config import AgoraSettings, get_settings
 from .edge_dashboard import _REAL_CLOSE

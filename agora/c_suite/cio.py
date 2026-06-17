@@ -15,12 +15,12 @@ Sub-agents supervised:
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from .base import ExecutiveAgent
 from ..core.config import AgoraSettings
+from .base import ExecutiveAgent
 
 logger = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
@@ -368,7 +368,7 @@ class CIOAgent(ExecutiveAgent):
         CIO proactive intelligence audit — checks signal freshness, pipeline gaps,
         and missed opportunities every 30 min.
         """
-        from datetime import datetime as _dt, timezone as _tz
+        from datetime import datetime as _dt
         findings: list[tuple[str, str, str]] = []
         now_et = datetime.now(tz=ET)
         market_open = 9 <= now_et.hour < 16
@@ -388,7 +388,7 @@ class CIOAgent(ExecutiveAgent):
                     if ts:
                         try:
                             age_hours = (
-                                _dt.now(_tz.utc) - _dt.fromisoformat(str(ts))
+                                _dt.now(UTC) - _dt.fromisoformat(str(ts))
                             ).total_seconds() / 3600
                             if age_hours > 8 and market_open:
                                 findings.append(("macro_context_stale", "critical",

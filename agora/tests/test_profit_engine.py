@@ -1,17 +1,14 @@
 """Unit tests for agora/lifecycle/profit_engine.py"""
-import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any
 
-import pytest
 from agora.lifecycle.profit_engine import (
+    _LOCK_IN_PCT,
+    _RATCHET_SCHEDULE,
     IntelligentProfitEngine,
     PositionState,
-    _RATCHET_SCHEDULE,
-    _LOCK_IN_PCT,
 )
-
 
 # ── Minimal position stub ─────────────────────────────────────────────────────
 

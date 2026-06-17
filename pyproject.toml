@@ -45,8 +45,34 @@ exclude = [".venv", "trading_platform", "agora/backtester"]
 # Start conservative: pyflakes (F), bug-bear (B), security (S/flake8-bandit), import sort (I),
 # pyupgrade (UP). Expand once the existing backlog is burned down.
 select = ["F", "E9", "B", "S", "I", "UP"]
-# Asserts (S101) and the reviewed SQL f-strings (S608) mirror the bandit skips above.
-ignore = ["S101", "S608", "E501"]
+# Mirror the bandit skips (same rationale, see [tool.bandit]): asserts (S101), reviewed non-
+# injectable SQL f-strings (S608), and the deliberate fail-safe I/O guards try/except-pass (S110)
+# and try/except-continue (S112). E501 line length is cosmetic and handled by the formatter.
+ignore = ["S101", "S608", "S110", "S112", "E501"]
 
 [tool.ruff.lint.per-file-ignores]
 "**/tests/**" = ["S", "B"]
+
+# ── Type checking (mypy) — INCREMENTAL gate ───────────────────────────────────
+# The full codebase predates type-checking (~284 lenient errors), so mypy is gated on a curated,
+# verified-clean module set rather than the whole tree. `files` below IS the gate scope: CI runs
+# bare `mypy` (which reads this list) and it must stay green. GROW this list as modules are cleaned
+# — that is how type coverage ratchets up without a single overwhelming migration.
+[tool.mypy]
+python_version = "3.13"
+ignore_missing_imports = true       # third-party libs (ib_insync, yfinance, chromadb) ship no stubs
+follow_imports = "silent"           # type-check the gated files only, don't fail on their imports
+warn_redundant_casts = true
+warn_unused_ignores = false
+files = [
+    "agora/ops/skew_analyzer.py",
+    "agora/ops/valuation.py",
+    "agora/ops/position_reconciler.py",
+    "agora/ops/live_readiness.py",
+    "agora/ops/outcome_attributor.py",
+    "agora/signals/event_patterns.py",
+    "agora/strategies/rules_engine.py",
+    "agora/scan/engine.py",
+    "agora/agents/performance_analyst.py",
+    "agora/lifecycle/position_manager.py",
+]

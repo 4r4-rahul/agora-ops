@@ -17,8 +17,8 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from .base import ExecutiveAgent
 from ..core.config import AgoraSettings
+from .base import ExecutiveAgent
 
 logger = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")

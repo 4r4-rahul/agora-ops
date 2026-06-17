@@ -11,7 +11,9 @@ register. It was established on **2026-06-17** during a dedicated hardening pass
 | Static code security | `bandit` (CWE) | CI + pre-commit | **blocking (HIGH)** |
 | Secret/credential leak | `detect-secrets` | CI + pre-commit | **blocking** |
 | Tests | `pytest` | CI | **blocking** |
-| Lint/format | `ruff` | CI + pre-commit | advisory |
+| Lint | `ruff` | CI + pre-commit | **blocking** (backlog zeroed 2026-06-17) |
+| Types | `mypy` | CI + pre-commit | **blocking (incremental scope)** — see `pyproject [tool.mypy].files` |
+| Format | `ruff format` | manual | not gated (separate reformat pass pending) |
 
 Install + enable locally:
 
@@ -47,12 +49,15 @@ Patched (validated): `requests` 2.32.5→2.34.2, `urllib3` 2.6.3→2.7.0, `idna`
 Both are `--ignore-vuln`'d **by exact ID** in CI so the gate stays green *and* honest — the moment
 either upstream patches, the ignore is removed and the bump applied. Do not add blanket ignores.
 
-### Known dependency conflict (pre-existing, tracked)
+### Dependency-declaration drift — RESOLVED 2026-06-17
 
-`pip-audit -r requirements.txt` (clean-resolve mode) fails because `fastmcp-slim` and
-`pydantic==2.9.2` have conflicting constraints. The *installed* environment is consistent (CI audits
-the installed set, which is what runs); resolving the declared conflict is a separate dependency
-cleanup, not a security regression.
+`requirements.txt` had drifted from the actually-installed/working environment on 6 pins, which made
+`pip-audit -r requirements.txt` (clean-resolve mode) fail with `ResolutionImpossible` — the pinned
+`pydantic==2.9.2` could not satisfy `fastmcp>=3.3.1`, which requires the newer pydantic the venv was
+already running. Reconciled the declarations to the validated installed versions (suite green on
+them): `pydantic` 2.9.2→2.13.4, `pydantic_core` 2.23.4→2.46.4, `curl_cffi` 0.13.0→0.15.0,
+`protobuf` 7.34.0→6.33.6, `python-dotenv` 1.0.1→1.2.2, `yfinance` 1.2.0→1.3.0. `pip install
+--dry-run -r requirements.txt` and `pip-audit -r requirements.txt` now both resolve cleanly.
 
 ## Code hardening — 2026-06-17
 

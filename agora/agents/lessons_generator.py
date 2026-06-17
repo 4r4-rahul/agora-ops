@@ -23,8 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from datetime import datetime, timezone
-from typing import Any
+from datetime import UTC, datetime
 
 import anthropic
 
@@ -84,7 +83,7 @@ class LessonsGenerator:
             import os
             key = os.getenv("ANTHROPIC_API_KEY", "")
             if not key:
-                raise RuntimeError("ANTHROPIC_API_KEY not set and config unavailable")
+                raise RuntimeError("ANTHROPIC_API_KEY not set and config unavailable") from None
             return key
 
     async def generate_all(self) -> dict[str, int]:
@@ -258,7 +257,7 @@ class LessonsGenerator:
                 else:
                     return []
 
-                result = [dict(zip(cols, r)) for r in rows]
+                result = [dict(zip(cols, r, strict=False)) for r in rows]
                 # Parse any JSON string columns
                 for row in result:
                     for key in ("kill_conditions", "failure_modes", "success_modes", "factor_breakdown"):
@@ -340,8 +339,8 @@ class LessonsGenerator:
                         json.dumps(chain_ids[:20]),  # cap at 20 chain IDs
                         round(confidence, 3),
                         sample_size,
-                        datetime.now(tz=timezone.utc).isoformat(),
-                        datetime.now(tz=timezone.utc).isoformat(),
+                        datetime.now(tz=UTC).isoformat(),
+                        datetime.now(tz=UTC).isoformat(),
                     ),
                 )
         except Exception as exc:

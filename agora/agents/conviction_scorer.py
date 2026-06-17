@@ -21,17 +21,17 @@ Gates:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from ..core.models import (
-    ConvictionScore,
-    GexRegime,
-    IvPremiumSignal,
-    GexSignal,
-    VolRegimeSignal,
-    EventSignal,
     Catalyst,
+    ConvictionScore,
+    EventSignal,
+    GexRegime,
+    GexSignal,
+    IvPremiumSignal,
     StrategyPillar,
+    VolRegimeSignal,
 )
 from .macro_synthesizer import MacroContext
 
@@ -78,7 +78,7 @@ class ConvictionScorer:
         event: EventSignal | None,
         catalyst: Catalyst | None,
         smart_money: Catalyst | None = None,
-        market_interest: "MarketInterestScore | None" = None,
+        market_interest: MarketInterestScore | None = None,
     ) -> ConvictionScore:
 
         vol_score    = self._score_vol_premium(iv_premium)
@@ -230,12 +230,12 @@ class ConvictionScorer:
         if not catalyst:
             return 0.0
         age_hours = (
-            datetime.now(tz=timezone.utc) - catalyst.filing_time
+            datetime.now(tz=UTC) - catalyst.filing_time
         ).total_seconds() / 3600.0
         # Full 5 points at 0h, 0 points at 4h
         return round(max(0.0, 5.0 * (1.0 - age_hours / 4.0)), 2)
 
-    def _score_market_interest(self, mi: "MarketInterestScore | None") -> float:
+    def _score_market_interest(self, mi: MarketInterestScore | None) -> float:
         """
         Max 10 points — 6-fingerprint market interest score from MarketInterestAgent.
 

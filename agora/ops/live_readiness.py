@@ -244,6 +244,7 @@ class LiveReadinessMeter:
         if eq and pm:
             try:
                 import sqlite3 as _sql
+
                 from ..core.config import get_settings
                 db_path = str(get_settings().db_path)
                 conn = _sql.connect(db_path, check_same_thread=False)
@@ -273,6 +274,7 @@ class LiveReadinessMeter:
                 # the session simply hasn't traded yet (pre-market or early session).
                 try:
                     import sqlite3 as _sql
+
                     from ..core.config import get_settings
                     _conn = _sql.connect(str(get_settings().db_path), check_same_thread=False)
                     fills_today = _conn.execute(
@@ -287,7 +289,7 @@ class LiveReadinessMeter:
 
         pm = self._agents.get("position_mgr")
         if pm:
-            positions = pm.get_open_positions()
+            pm.get_open_positions()
             checks.append(("position_tracking_active", True))
 
         risk = self._agents.get("risk_council")
@@ -318,8 +320,8 @@ class LiveReadinessMeter:
             # Use DB-accurate today stats — in-memory session counters reset on restart
             today = eq.get_today_db_stats()
             total     = today.get("total", 0)
-            fills     = today.get("fills", 0)
-            timeouts  = today.get("timeouts", 0)
+            today.get("fills", 0)
+            today.get("timeouts", 0)
             fill_rate = today.get("fill_rate")      # None if no attempts today
             t_rate    = today.get("timeout_rate")
 

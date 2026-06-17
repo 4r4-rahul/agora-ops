@@ -19,7 +19,7 @@ import asyncio
 import logging
 import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -69,14 +69,17 @@ async def run_fill_canary(
     db_path: str | None = None,
 ) -> dict[str, Any]:
     """Place + flatten a 1-lot marketable SPY ATM call. Returns a result dict; never raises."""
-    from ib_insync import IB, Stock, Option, LimitOrder
+    from ib_insync import IB, LimitOrder, Option, Stock
 
     from trading_platform.services.ibkr_client import (
-        _connect_ibkr, _qualify, _next_expiry, _valid_quote,
+        _connect_ibkr,
+        _next_expiry,
+        _qualify,
+        _valid_quote,
     )
 
     res: dict[str, Any] = {
-        "ts_utc": datetime.now(timezone.utc).isoformat(), "ticker": ticker,
+        "ts_utc": datetime.now(UTC).isoformat(), "ticker": ticker,
         "expiry": None, "strike": None, "right": "C", "quote_bid": None, "quote_ask": None,
         "marketable_limit": None, "outcome": "error", "fill_price": None, "fill_secs": None,
         "slippage_vs_ask": None, "flattened": False, "note": "",
@@ -90,7 +93,6 @@ async def run_fill_canary(
         # stock data (Error 10089), so IBKR's underlying quote is NaN — fall back to yfinance,
         # which is what the engine uses for spot everywhere. We only need spot to pick the strike;
         # the OPTION NBBO we trade on IS subscribed (OPRA). ──
-        import math
         spot = float("nan")
         try:
             [spy] = await ib.reqTickersAsync(Stock(ticker, "SMART", "USD"))

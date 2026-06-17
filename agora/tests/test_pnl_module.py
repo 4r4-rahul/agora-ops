@@ -9,8 +9,8 @@ import pytest
 
 from agora.core.pnl import (
     realized_pnl,
-    signed_mid_from_total,
     select_entry_price,
+    signed_mid_from_total,
     startup_sync_close,
 )
 

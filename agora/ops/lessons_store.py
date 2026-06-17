@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from datetime import UTC
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +44,8 @@ def auto_approve_lessons(db_path: str, settings: object | None = None) -> int:
     min_reinf = int(g("lesson_auto_approve_min_reinforced", 2))
     min_samp = int(g("lesson_auto_approve_min_sample", 25))
     try:
-        from datetime import datetime, timezone
-        now = datetime.now(timezone.utc).isoformat()
+        from datetime import datetime
+        now = datetime.now(UTC).isoformat()
         with sqlite3.connect(db_path, timeout=10) as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             cur = conn.execute(

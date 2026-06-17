@@ -19,7 +19,6 @@ Note: No external API required — yfinance provides analyst data.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import date
@@ -29,7 +28,7 @@ import anthropic
 
 from ..core.config import AgoraSettings, get_settings
 from ..core.json_extract import extract_json as _extract_json
-from ..ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
+from ..ops.llm_cost_log import log_message as _log_msg
 from ..ops.payload_compressor import compress_text as _compress_text
 
 logger = logging.getLogger(__name__)

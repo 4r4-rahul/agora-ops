@@ -8,8 +8,8 @@ import types
 
 import pytest
 
-from agora.lifecycle.position_manager import PositionManager
 import agora.lifecycle.position_manager as pm
+from agora.lifecycle.position_manager import PositionManager
 
 
 def _stub(tmp_path, on_close, prewrite=None):

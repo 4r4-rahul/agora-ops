@@ -13,8 +13,6 @@ import asyncio
 from datetime import date, timedelta
 from types import SimpleNamespace
 
-import pytest
-
 import agora.execution.ibkr_bridge as bridge
 import trading_platform.services.ibkr_client as ic
 from agora.core.config import AgoraSettings

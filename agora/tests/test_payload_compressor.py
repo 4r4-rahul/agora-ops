@@ -1,7 +1,7 @@
 """Unit tests for agora/ops/payload_compressor.py"""
 import json
-import pytest
-from agora.ops.payload_compressor import compress_payload, compress_text, _is_ohlcv_like
+
+from agora.ops.payload_compressor import _is_ohlcv_like, compress_payload, compress_text
 
 
 class TestCompressPayload:

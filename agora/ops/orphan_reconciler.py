@@ -282,6 +282,7 @@ class OrphanOrderReconciler:
         """
         try:
             import sqlite3
+
             from ..core.config import get_settings
             db_path = str(get_settings().db_path)
             conn = sqlite3.connect(db_path, check_same_thread=False)

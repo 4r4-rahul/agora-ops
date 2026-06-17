@@ -22,8 +22,7 @@ import asyncio
 import logging
 import os
 import time
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -177,7 +176,7 @@ def _build_flow_signals(
         is_sweep      = bool(r.get("is_sweep") or r.get("sweep"))
         is_dark_pool  = bool(r.get("is_dark_pool") or r.get("dark_pool"))
         side          = str(r.get("side") or "").lower()
-        expiry        = str(r.get("expiry") or r.get("expiration_date") or "")
+        str(r.get("expiry") or r.get("expiration_date") or "")
 
         if is_call:
             total_call_vol += volume
@@ -257,7 +256,7 @@ def _build_flow_signals(
         direction=direction,
         strength=strength,
         summary=summary,
-        timestamp=datetime.now(tz=timezone.utc),
+        timestamp=datetime.now(tz=UTC),
     )
 
     # Attach extra UW-specific metadata so flow_tools.py can surface it

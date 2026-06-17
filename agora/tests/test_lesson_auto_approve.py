@@ -9,10 +9,8 @@ from __future__ import annotations
 
 import sqlite3
 
-import pytest
-
-from agora.ops.lessons_store import auto_approve_lessons
 from agora.core.config import AgoraSettings
+from agora.ops.lessons_store import auto_approve_lessons
 
 _SCHEMA = """CREATE TABLE agent_lessons (lesson_id INTEGER PRIMARY KEY AUTOINCREMENT, agent_name TEXT,
   lesson_text TEXT, derived_from_chain_ids TEXT, confidence_in_lesson REAL, sample_size INTEGER,

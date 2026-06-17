@@ -8,8 +8,7 @@ would silently mis-bias entries toward the wrong side of the skew.
 """
 from __future__ import annotations
 
-import math
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pandas as pd
 import pytest
@@ -26,7 +25,7 @@ from agora.ops.skew_analyzer import (
 
 
 def _exp(dte: int) -> str:
-    return (datetime.now(tz=timezone.utc).date() + timedelta(days=dte)).isoformat()
+    return (datetime.now(tz=UTC).date() + timedelta(days=dte)).isoformat()
 
 
 # ── standard normal CDF ───────────────────────────────────────────────────────

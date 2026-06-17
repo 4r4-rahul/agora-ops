@@ -27,16 +27,15 @@ import asyncio
 import json
 import logging
 import sqlite3
-from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, timedelta
+from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import anthropic
 
 from ..core.config import AgoraSettings, get_settings
-from ..ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
+from ..ops.llm_cost_log import log_message as _log_msg
 
 logger = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")

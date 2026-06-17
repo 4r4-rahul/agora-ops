@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -104,6 +104,6 @@ def _store(conn: sqlite3.Connection, n: int, brier, prec, thr, cov, note: str) -
            (agent, computed_at_utc, sample_size, brier, block_precision,
             recommended_threshold, coverage_at_threshold, note)
            VALUES ('advocate', ?, ?, ?, ?, ?, ?, ?)""",
-        (datetime.now(tz=timezone.utc).isoformat(), n, brier, prec, thr, cov, note),
+        (datetime.now(tz=UTC).isoformat(), n, brier, prec, thr, cov, note),
     )
     conn.commit()   # bare connection (no `with`) — must commit or the row is rolled back on close

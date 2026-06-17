@@ -12,10 +12,8 @@ import asyncio
 from datetime import date, timedelta
 from types import SimpleNamespace
 
-import pytest
-
 from agora.core.config import AgoraSettings
-from agora.core.models import OpenPosition, StrategyType, StrategyPillar, SpreadLeg, PositionStatus
+from agora.core.models import OpenPosition, PositionStatus, SpreadLeg, StrategyPillar, StrategyType
 from agora.lifecycle.position_manager import PositionManager
 
 

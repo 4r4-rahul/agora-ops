@@ -18,8 +18,8 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from agora.core.config import AgoraSettings
 from agora.agents.long_options_agent import LongOptionsAgent
+from agora.core.config import AgoraSettings
 
 
 def _settings(**over) -> AgoraSettings:
@@ -182,6 +182,7 @@ def test_itm_journaled_with_marker(tmp_path):
     """A proceeded ITM entry persists is_itm=1 + dte_reason='itm-directional', so the path's
     lifetime performance is attributable in the DB (vs being indistinguishable from OTM)."""
     import sqlite3
+
     from agora.ops.db_migrations import run_all
     db = str(tmp_path / "j.db")
     run_all(db)
@@ -202,10 +203,11 @@ def test_itm_journaled_with_marker(tmp_path):
 def test_otm_journaled_without_itm_marker(tmp_path):
     """Control: an OTM long entry journals is_itm=0 — the marker truly separates the two paths."""
     import sqlite3
-    from agora.ops.db_migrations import run_all
-    from agora.agents.long_options_agent import LongDecision
-    from agora.core.models import TradeRecommendation, SpreadLeg, StrategyPillar
     from datetime import date, timedelta
+
+    from agora.agents.long_options_agent import LongDecision
+    from agora.core.models import SpreadLeg, StrategyPillar, TradeRecommendation
+    from agora.ops.db_migrations import run_all
     db = str(tmp_path / "j.db")
     run_all(db)
     agent = LongOptionsAgent(_settings())

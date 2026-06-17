@@ -2,21 +2,17 @@
 import json
 import sqlite3
 import tempfile
-from pathlib import Path
-from datetime import datetime, timezone
 
-import pytest
 from agora.ops.discord_commander import (
-    _fmt_lessons,
-    _approve_lesson,
-    _reject_lesson,
-    _write_inbox,
-    write_outbox,
-    read_inbox,
     _INBOX_FILE,
     _OUTBOX_FILE,
+    _approve_lesson,
+    _fmt_lessons,
+    _reject_lesson,
+    _write_inbox,
+    read_inbox,
+    write_outbox,
 )
-
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
 

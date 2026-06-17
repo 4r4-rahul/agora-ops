@@ -21,7 +21,7 @@ from datetime import date
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from ..core.models import TradeRecommendation, OpenPosition, StrategyPillar
+    pass
 
 def _get_conviction_floor() -> float:
     from agora.core.config import get_settings

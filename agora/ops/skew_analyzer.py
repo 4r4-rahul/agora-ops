@@ -35,10 +35,8 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
-
-import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +115,7 @@ def _pick_expiry(options_chain: dict[str, Any], target_dte: int = 30) -> str | N
     Select the expiry string from options_chain whose DTE is closest to *target_dte*.
     Keys must be parseable as date strings (e.g. '2025-08-15').
     """
-    today = datetime.now(tz=timezone.utc).date()
+    today = datetime.now(tz=UTC).date()
     best_key: str | None = None
     best_diff = 10_000
 
@@ -203,7 +201,7 @@ def analyze_skew(options_chain: dict[str, Any], spot: float) -> SkewResult | Non
         return None
 
     # Parse DTE for B-S approx
-    today = datetime.now(tz=timezone.utc).date()
+    today = datetime.now(tz=UTC).date()
     try:
         exp_date = datetime.strptime(expiry, "%Y-%m-%d").date()
         dte_days = max((exp_date - today).days, 1)

@@ -11,7 +11,6 @@ from types import SimpleNamespace
 
 import pytest
 
-import agora.ops.live_readiness as lr
 from agora.ops.live_readiness import (
     _GO_LIVE_MIN_OVERALL,
     _GO_LIVE_MIN_PILLAR,

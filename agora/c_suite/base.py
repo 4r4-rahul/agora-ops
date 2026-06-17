@@ -34,16 +34,17 @@ import asyncio
 import json
 import logging
 from collections import deque
+from collections.abc import Callable
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import anthropic
 
 from ..core.config import AgoraSettings, get_settings
-from ..core.events import AgentEventBus, AgentEvent
+from ..core.events import AgentEvent, AgentEventBus
 from ..core.session_plan import SessionPlan
-from ..ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
+from ..ops.llm_cost_log import log_message as _log_msg
 
 logger = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
@@ -251,7 +252,7 @@ class ExecutiveAgent:
                     await self.on_peer_event(event.event_type, event.publisher, event.payload)
                 except Exception as exc:
                     logger.error("%s on_peer_event(%s) raised: %s", self.TITLE, event.event_type, exc)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
             except Exception as exc:
                 logger.error("%s event_listener_loop error: %s", self.TITLE, exc)
@@ -323,7 +324,7 @@ class ExecutiveAgent:
             recurring = {k: self._issue_counts[k] for k in self._issue_counts if self._issue_counts[k] >= 2}
             if flat_findings or recurring:
                 audit_summary = (
-                    f"\n\nRecent self-audit findings (last 3 patrols):\n"
+                    "\n\nRecent self-audit findings (last 3 patrols):\n"
                     + "\n".join(f"  [{s}] {m}" for k, s, m in flat_findings[:10])
                     + (f"\nRecurring issues: {recurring}" if recurring else "")
                 )

@@ -23,10 +23,9 @@ Kill switch reset: requires explicit API call (DELETE /agora/kill) — not auto-
 
 from __future__ import annotations
 
-import json
 import logging
 import sqlite3
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from ..core.config import AgoraSettings, get_settings
@@ -262,7 +261,7 @@ class RiskCouncil:
         self._db.execute("""
             UPDATE kill_switch SET active=1, reason=?, tripped_at=?, tripped_by=?
             WHERE id=1
-        """, (reason, datetime.now(tz=timezone.utc).isoformat(), tripped_by))
+        """, (reason, datetime.now(tz=UTC).isoformat(), tripped_by))
         self._db.commit()
         logger.critical("KILL SWITCH TRIPPED: %s (by=%s)", reason, tripped_by)
 

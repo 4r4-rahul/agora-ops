@@ -169,7 +169,7 @@ class SemanticTradeStore:
             distances: list[float] = results["distances"][0]
 
             records: list[dict] = []
-            for meta, dist in zip(metadatas, distances):
+            for meta, dist in zip(metadatas, distances, strict=False):
                 similarity = max(0.0, 1.0 - dist)
                 records.append(
                     {

@@ -22,7 +22,7 @@ import json
 import logging
 import sqlite3
 from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -284,6 +284,6 @@ class PsiMonitor:
 
         psi = sum(
             (c - b) * math.log(c / b)
-            for b, c in zip(base_props, curr_props)
+            for b, c in zip(base_props, curr_props, strict=False)
         )
         return psi

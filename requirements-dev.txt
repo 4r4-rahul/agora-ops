@@ -13,6 +13,7 @@ pip-audit==2.10.1        # known-CVE scan of installed deps (PyPI advisory DB + 
 bandit==1.9.4            # static security analysis (CWE)
 detect-secrets==1.5.0    # secret/credential scanning (leak-history guard)
 
-# Lint / format / hooks
+# Lint / type / format / hooks
 ruff==0.15.17            # lint + format (replaces flake8/isort/black)
+mypy==2.1.0              # static type check (incremental gate — scope in pyproject [tool.mypy])
 pre-commit==4.6.0        # local enforcement of the above before each commit

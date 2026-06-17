@@ -134,7 +134,7 @@ class PositionState:
     # Caller is responsible for sign: credit_spread → (fill-mid)/mid; debit → (mid-fill)/mid.
     fill_bonus_pct: float = 0.0
     # Cached last evaluate() result — used by dashboard to expose engine state
-    last_decision: "ProfitDecision | None" = field(default=None, repr=False)
+    last_decision: ProfitDecision | None = field(default=None, repr=False)
 
 
 # ── Decision output ─────────────────────────────────────────────────────────────
@@ -173,14 +173,14 @@ class IntelligentProfitEngine:
 
     def __init__(self) -> None:
         self._states: dict[str, PositionState] = {}
-        self._macro: "MacroContext | None" = None
+        self._macro: MacroContext | None = None
 
     # ── Public API ──────────────────────────────────────────────────────────────
 
-    def set_macro_context(self, ctx: "MacroContext | None") -> None:
+    def set_macro_context(self, ctx: MacroContext | None) -> None:
         self._macro = ctx
 
-    def register_position(self, position: "OpenPosition", is_existing: bool = False) -> None:
+    def register_position(self, position: OpenPosition, is_existing: bool = False) -> None:
         """
         Capture entry-time Greeks. Safe to call multiple times — idempotent.
 
@@ -289,7 +289,7 @@ class IntelligentProfitEngine:
 
     def evaluate(
         self,
-        position: "OpenPosition",
+        position: OpenPosition,
         realized_pnl_today: float,
         short_dte_flat_target: float = 0.75,
         credit_spread_flat_target: float = 0.50,
@@ -306,7 +306,7 @@ class IntelligentProfitEngine:
             state.last_decision = decision
         return decision
 
-    def get_last_decision(self, position_id: str) -> "ProfitDecision | None":
+    def get_last_decision(self, position_id: str) -> ProfitDecision | None:
         """Return the cached result of the last evaluate() call for a position."""
         state = self._states.get(position_id)
         return state.last_decision if state is not None else None
@@ -334,7 +334,7 @@ class IntelligentProfitEngine:
 
     def _evaluate_inner(
         self,
-        position: "OpenPosition",
+        position: OpenPosition,
         realized_pnl_today: float,
         short_dte_flat_target: float = 0.75,
         credit_spread_flat_target: float = 0.50,
@@ -577,7 +577,7 @@ class IntelligentProfitEngine:
 
     def _compute_metrics(
         self,
-        position: "OpenPosition",
+        position: OpenPosition,
         state: PositionState,
         dte: int,
         profit_pct: float,
@@ -674,7 +674,7 @@ class IntelligentProfitEngine:
                 break   # schedule is ordered descending — first match is correct
         return best_stop
 
-    def _regime_adjustment(self, position: "OpenPosition") -> float:
+    def _regime_adjustment(self, position: OpenPosition) -> float:
         """Return signed target adjustment: positive = hold longer, negative = exit sooner."""
         if self._macro is None:
             return 0.0

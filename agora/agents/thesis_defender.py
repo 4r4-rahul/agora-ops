@@ -16,18 +16,18 @@ import logging
 import sqlite3
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import anthropic
 
 from agora.core.json_extract import extract_json as _extract_json
-from agora.ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
-from agora.ops.payload_compressor import compress_payload as _compress
-from agora.ops.lessons_store import load_approved_lessons as _load_lessons
-from agora.mcp.sqlite_tools import SQLITE_TOOLS, sqlite_tool_handlers
 from agora.mcp.search_tools import SEARCH_TOOLS, search_tool_handlers
+from agora.mcp.sqlite_tools import SQLITE_TOOLS, sqlite_tool_handlers
 from agora.mcp.tool_runner import run_with_tools
+from agora.ops.lessons_store import load_approved_lessons as _load_lessons
+from agora.ops.llm_cost_log import log_message as _log_msg
+from agora.ops.payload_compressor import compress_payload as _compress
 
 logger = logging.getLogger(__name__)
 
@@ -398,7 +398,7 @@ class ThesisDefenderAgent:
                     (
                         decision_id or "",
                         ticker,
-                        datetime.now(tz=timezone.utc).isoformat(),
+                        datetime.now(tz=UTC).isoformat(),
                         _MODEL,
                         verdict.thesis_strength    if verdict else "error",
                         verdict.confidence         if verdict else None,

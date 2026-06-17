@@ -9,8 +9,8 @@ from datetime import date, timedelta
 
 import pytest
 
-from agora.session import AgoraSession
 from agora.lifecycle.position_manager import PositionManager
+from agora.session import AgoraSession
 
 
 # ── Phase 3 — proactive catalyst calendar ────────────────────────────────────

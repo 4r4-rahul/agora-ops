@@ -15,15 +15,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
-from typing import Any, Callable, Coroutine
+from datetime import date, datetime
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import anthropic
 
 from ..core.config import AgoraSettings, get_settings
-from ..ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
+from ..ops.llm_cost_log import log_message as _log_msg
 from ..ops.payload_compressor import compress_text as _compress_text
 
 logger = logging.getLogger(__name__)

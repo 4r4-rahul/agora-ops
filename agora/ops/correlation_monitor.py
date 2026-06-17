@@ -27,11 +27,11 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
-import yfinance as yf
 import numpy as np
+import yfinance as yf
 
 logger = logging.getLogger(__name__)
 

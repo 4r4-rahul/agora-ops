@@ -23,9 +23,7 @@ from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 if TYPE_CHECKING:
-    from ..agents.ceo_agent import CEOAgent
-    from ..lifecycle.position_manager import PositionManager
-    from .risk_council import RiskCouncil
+    pass
 
 from ..core.config import AgoraSettings, get_settings
 
@@ -359,6 +357,7 @@ class CircuitBreakerAgent:
         try:
             import sqlite3
             from datetime import date
+
             from agora.ops.edge_dashboard import _REAL_CLOSE
             conn = sqlite3.connect(str(self._settings.db_path), check_same_thread=False, timeout=10)
             conn.execute("PRAGMA journal_mode=WAL")

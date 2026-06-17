@@ -16,7 +16,6 @@ import json
 import sqlite3
 from typing import Any
 
-
 # ── Tool definitions (Anthropic tool_use schema) ──────────────────────────────
 
 SQLITE_TOOLS: list[dict] = [

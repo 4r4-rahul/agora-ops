@@ -253,8 +253,9 @@ async def enrich_chain(ticker: str, chain_dict: dict, spot: float, settings: Any
     if not chain_dict or spot <= 0:
         return chain_dict
     try:
-        from trading_platform.services.ibkr_client import fetch_chain_quotes
         from datetime import date as _date
+
+        from trading_platform.services.ibkr_client import fetch_chain_quotes
 
         range_pct = float(getattr(settings, "ibkr_chain_range_pct", 0.15))
         dte_lo = int(getattr(settings, "ibkr_chain_dte_lo", 18))

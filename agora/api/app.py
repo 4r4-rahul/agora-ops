@@ -125,5 +125,13 @@ async def root():
 
 
 if __name__ == "__main__":
+    import os
+
     import uvicorn
-    uvicorn.run("agora.api.app:app", host="0.0.0.0", port=8001, reload=True)
+
+    # Bind to loopback by default — the dashboard exposes kill-switch / go-live / position controls
+    # and must not be reachable off-host unless the operator explicitly opts in (e.g. behind an
+    # authenticating reverse proxy on a trusted network) via AGORA_API_HOST=0.0.0.0.
+    _host = os.getenv("AGORA_API_HOST", "127.0.0.1")
+    _port = int(os.getenv("AGORA_API_PORT", "8001"))
+    uvicorn.run("agora.api.app:app", host=_host, port=_port, reload=True)

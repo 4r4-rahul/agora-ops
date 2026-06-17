@@ -23,7 +23,6 @@ import os
 import sqlite3
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -108,7 +107,7 @@ class SystemHealthAgent:
     # ── Check cycle ────────────────────────────────────────────────
 
     async def _run_all_checks(self) -> None:
-        results = await asyncio.gather(
+        await asyncio.gather(
             self._check_ibkr(),
             self._check_yfinance(),
             self._check_anthropic(),

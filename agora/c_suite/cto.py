@@ -18,8 +18,8 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from .base import ExecutiveAgent
 from ..core.config import AgoraSettings
+from .base import ExecutiveAgent
 
 logger = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
@@ -548,6 +548,7 @@ class CTOAgent(ExecutiveAgent):
         if is_market_hours:
             try:
                 import sqlite3 as _sql
+
                 from ..core.config import get_settings
                 conn = _sql.connect(str(get_settings().db_path), check_same_thread=False)
                 last_trade = conn.execute(

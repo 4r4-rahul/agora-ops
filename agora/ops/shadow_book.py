@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -78,7 +78,7 @@ def record_block(db_path: str, decision_id: str, ticker: str, rec: Any, spot: fl
                 (decision_id, ticker,
                  str(getattr(getattr(rec, "strategy", ""), "value", getattr(rec, "strategy", ""))),
                  str(getattr(rec, "direction", "")),
-                 datetime.now(tz=timezone.utc).isoformat(), float(spot or 0),
+                 datetime.now(tz=UTC).isoformat(), float(spot or 0),
                  short_strike, getattr(rec, "breakeven_price", None),
                  float(getattr(rec, "entry_debit_credit", 0) or 0),
                  float(getattr(rec, "max_gain_dollars", 0) or 0),

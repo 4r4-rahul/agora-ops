@@ -24,10 +24,10 @@ import asyncio
 import logging
 import sqlite3
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import IntEnum
-from typing import Awaitable, Callable
 from zoneinfo import ZoneInfo
 
 ET = ZoneInfo("America/New_York")
@@ -190,7 +190,7 @@ class UniverseScanEngine:
 
     async def enqueue(
         self,
-        priority: ScanPriority,
+        priority: int,          # ScanPriority (an IntEnum) or a raw priority int from priority_fn
         ticker:   str,
         reason:   str,
         metadata: dict | None = None,
@@ -264,7 +264,7 @@ class UniverseScanEngine:
                 req: ScanRequest = await asyncio.wait_for(
                     self._queue.get(), timeout=5.0
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
             except asyncio.CancelledError:
                 break
@@ -312,7 +312,7 @@ class UniverseScanEngine:
                 if age >= stale_threshold_s:
                     # S1: classify priority so Tier1 / market-interest names sweep ahead of the
                     # routine background universe (defensive: any classifier error → BACKGROUND).
-                    prio = ScanPriority.BACKGROUND
+                    prio: int = ScanPriority.BACKGROUND
                     if self._priority_fn is not None:
                         try:
                             prio = self._priority_fn(ticker)
@@ -401,7 +401,7 @@ class UniverseScanEngine:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    datetime.now(timezone.utc).isoformat(),
+                    datetime.now(UTC).isoformat(),
                     req.ticker,
                     req.priority,
                     req.reason,

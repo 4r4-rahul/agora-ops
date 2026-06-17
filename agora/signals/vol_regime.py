@@ -55,10 +55,12 @@ class VolRegimeClassifier:
     def _load_model(self) -> None:
         try:
             if _MODEL_PATH.exists() and _SCALER_PATH.exists():
+                # noqa rationale: the project's OWN locally-trained XGBoost model/scaler artifacts,
+                # never untrusted/remote input — pickle is the model's native serialization format.
                 with open(_MODEL_PATH, "rb") as f:
-                    self._model = pickle.load(f)
+                    self._model = pickle.load(f)  # noqa: S301
                 with open(_SCALER_PATH, "rb") as f:
-                    self._scaler = pickle.load(f)
+                    self._scaler = pickle.load(f)  # noqa: S301
                 logger.info("Vol regime XGBoost model loaded from %s", _MODEL_PATH)
         except Exception as exc:
             logger.warning("Could not load vol regime model: %s — using rule-based fallback", exc)

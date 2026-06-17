@@ -28,19 +28,20 @@ import logging
 import sqlite3
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import anthropic
 
 from agora.core.json_extract import extract_json as _extract_json
-from agora.ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
-from agora.ops.payload_compressor import compress_payload as _compress
-from agora.ops.lessons_store import load_approved_lessons as _load_lessons, load_calibration_note as _load_cal_note
-from agora.mcp.sqlite_tools import SQLITE_TOOLS, sqlite_tool_handlers
-from agora.mcp.search_tools import SEARCH_TOOLS, search_tool_handlers
 from agora.mcp.flow_tools import FLOW_TOOLS, flow_tool_handlers
+from agora.mcp.search_tools import SEARCH_TOOLS, search_tool_handlers
+from agora.mcp.sqlite_tools import SQLITE_TOOLS, sqlite_tool_handlers
 from agora.mcp.tool_runner import run_with_tools
+from agora.ops.lessons_store import load_approved_lessons as _load_lessons
+from agora.ops.lessons_store import load_calibration_note as _load_cal_note
+from agora.ops.llm_cost_log import log_message as _log_msg
+from agora.ops.payload_compressor import compress_payload as _compress
 
 logger = logging.getLogger(__name__)
 
@@ -262,7 +263,7 @@ class AdvocateAgent:
         # ~$13/day). Caching here covers BOTH call sites. Keyed on the structure fingerprint
         # (ticker + strategy + strikes + macro stance) so a re-review of the SAME structure within
         # the TTL reuses the verdict; a changed structure or macro flip re-runs.
-        self._cache: dict[str, tuple[float, "AdvocateVerdict"]] = {}
+        self._cache: dict[str, tuple[float, AdvocateVerdict]] = {}
         self._cache_ttl = float(getattr(settings, "advocate_cache_ttl_secs", 10800))
         logger.info("AdvocateAgent ready: model=%s shadow=%s", _MODEL, shadow_mode)
 
@@ -521,7 +522,7 @@ class AdvocateAgent:
             return True
 
     def _apply_long_structure_filter(self, raw_output: dict, recommendation: Any,
-                                     kill_conditions: list, ticker: str) -> "AdvocateVerdict":
+                                     kill_conditions: list, ticker: str) -> AdvocateVerdict:
         """For a LOW-IVR single LONG (long_call/long_put bought in the long-vega zone), an
         "IV crush" / vega-collapse / debit-mispricing failure mode is the spread trader's reflex
         misapplied: there is little IV to crush and IV EXPANSION helps the position. The
@@ -570,14 +571,15 @@ class AdvocateAgent:
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
-    def _apply_fact_gate(self, raw_output: dict, verdict: "AdvocateVerdict",
-                         kill_conditions: list, ticker: str) -> "AdvocateVerdict":
+    def _apply_fact_gate(self, raw_output: dict, verdict: AdvocateVerdict,
+                         kill_conditions: list, ticker: str) -> AdvocateVerdict:
         """Run the fact-grounding scan; if the advocate fabricated an imminent macro event,
         neutralize the failure mode(s) built on it and recompute the deterministic verdict.
         Only ever relaxes a verdict (a lie can only manufacture risk, never hide it). Never
         raises — a guardrail must not break the path it guards."""
         try:
-            from agora.ops.fact_grounding import scan as _fact_scan, neutralize_fabricated_modes
+            from agora.ops.fact_grounding import neutralize_fabricated_modes
+            from agora.ops.fact_grounding import scan as _fact_scan
             modes = raw_output.get("failure_modes") or []
             _claim_text = (raw_output.get("most_likely_loss_scenario", "") or "") + " " + \
                 (getattr(verdict, "verdict_reasoning", "") or "") + " " + " ".join(
@@ -716,7 +718,7 @@ class AdvocateAgent:
                     (
                         decision_id or "",
                         ticker,
-                        datetime.now(tz=timezone.utc).isoformat(),
+                        datetime.now(tz=UTC).isoformat(),
                         PROMPT_VERSION, _MODEL,
                         json.dumps({"ticker": ticker}, default=str),
                         verdict.verdict       if verdict else "error",

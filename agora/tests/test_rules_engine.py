@@ -23,7 +23,6 @@ from datetime import date, timedelta
 import pandas as pd
 import pytest
 
-from agora.strategies.rules_engine import StrategyRulesEngine, _BUILDABLE_STRATEGIES
 from agora.core.models import (
     ConvictionScore,
     SpreadLeg,
@@ -32,7 +31,7 @@ from agora.core.models import (
     TradeRecommendation,
 )
 from agora.ops.dynamic_params import DynamicParams
-
+from agora.strategies.rules_engine import _BUILDABLE_STRATEGIES, StrategyRulesEngine
 
 # ── Synthetic chain construction ──────────────────────────────────────────────
 

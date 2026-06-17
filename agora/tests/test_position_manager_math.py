@@ -9,7 +9,6 @@ reloaded position reports zero greeks and the portfolio greek limits silently st
 """
 from __future__ import annotations
 
-import json
 import sqlite3
 import tempfile
 import types

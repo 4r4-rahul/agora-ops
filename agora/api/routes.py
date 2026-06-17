@@ -33,26 +33,28 @@ WS   /agora/ws            — live event stream (JSON lines)
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from collections import deque
-from datetime import datetime
-from typing import Any, Dict
+from datetime import UTC, datetime
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from .state import get_session
-from ..ops.llm_cost_log import daily_cost_summary as _llm_daily_cost
 from ..ops.decision_chains import recent_chains as _recent_chains
-from ..ops.strategy_health import StrategyHealthAgent as _StrategyHealthAgent
+from ..ops.llm_cost_log import daily_cost_summary as _llm_daily_cost
+from ..ops.outcome_attributor import (
+    attribute_closed_trades as _attribute_now,
+)
 from ..ops.outcome_attributor import (
     get_analyst_stats as _get_analyst_stats,
-    attribute_closed_trades as _attribute_now,
+)
+from ..ops.outcome_attributor import (
     get_promotion_readiness as _get_promotion_readiness,
 )
+from .state import get_session
 
 router = APIRouter(prefix="/agora", tags=["agora"])
 logger = logging.getLogger(__name__)
@@ -255,7 +257,7 @@ async def get_orders() -> JSONResponse:
         n_rejects = sess_mem.get("rejects", 0)
         n_attempts = sess_mem.get("attempts", 0)
         # Pending = attempts that haven't resolved yet this session
-        n_pending = max(0, n_attempts - n_fills - n_rejects)
+        max(0, n_attempts - n_fills - n_rejects)
 
         # Pull the most-recent pending rows from DB for this session (post-cleanup IDs)
         # These are rows inserted AFTER the startup cleanup so they're genuinely pending.
@@ -487,7 +489,7 @@ async def get_performance() -> JSONResponse:
         return JSONResponse({"error": "session not ready"}, status_code=503)
 
     import sqlite3 as _sql
-    from datetime import date as _date, datetime as _dt
+    from datetime import datetime as _dt
 
     db_path = session._settings.db_path
     try:
@@ -696,6 +698,7 @@ async def reconcile_positions() -> JSONResponse:
 
     def _run() -> dict:
         import asyncio as _a
+
         from agora.ops.position_reconciler import reconcile
         _a.set_event_loop(_a.new_event_loop())  # ib_insync needs a loop in this worker thread
         # Dedicated clientId so we never collide with the trading session's connections.
@@ -1270,7 +1273,12 @@ async def get_strategy_health() -> JSONResponse:
         if hasattr(session, "_strategy_health"):
             return JSONResponse(session._strategy_health.get_status())
         # Fallback: compute directly without the agent instance
-        from ..ops.strategy_health import compute_health, get_paused_cells, MIN_TRADES, SHARPE_PAUSE_THRESH
+        from ..ops.strategy_health import (
+            MIN_TRADES,
+            SHARPE_PAUSE_THRESH,
+            compute_health,
+            get_paused_cells,
+        )
         db_path = str(session._settings.db_path)
         return JSONResponse({
             "paused_count": len(get_paused_cells(db_path)),
@@ -1360,7 +1368,10 @@ async def get_performance_metrics() -> JSONResponse:
         return JSONResponse({"error": "session not ready"}, status_code=503)
     try:
         from agora.ops.performance_metrics import (
-            compute_metrics, reconcile_books, compute_achievements)
+            compute_achievements,
+            compute_metrics,
+            reconcile_books,
+        )
         db = str(session._settings.db_path)
         return JSONResponse({
             "metrics": compute_metrics(db),
@@ -1580,14 +1591,14 @@ async def approve_lesson(lesson_id: int, request: Request) -> JSONResponse:
         if not approved_by:
             return JSONResponse({"error": "approved_by required"}, status_code=400)
         import sqlite3
-        from datetime import datetime, timezone
+        from datetime import datetime
         db_path = str(session._settings.db_path)
         with sqlite3.connect(db_path) as conn:
             rowcount = conn.execute(
                 """UPDATE agent_lessons
                    SET human_approved = 1, approved_at_utc = ?, approved_by = ?
                    WHERE lesson_id = ? AND active = 1""",
-                (datetime.now(tz=timezone.utc).isoformat(), approved_by, lesson_id),
+                (datetime.now(tz=UTC).isoformat(), approved_by, lesson_id),
             ).rowcount
         if rowcount == 0:
             return JSONResponse({"error": f"lesson {lesson_id} not found or already inactive"}, status_code=404)
@@ -1611,14 +1622,14 @@ async def reject_lesson(lesson_id: int, request: Request) -> JSONResponse:
         body = await request.json()
         reason = body.get("reason", "")
         import sqlite3
-        from datetime import datetime, timezone
+        from datetime import datetime
         db_path = str(session._settings.db_path)
         with sqlite3.connect(db_path) as conn:
             rowcount = conn.execute(
                 """UPDATE agent_lessons
                    SET active = 0, rejected_at_utc = ?, rejected_reason = ?
                    WHERE lesson_id = ?""",
-                (datetime.now(tz=timezone.utc).isoformat(), reason, lesson_id),
+                (datetime.now(tz=UTC).isoformat(), reason, lesson_id),
             ).rowcount
         if rowcount == 0:
             return JSONResponse({"error": f"lesson {lesson_id} not found"}, status_code=404)
@@ -1658,7 +1669,7 @@ async def get_strategy_journal(limit: int = 50) -> JSONResponse:
                 "endorses_rules", "liquidity_score", "thesis_alignment_score",
                 "rationale", "shadow_mode",
                 "input_tokens", "output_tokens", "cost_usd", "latency_ms"]
-        return JSONResponse({"count": len(rows), "rows": [dict(zip(cols, r)) for r in rows]})
+        return JSONResponse({"count": len(rows), "rows": [dict(zip(cols, r, strict=False)) for r in rows]})
     except Exception as exc:
         logger.error("Strategy journal error: %s", exc)
         return JSONResponse({"error": str(exc)}, status_code=500)
@@ -1674,7 +1685,8 @@ async def get_advocate_journal(limit: int = 50) -> JSONResponse:
     if session is None:
         return JSONResponse({"error": "session not ready"}, status_code=503)
     try:
-        import sqlite3, json
+        import json
+        import sqlite3
         db_path = str(session._settings.db_path)
         with sqlite3.connect(db_path) as conn:
             rows = conn.execute(
@@ -1719,7 +1731,7 @@ async def get_exit_journal(limit: int = 50, ticker: str | None = None) -> JSONRe
     if session is None:
         return JSONResponse({"error": "session not ready"}, status_code=503)
     try:
-        import sqlite3, json
+        import sqlite3
         db_path = str(session._settings.db_path)
         with sqlite3.connect(db_path) as conn:
             if ticker:
@@ -1749,7 +1761,7 @@ async def get_exit_journal(limit: int = 50, ticker: str | None = None) -> JSONRe
                 "thesis_validity", "kill_condition_status", "recommendation",
                 "recommendation_reasoning", "confidence_pct", "shadow_mode",
                 "input_tokens", "output_tokens", "cost_usd", "latency_ms"]
-        result = [dict(zip(cols, r)) for r in rows]
+        result = [dict(zip(cols, r, strict=False)) for r in rows]
         for r in result:
             r["shadow_mode"] = bool(r["shadow_mode"])
         return JSONResponse({"count": len(result), "rows": result})
@@ -1790,7 +1802,7 @@ async def get_trade_journal(limit: int = 50) -> JSONResponse:
             "gate", "legs_summary", "why_traded",
             "macro_at_entry", "regime_at_entry", "ibkr_order_id",
         ]
-        return JSONResponse([dict(zip(cols, r)) for r in rows])
+        return JSONResponse([dict(zip(cols, r, strict=False)) for r in rows])
     except Exception as exc:
         logger.error("Journal fetch error: %s", exc)
         return JSONResponse({"error": str(exc)}, status_code=500)
@@ -1854,6 +1866,7 @@ async def chart_ivrank(ticker: str) -> JSONResponse:
     try:
         def _fetch():
             import math
+
             import yfinance as yf
             t = yf.Ticker(ticker)
             hist = t.history(period="1y")
@@ -2158,7 +2171,6 @@ async def get_calibration() -> JSONResponse:
         return JSONResponse({"error": "session not running"}, status_code=503)
     try:
         import json
-        from pathlib import Path
         cal_path = session._settings.db_path.parent / "calibration_report.json"
         if not cal_path.exists():
             return JSONResponse({"status": "not_generated_yet",
@@ -2175,8 +2187,8 @@ async def run_calibration_now() -> JSONResponse:
     if not session:
         return JSONResponse({"error": "session not running"}, status_code=503)
     try:
+
         from agora.ops.conviction_calibrator import calibrate
-        from pathlib import Path
         cal_path = session._settings.db_path.parent / "calibration_report.json"
         cal_path.parent.mkdir(parents=True, exist_ok=True)
         result = calibrate(str(session._settings.db_path), str(cal_path))

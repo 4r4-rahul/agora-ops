@@ -24,15 +24,14 @@ import json
 import logging
 import re
 import sqlite3
-import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import anthropic
 import httpx
 
-from agora.ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
+from agora.ops.llm_cost_log import log_message as _log_msg
 
 logger = logging.getLogger(__name__)
 
@@ -163,7 +162,7 @@ def _flag(msg: dict, topic: str) -> tuple[bool, str]:
         pcts = _PCT_RE.findall(all_text)
         nums = [abs(float(p)) for p in pcts if p]
         if any(n > 0.2 for n in nums):
-            return True, f"🔔 Econ surprise > 0.2%"
+            return True, "🔔 Econ surprise > 0.2%"
 
     if topic == "ticker_update":
         # Flag extreme P/C ratios
@@ -321,7 +320,7 @@ class UWMarketIntelAgent:
 
     async def _run_scheduled(self, mode: str) -> None:
         hours = _SUMMARY_WINDOW_HOURS[mode]
-        since = datetime.now(tz=timezone.utc) - timedelta(hours=hours)
+        since = datetime.now(tz=UTC) - timedelta(hours=hours)
         rows  = self._fetch_since(since.isoformat())
 
         if not rows:

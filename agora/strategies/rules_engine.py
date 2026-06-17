@@ -21,14 +21,13 @@ All legs use MID price (bid+ask)/2. If mid > ask or mid < bid → use bid + spre
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta, timezone
+from datetime import date
 from typing import Any
 
 from ..core.config import AgoraSettings, get_settings
 from ..core.models import (
     ConvictionScore,
     GexSignal,
-    OpenPosition,
     SpreadLeg,
     StrategyPillar,
     StrategyType,
@@ -80,7 +79,7 @@ class StrategyRulesEngine:
         iv_rank: float | None = None,
         vix: float | None = None,
         dynamic_params: Any | None = None,  # DynamicParams — overrides config defaults
-        force_strategy_type: "StrategyType | None" = None,  # bypass _select_strategy (selector override)
+        force_strategy_type: StrategyType | None = None,  # bypass _select_strategy (selector override)
         macro_stance: str | None = None,                    # regime gate: bias credit direction with trend
     ) -> TradeRecommendation | None:
         """
@@ -580,7 +579,7 @@ class StrategyRulesEngine:
 
     def _nearest_delta_strike(
         self, chain: Any, target_delta: float, opt_type: str,
-        spot: float = 0.0, expiry: "date | None" = None,
+        spot: float = 0.0, expiry: date | None = None,
     ) -> float | None:
         """Find the strike with delta closest to target_delta.
 
@@ -625,7 +624,7 @@ class StrategyRulesEngine:
         opt_type: str,
         wing_direction: int,     # +1 = long wing is higher strike, -1 = lower strike
         spot: float = 0.0,
-        expiry: "date | None" = None,
+        expiry: date | None = None,
         delta_band: float = 0.05,
     ) -> float | None:
         """
@@ -716,13 +715,15 @@ class StrategyRulesEngine:
     def _spread_width_strike(
         self,
         chain: Any,
-        anchor_strike: float,
+        anchor_strike: float | None,
         opt_type: str,
         direction: int,   # +1 = higher strikes, -1 = lower strikes
     ) -> float | None:
         """Pick the strike ~1 spread width away from anchor (≈5% of spot)."""
         try:
-            if chain is None or (hasattr(chain, "empty") and chain.empty):
+            # anchor may be None when the short-strike resolver found nothing — the callers gate on
+            # a None return immediately after, so short-circuit here instead of erroring in the math.
+            if anchor_strike is None or chain is None or (hasattr(chain, "empty") and chain.empty):
                 return None
             strikes = sorted(chain["strike"].unique().tolist())
             idx = min(range(len(strikes)), key=lambda i: abs(strikes[i] - anchor_strike))

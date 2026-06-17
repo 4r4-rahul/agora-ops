@@ -17,18 +17,18 @@ Incoming headlines are:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import threading
-from datetime import datetime, timezone
-from typing import Any, Callable, Coroutine
+from collections.abc import Callable, Coroutine
+from datetime import UTC, datetime
+from typing import Any
 
 import anthropic
 from ib_insync import IB, Stock
 
-from ..core.models import Catalyst, CatalystType
 from ..core.json_extract import extract_json as _extract_json
-from ..ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
+from ..core.models import Catalyst, CatalystType
+from ..ops.llm_cost_log import log_message as _log_msg
 from ..ops.payload_compressor import compress_text as _compress_text
 
 logger = logging.getLogger(__name__)
@@ -177,7 +177,6 @@ class IBKRNewsAgent:
 
     async def _ib_session(self) -> None:
         ib = IB()
-        connected = False
         for attempt in range(1, 4):
             try:
                 await ib.connectAsync(
@@ -186,7 +185,6 @@ class IBKRNewsAgent:
                     clientId=self._settings.ibkr_news_client_id,
                     timeout=10,
                 )
-                connected = True
                 break
             except Exception as exc:
                 if attempt < 3:
@@ -390,7 +388,7 @@ class IBKRNewsAgent:
         catalyst = Catalyst(
             ticker=ticker,
             catalyst_type=catalyst_type,
-            filing_time=datetime.now(tz=timezone.utc),
+            filing_time=datetime.now(tz=UTC),
             headline=data.get("reason", headline[:200]),
             direction=direction,
             strength=data.get("strength", "moderate"),

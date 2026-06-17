@@ -10,6 +10,7 @@ from datetime import date, datetime
 import pytest
 from pydantic import ValidationError
 
+from agora.core.config import AgoraSettings, get_settings
 from agora.core.models import (
     CatalystType,
     ConvictionScore,
@@ -20,10 +21,8 @@ from agora.core.models import (
     StrategyType,
     TradeRecommendation,
 )
-from agora.core.config import AgoraSettings, get_settings
 from agora.signals.event_patterns import EventPatternEngine
 from trading_platform.services.macro_calendar import MacroCalendar, MacroEvent
-
 
 # ── Fixtures / helpers ────────────────────────────────────────────────────────
 

@@ -25,13 +25,12 @@ import asyncio
 import logging
 import statistics
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
-from typing import Any
+from datetime import date, datetime
 
 import anthropic
 
 from ..core.config import AgoraSettings, get_settings
-from ..ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
+from ..ops.llm_cost_log import log_message as _log_msg
 from ..ops.payload_compressor import compress_text as _compress_text
 
 logger = logging.getLogger(__name__)
@@ -39,10 +38,14 @@ logger = logging.getLogger(__name__)
 # Sector groupings: ticker → sector
 _TICKER_SECTOR: dict[str, str] = {
     # AI Infrastructure / Networking
-    "CSCO": "ai_networking", "AVGO": "ai_networking", "ANET": "ai_networking",
+    # NOTE: AVGO & MSFT were each listed twice (also under semiconductors / cloud_software below).
+    # A dict literal silently keeps the LAST occurrence, so the live map has always resolved
+    # AVGO→semiconductors and MSFT→cloud_software. Removed the dead earlier entries here to make
+    # that explicit (behavior unchanged); re-classifying either is a separate taxonomy decision.
+    "CSCO": "ai_networking", "ANET": "ai_networking",
     "JNPR": "ai_networking", "NOK": "ai_networking",
     # Mega-cap tech
-    "AAPL": "mega_tech", "MSFT": "mega_tech", "GOOGL": "mega_tech",
+    "AAPL": "mega_tech", "GOOGL": "mega_tech",
     "META": "mega_tech", "AMZN": "mega_tech",
     # Semiconductors
     "NVDA": "semiconductors", "AMD": "semiconductors", "INTC": "semiconductors",
@@ -133,7 +136,6 @@ class SectorIntelligenceAgent:
             logger.info("SectorIntelligenceAgent: cold cache — running startup warm-up")
             try:
                 await self._update_all_sectors()
-                from datetime import timezone as _tz
                 self._last_update_date = datetime.now(tz=ZoneInfo("America/New_York")).date()
             except Exception as exc:
                 logger.error("Sector intelligence startup warm-up failed: %s", exc)
@@ -157,7 +159,6 @@ class SectorIntelligenceAgent:
 
     async def _update_all_sectors(self) -> None:
         """Refresh sector intelligence for all tracked tickers."""
-        sectors_seen: set[str] = set()
         sector_tickers: dict[str, list[str]] = {}
 
         for ticker, sector in _TICKER_SECTOR.items():
@@ -242,7 +243,6 @@ class SectorIntelligenceAgent:
         """Fetch this quarter's earnings record for one ticker."""
         try:
             import yfinance as yf
-            import pandas as pd
 
             tk = yf.Ticker(ticker)
             earnings_dates = tk.earnings_dates

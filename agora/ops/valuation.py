@@ -213,6 +213,8 @@ def _fetch_and_score(ticker: str) -> ValuationResult:
     # ── Fundamental metrics ───────────────────────────────────────────────────
     def _safe_float(key: str) -> float | None:
         val = info.get(key)
+        if val is None:
+            return None
         try:
             f = float(val)
             return f if f > 0 else None

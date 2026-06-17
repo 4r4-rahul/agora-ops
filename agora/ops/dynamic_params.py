@@ -25,8 +25,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any
+from datetime import UTC, datetime
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +65,7 @@ class DynamicParams:
     kelly_fraction: float | None = None   # None until 30+ closed trades
 
     # ── Diagnostics ────────────────────────────────────────────────
-    computed_at: str = field(default_factory=lambda: datetime.now(tz=timezone.utc).isoformat())
+    computed_at: str = field(default_factory=lambda: datetime.now(tz=UTC).isoformat())
     vix_level: float = 18.0
     ivr_level: float = 50.0
     regime_label: str = "normal"

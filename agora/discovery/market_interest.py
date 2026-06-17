@@ -24,8 +24,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import date, datetime
-from typing import Any
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from ..core.config import AgoraSettings, get_settings
@@ -167,8 +166,9 @@ class MarketInterestAgent:
         """Unusual open interest growth in 30-45 DTE options."""
         fingerprints = []
         try:
-            import yfinance as yf
             from datetime import date as _date
+
+            import yfinance as yf
 
             today = _date.today()
             for ticker in universe[:30]:   # cap to avoid rate limiting
@@ -221,8 +221,9 @@ class MarketInterestAgent:
         """Short-term IV > long-term IV = event risk being priced."""
         fingerprints = []
         try:
-            import yfinance as yf
             from datetime import date as _date
+
+            import yfinance as yf
 
             today = _date.today()
             for ticker in universe[:30]:
@@ -253,11 +254,11 @@ class MarketInterestAgent:
                         continue
 
                     def atm_iv(exp):
-                        chain = tk.option_chain(exp)
+                        chain = tk.option_chain(exp)  # noqa: B023 (reviewed: immediate-consume / shared object)
                         calls = chain.calls
                         if calls.empty:
                             return 0.0
-                        idx = (calls["strike"] - spot).abs().argsort().iloc[0]
+                        idx = (calls["strike"] - spot).abs().argsort().iloc[0]  # noqa: B023 (reviewed: immediate-consume / shared object)
                         return float(calls["impliedVolatility"].iloc[idx] or 0)
 
                     iv_short = atm_iv(short_exp)
@@ -365,8 +366,9 @@ class MarketInterestAgent:
         """
         fingerprints = []
         try:
-            import yfinance as yf
             from datetime import date as _date
+
+            import yfinance as yf
 
             today = _date.today()
             for ticker in universe[:25]:
@@ -457,8 +459,10 @@ class MarketInterestAgent:
         """
         fingerprints = []
         try:
+            from datetime import date as _date
+            from datetime import timedelta
+
             import yfinance as yf
-            from datetime import date as _date, timedelta
 
             today   = _date.today()
             horizon = today + timedelta(days=14)

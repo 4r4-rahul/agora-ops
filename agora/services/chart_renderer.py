@@ -8,11 +8,12 @@ import io
 import logging
 
 import matplotlib
+
 matplotlib.use("Agg")  # Non-interactive backend; must be set before any other matplotlib import
 
 import matplotlib.pyplot as plt  # noqa: E402 (after backend set)
-import mplfinance as mpf          # noqa: E402
-import yfinance as yf             # noqa: E402
+import mplfinance as mpf  # noqa: E402
+import yfinance as yf  # noqa: E402
 
 logger = logging.getLogger(__name__)
 

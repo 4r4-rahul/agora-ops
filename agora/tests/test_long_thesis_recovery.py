@@ -8,13 +8,10 @@ The thesis EXISTS in long_journal; find_entry_journal recovers it by ticker+stri
 """
 from __future__ import annotations
 
-import json
 import sqlite3
 
-import pytest
-
-from agora.ops.db_migrations import run_all
 from agora.agents.long_options_agent import LongOptionsAgent as L
+from agora.ops.db_migrations import run_all
 
 
 def _seed(db, *, position_id="", ticker="TSM", strike=460.0, expiry="2026-07-10",

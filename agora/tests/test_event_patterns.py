@@ -9,8 +9,6 @@ from __future__ import annotations
 import types
 from datetime import date, timedelta
 
-import pytest
-
 from agora.signals.event_patterns import EventPatternEngine
 
 
@@ -115,7 +113,7 @@ class TestCpiCondor:
 # ── get_signals aggregation ───────────────────────────────────────────────────
 class TestGetSignals:
     def test_returns_fomc_when_next(self):
-        sigs = _engine(days_to_next=2, next_event="FOMC")._fomc_drift("SPY", _TODAY)
+        _engine(days_to_next=2, next_event="FOMC")._fomc_drift("SPY", _TODAY)
         full = _engine(days_to_next=2, next_event="FOMC").get_signals("SPY", today=_TODAY)
         assert [s["event_type"] for s in full] == ["fomc_drift"]
 

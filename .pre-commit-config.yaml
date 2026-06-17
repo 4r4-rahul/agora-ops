@@ -34,12 +34,24 @@ repos:
         args: ["-c", "pyproject.toml", "-r", "agora", "--severity-level", "high", "-q"]
         pass_filenames: false
 
-  # Lint + format (advisory locally — does not block the commit while the backlog is burned down).
+  # Lint — BLOCKING (backlog burned down to zero 2026-06-17). --force-exclude honors the
+  # pyproject excludes (trading_platform, agora/backtester) even when pre-commit passes files
+  # explicitly. Formatting (ruff-format) is intentionally NOT gated yet — the codebase predates
+  # ruff's formatter, so enforcing it is a separate, isolated reformat pass.
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.17
     hooks:
       - id: ruff
-        args: ["--exit-zero"]          # report only, don't fail the commit yet
-      - id: ruff-format
-        args: ["--check", "--diff"]
-        verbose: true
+        args: ["--force-exclude"]
+
+  # Type check — runs the incremental gated scope from pyproject [tool.mypy].files (not the staged
+  # files), so it stays consistent regardless of what a given commit touches. Uses the local venv's
+  # mypy (installed via requirements-dev.txt) so it sees the project's real dependency types.
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy (incremental gate)
+        entry: mypy
+        language: system
+        pass_filenames: false
+        always_run: true

@@ -117,7 +117,7 @@ def search_tool_handlers(api_key: str | None) -> dict[str, Any]:
         try:
             from tavily import AsyncTavilyClient
             client = AsyncTavilyClient(api_key=api_key)
-            cutoff = (date.today() - timedelta(days=days_back)).isoformat()
+            (date.today() - timedelta(days=days_back)).isoformat()
             response = await client.search(
                 query=query,
                 search_depth="basic",

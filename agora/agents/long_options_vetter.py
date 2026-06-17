@@ -31,7 +31,7 @@ import logging
 import sqlite3
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import anthropic
@@ -338,7 +338,7 @@ class LongOptionsVetterAgent:
                         adjusted_contracts, key_risk, reasoning, latency_ms, shadow_mode
                     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """, (
-                    datetime.now(timezone.utc).isoformat(),
+                    datetime.now(UTC).isoformat(),
                     decision.ticker,
                     decision.strategy,
                     decision.conviction,

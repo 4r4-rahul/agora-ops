@@ -22,7 +22,7 @@ import asyncio
 import hashlib
 import json
 import logging
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -31,8 +31,8 @@ import httpx
 
 from ..core.config import AgoraSettings, get_settings
 from ..core.json_extract import extract_json as _extract_json
-from ..ops.llm_cost_log import log_call as _log_llm, log_message as _log_msg
 from ..core.models import Catalyst, CatalystType
+from ..ops.llm_cost_log import log_message as _log_msg
 
 logger = logging.getLogger(__name__)
 
@@ -238,7 +238,7 @@ class SmartMoneyAgent:
         catalyst = Catalyst(
             ticker=self._entity_to_ticker(entity),
             catalyst_type=catalyst_type,
-            filing_time=datetime.now(tz=timezone.utc),
+            filing_time=datetime.now(tz=UTC),
             headline=analysis.get("summary", f"{form_type} filing for {entity}"),
             direction="bullish",
             strength=strength,
@@ -464,7 +464,7 @@ class SmartMoneyAgent:
             catalyst = Catalyst(
                 ticker=ticker,
                 catalyst_type=CatalystType.INSIDER_CLUSTER,
-                filing_time=datetime.now(tz=timezone.utc),
+                filing_time=datetime.now(tz=UTC),
                 headline=analysis.get("summary", f"Insider buy cluster: {ticker}"),
                 direction="bullish",
                 strength=analysis.get("signal_strength", "moderate"),

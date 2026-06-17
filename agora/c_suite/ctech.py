@@ -16,12 +16,12 @@ Sub-agents supervised:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from .base import ExecutiveAgent
 from ..core.config import AgoraSettings
+from .base import ExecutiveAgent
 
 logger = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
@@ -194,7 +194,7 @@ class CTechAgent(ExecutiveAgent):
         self._sector          = sector_intel
         self._universe        = universe_disc
         self._strategy_health = strategy_health
-        self._started_at      = datetime.now(tz=timezone.utc)
+        self._started_at      = datetime.now(tz=UTC)
 
     @property
     def _system_prompt(self) -> str:
@@ -239,7 +239,7 @@ class CTechAgent(ExecutiveAgent):
             ))
 
         # ── Conviction scorer: no scans after startup period ──
-        uptime_minutes = (datetime.now(tz=timezone.utc) - self._started_at).total_seconds() / 60
+        uptime_minutes = (datetime.now(tz=UTC) - self._started_at).total_seconds() / 60
         if self._scorer and is_market_hours:
             try:
                 stats = self._scorer.get_session_stats()
@@ -340,7 +340,7 @@ class CTechAgent(ExecutiveAgent):
         if self._event and is_market_hours:
             try:
                 # Use a sample ticker to verify the event engine responds
-                test = self._event.get_signals(self._settings.etf_universe[0])
+                self._event.get_signals(self._settings.etf_universe[0])
                 # If no exception, engine is alive — even empty list is OK
             except Exception as exc:
                 findings.append((

@@ -34,7 +34,6 @@ from agora.core.models import (
 )
 from agora.lifecycle.position_manager import PositionManager
 
-
 # ── Position builders ─────────────────────────────────────────────────────────
 
 _SETTINGS = get_settings()

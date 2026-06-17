@@ -69,7 +69,7 @@ class SessionPlan:
         }
 
     @staticmethod
-    def default() -> "SessionPlan":
+    def default() -> SessionPlan:
         """Safe default — neutral stance, standard sizing, no restrictions."""
         return SessionPlan(
             date=datetime.now(tz=ET).strftime("%Y-%m-%d"),

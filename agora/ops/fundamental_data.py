@@ -34,7 +34,6 @@ import asyncio
 import logging
 import xml.etree.ElementTree as ET
 from datetime import date
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +49,7 @@ _ibkr_unavailable: bool = False
 
 # ── Synchronous IBKR worker (runs in a thread with a fresh event loop) ─────────
 
-def _fetch_earnings_sync(ticker: str, host: str, port: int) -> Optional[date]:
+def _fetch_earnings_sync(ticker: str, host: str, port: int) -> date | None:
     """
     Blocking worker — creates its own asyncio event loop so it can safely use
     ib_insync regardless of which loop the caller is running in.
@@ -68,7 +67,7 @@ def _fetch_earnings_sync(ticker: str, host: str, port: int) -> Optional[date]:
         asyncio.set_event_loop(None)
 
 
-async def _fetch_earnings_async(ticker: str, host: str, port: int) -> Optional[date]:
+async def _fetch_earnings_async(ticker: str, host: str, port: int) -> date | None:
     """Async IBKR fetcher — must run inside a fresh loop (see _fetch_earnings_sync)."""
     global _ibkr_unavailable
 
@@ -110,7 +109,7 @@ async def _fetch_earnings_async(ticker: str, host: str, port: int) -> Optional[d
                 ib.reqFundamentalDataAsync(qualified[0], "CalendarReport"),
                 timeout=_DATA_TIMEOUT,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.debug("IBKR CalendarReport timed out for %s", ticker)
             return None
 
@@ -142,7 +141,7 @@ async def _fetch_earnings_async(ticker: str, host: str, port: int) -> Optional[d
 
 # ── XML parser ─────────────────────────────────────────────────────────────────
 
-def _parse_next_earnings(xml_str: str, ticker: str) -> Optional[date]:
+def _parse_next_earnings(xml_str: str, ticker: str) -> date | None:
     """
     Parse IBKR CalendarReport XML and return the earliest future earnings date.
 
@@ -157,7 +156,10 @@ def _parse_next_earnings(xml_str: str, ticker: str) -> Optional[date]:
     candidates: list[date] = []
 
     try:
-        root = ET.fromstring(xml_str)
+        # noqa rationale: xml_str is an IBKR CalendarReport from the authenticated broker API (a
+        # trusted source, not user input). Python's stdlib ElementTree does not resolve external
+        # entities, so the XXE class does not apply here.
+        root = ET.fromstring(xml_str)  # noqa: S314
     except ET.ParseError as exc:
         logger.debug("CalendarReport XML parse error for %s: %s", ticker, exc)
         return None
@@ -203,7 +205,7 @@ async def get_next_earnings_ibkr(
     ticker: str,
     host: str = "127.0.0.1",
     port: int = 7497,
-) -> Optional[date]:
+) -> date | None:
     """
     Fetch the next scheduled earnings date for *ticker* from IBKR CalendarReport.
 
@@ -223,7 +225,7 @@ async def prefetch_earnings_dates(
     host: str = "127.0.0.1",
     port: int = 7497,
     concurrency: int = 3,  # kept for API compat; IBKR fetches are always sequential
-) -> dict[str, Optional[date]]:
+) -> dict[str, date | None]:
     """
     Batch-fetch earnings dates for multiple tickers.
 
@@ -235,7 +237,7 @@ async def prefetch_earnings_dates(
     remaining tickers get None immediately without issuing further IBKR calls.
     In that case the caller's yfinance fallback handles each ticker on demand.
     """
-    results: dict[str, Optional[date]] = {}
+    results: dict[str, date | None] = {}
     for t in tickers:
         if _ibkr_unavailable:
             results[t] = None

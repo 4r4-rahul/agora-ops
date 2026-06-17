@@ -41,8 +41,7 @@ import asyncio
 import json
 import logging
 import sqlite3
-import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -116,7 +115,7 @@ def _fmt_positions(session: Any) -> str:
             pe = session._position_mgr.get_profit_engine_state(p.position_id)
             pnl = p.unrealized_pnl or 0
             pnl_str = f"+${pnl:.0f}" if pnl >= 0 else f"-${abs(pnl):.0f}"
-            dte = (p.expiry_date - datetime.now(tz=timezone.utc).date()).days if p.expiry_date else "?"
+            dte = (p.expiry_date - datetime.now(tz=UTC).date()).days if p.expiry_date else "?"
             line = f"`{p.ticker}` {p.strategy_type or '?'} | PnL {pnl_str} | {dte} DTE"
             if pe:
                 line += f" | {pe.get('last_rule','?')} @ {pe.get('profit_pct',0)*100:.0f}%"
@@ -202,7 +201,7 @@ def _approve_lesson(db_path: str, lesson_id: int) -> str:
         with sqlite3.connect(db_path) as conn:
             conn.execute(
                 "UPDATE agent_lessons SET human_approved=1, approved_at_utc=? WHERE lesson_id=?",
-                (datetime.now(tz=timezone.utc).isoformat(), lesson_id),
+                (datetime.now(tz=UTC).isoformat(), lesson_id),
             )
         return f"✅ Lesson `{lesson_id}` approved — active next agent run."
     except Exception as exc:
@@ -214,7 +213,7 @@ def _reject_lesson(db_path: str, lesson_id: int) -> str:
         with sqlite3.connect(db_path) as conn:
             conn.execute(
                 "UPDATE agent_lessons SET human_approved=0, rejected_at_utc=? WHERE lesson_id=?",
-                (datetime.now(tz=timezone.utc).isoformat(), lesson_id),
+                (datetime.now(tz=UTC).isoformat(), lesson_id),
             )
         return f"❌ Lesson `{lesson_id}` rejected."
     except Exception as exc:
@@ -265,7 +264,7 @@ def _write_inbox(instruction: str) -> None:
     payload = {
         "instruction": instruction,
         "from": "discord",
-        "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+        "timestamp": datetime.now(tz=UTC).isoformat(),
         "read": False,
     }
     _INBOX_FILE.write_text(json.dumps(payload, indent=2))
@@ -445,7 +444,7 @@ def write_outbox(reply: str) -> None:
     _OUTBOX_FILE.parent.mkdir(parents=True, exist_ok=True)
     _OUTBOX_FILE.write_text(json.dumps({
         "reply": reply,
-        "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+        "timestamp": datetime.now(tz=UTC).isoformat(),
         "sent": False,
     }, indent=2))
 

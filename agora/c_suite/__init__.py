@@ -1,11 +1,11 @@
 from .base import ExecutiveAgent
-from .cro import CROAgent
-from .cio import CIOAgent
-from .cto import CTOAgent
-from .coo import COOAgent
 from .cfo import CFOAgent
-from .rnd import RNDAgent
+from .cio import CIOAgent
+from .coo import COOAgent
+from .cro import CROAgent
 from .ctech import CTechAgent
+from .cto import CTOAgent
+from .rnd import RNDAgent
 
 __all__ = [
     "ExecutiveAgent",

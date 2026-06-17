@@ -22,9 +22,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
-from typing import Any, Callable, Coroutine
+from datetime import date, datetime
+from typing import Any
 
 from ..core.config import AgoraSettings, get_settings
 from ..core.models import Catalyst, CatalystType
@@ -143,8 +144,8 @@ class AnalystRevisionTracker:
     async def _fetch_revisions(self, ticker: str) -> RevisionSummary | None:
         """Fetch analyst upgrades/downgrades from yfinance."""
         try:
-            import yfinance as yf
             import pandas as pd
+            import yfinance as yf
 
             tk = yf.Ticker(ticker)
             upgrades = tk.upgrades_downgrades

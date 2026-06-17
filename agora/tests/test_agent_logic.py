@@ -7,18 +7,19 @@ no LLM, no network. Bound methods (_apply_fact_gate / _apply_long_structure_filt
 are exercised by constructing the agent via __new__ (skipping the anthropic client)
 and setting only the attributes the pure path touches.
 """
-from types import SimpleNamespace
 from datetime import date, timedelta
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 
+import agora.ops.fact_grounding as fact_grounding
 from agora.agents.advocate_agent import (
     AdvocateAgent,
     AdvocateVerdict,
-    _parse_json_robust,
-    _extract_balanced_object,
     _compute_verdict,
+    _extract_balanced_object,
+    _parse_json_robust,
     _parse_verdict,
 )
 from agora.agents.strategy_selector import (
@@ -27,8 +28,6 @@ from agora.agents.strategy_selector import (
     _parse_selection,
     _summarize_chain,
 )
-import agora.ops.fact_grounding as fact_grounding
-
 
 # ── Fixtures / builders ───────────────────────────────────────────────────────
 

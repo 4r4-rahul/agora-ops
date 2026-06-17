@@ -13,7 +13,7 @@ from datetime import datetime as _dt
 import pytest
 
 import agora.scan.engine as eng
-from agora.scan.engine import ScanPriority, ScanRequest, UniverseScanEngine, _MAX_QUEUE_SIZE
+from agora.scan.engine import _MAX_QUEUE_SIZE, ScanPriority, ScanRequest, UniverseScanEngine
 
 
 def _engine(universe=None) -> UniverseScanEngine:
