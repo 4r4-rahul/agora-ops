@@ -93,19 +93,18 @@ def _bs_implied_25delta_strike(spot: float, iv_atm: float, dte_years: float,
     try:
         target_delta = 0.25 if is_call else -0.25
         lo, hi = spot * 0.50, spot * 2.00
+        # BOTH call delta (N(d1)) and put delta (N(d1)-1) are monotonically DECREASING in strike,
+        # so the same bisection step applies to each: when the mid delta is still ABOVE target the
+        # strike is too low → raise lo; otherwise lower hi. (The previous put branch inverted this
+        # and converged to the 2×spot upper bound, mis-placing the 25Δ put strike — caught by the
+        # skew-analyzer unit tests.)
         for _ in range(40):
             mid = (lo + hi) / 2.0
             d = _bs_delta(spot, mid, iv_atm, dte_years, is_call, r)
-            if is_call:
-                if d > target_delta:
-                    lo = mid
-                else:
-                    hi = mid
+            if d > target_delta:
+                lo = mid
             else:
-                if d < target_delta:
-                    lo = mid
-                else:
-                    hi = mid
+                hi = mid
         return (lo + hi) / 2.0
     except Exception:
         return 0.0
