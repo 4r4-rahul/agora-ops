@@ -60,6 +60,34 @@ logger = logging.getLogger(__name__)
 
 ET = ZoneInfo("America/New_York")
 
+
+def _chunk_for_discord(message: str, limit: int = 1900) -> list[str]:
+    """Split a report into <=limit-char chunks WITHOUT cutting a line in half (Discord rejects
+    >2000-char posts with a 400, so an unsplit report is silently lost). Packs whole lines into a
+    chunk; a single line longer than `limit` (rare) is hard-sliced as a last resort."""
+    if len(message) <= limit:
+        return [message] if message else []
+    chunks: list[str] = []
+    buf = ""
+    for line in message.split("\n"):
+        # A single over-long line can't fit any chunk — flush, then hard-slice it.
+        if len(line) > limit:
+            if buf:
+                chunks.append(buf)
+                buf = ""
+            for i in range(0, len(line), limit):
+                chunks.append(line[i:i + limit])
+            continue
+        candidate = line if not buf else buf + "\n" + line
+        if len(candidate) > limit:
+            chunks.append(buf)
+            buf = line
+        else:
+            buf = candidate
+    if buf:
+        chunks.append(buf)
+    return chunks
+
 _CEO_SYSTEM_PROMPT = """\
 You are the CEO Agent of AGORA, an autonomous options trading platform owned by Rahul.
 
@@ -1171,8 +1199,10 @@ Be direct. Flag anything that needs Rahul's attention with 🚨.
             logger.info("CEO REPORT (no Discord configured):\n%s", message)
             return
 
-        # Discord has 2000 char limit per message; split if needed
-        chunks = [message[i:i+1900] for i in range(0, len(message), 1900)]
+        # Discord rejects messages >2000 chars with a 400 (the whole report is lost). Split on
+        # line boundaries so markdown isn't cut mid-line; only hard-slice a single line that is
+        # itself longer than the limit.
+        chunks = _chunk_for_discord(message, limit=1900)
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 for chunk in chunks:

@@ -730,6 +730,14 @@ class AgoraSession:
         # concurrent double-submit (two scan paths hitting the same ticker before either
         # records an attempt / sets a cooldown). Added on entry, removed in a finally.
         self._inflight_tickers: set[str] = set()
+        # Per-ticker EVALUATION cooldown (distinct from _exec_cooldowns, which is post-fill).
+        # A routine BACKGROUND sweep re-evaluated the same ticker every cycle — the full spread
+        # stack (analyst + strategy-selector + advocate LLM calls + IBKR chain fetch) ran ~11×/
+        # session per ticker (NVDA observed) with no new signal, burning LLM budget. We record
+        # the time a ticker last entered the EXPENSIVE stage and skip a re-evaluation within the
+        # window — but ONLY for BACKGROUND priority. IMMEDIATE/URGENT/NORMAL (catalyst, price
+        # move, sweep, stale-watchlist) always bypass so real signals are never throttled.
+        self._eval_cooldowns: dict[str, datetime] = {}
         # Tickers that got Error 201 in live mode (riskless combo limit exceeded).
         # In paper mode this won't fire since we use leg-by-leg submission.
         self._error_201_blocked: set[str] = set()
@@ -2486,6 +2494,27 @@ class AgoraSession:
             return ScanPriority.NORMAL
         return ScanPriority.BACKGROUND
 
+    def _eval_cooldown_skip(self, ticker: str, scan_priority: int) -> bool:
+        """Return True if a routine (BACKGROUND) re-evaluation of `ticker` should be skipped
+        because the full eval stack ran within evaluate_ticker_cooldown_secs. Records the
+        timestamp when it decides to PROCEED. Catalyst/urgent/normal scans (priority <
+        BACKGROUND) always proceed and never set the cooldown. Pure except for the dict +
+        clock — unit-tested directly. Cooldown of 0 disables the gate."""
+        _cd_secs = int(getattr(self._settings, "evaluate_ticker_cooldown_secs", 0) or 0)
+        if _cd_secs <= 0 or scan_priority < ScanPriority.BACKGROUND:
+            return False
+        now = datetime.now(tz=timezone.utc)
+        _until = self._eval_cooldowns.get(ticker)
+        if _until and now < _until:
+            logger.debug(
+                "Skip %s: evaluated within cooldown (%ds), no new catalyst — saves LLM cost",
+                ticker, _cd_secs,
+            )
+            return True
+        # About to run the expensive pipeline — arm the cooldown.
+        self._eval_cooldowns[ticker] = now + timedelta(seconds=_cd_secs)
+        return False
+
     async def _evaluate_ticker(
         self,
         ticker: str,
@@ -2537,6 +2566,13 @@ class AgoraSession:
                         ticker, _days_to_earn, _next_earn, _blackout,
                     )
                     return
+
+            # Per-ticker evaluation cooldown — short-circuit a routine re-scan of a ticker that
+            # already ran the full (analyst + strategy + advocate) stack within the window, with no
+            # new catalyst. Cuts the ~11×/session redundant LLM spend on background sweeps. Higher-
+            # priority scans (catalyst/price-move/sweep/stale-watchlist) bypass entirely.
+            if self._eval_cooldown_skip(ticker, scan_priority):
+                return
 
             from trading_platform.services.market_data.yfinance_provider import YFinanceProvider
             from trading_platform.services.options_flow import get_gex

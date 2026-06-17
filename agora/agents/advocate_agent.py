@@ -47,6 +47,39 @@ logger = logging.getLogger(__name__)
 PROMPT_VERSION = "1.0.0"
 _MODEL = "claude-sonnet-4-6"
 
+# Forced structured output (used when MCP tools are off — the default): the verdict is the
+# validated input of this tool, so the API guarantees valid JSON. Eliminates the residual
+# parse failures AND the prompt-injection leakage the system lessons flagged (chain-of-thought
+# can't reach the decision fields when they are a schema-validated tool input).
+_ADVOCATE_VERDICT_TOOL = {
+    "name": "advocate_verdict",
+    "description": "Return the adversarial review verdict for the proposed trade.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "verdict": {"type": "string", "enum": ["PASS", "CAUTION", "BLOCK"]},
+            "verdict_confidence_pct": {"type": "integer"},
+            "verdict_reasoning_one_line": {"type": "string"},
+            "failure_modes": {
+                "type": "array",
+                "items": {"type": "object", "properties": {
+                    # Field names MUST match the deterministic verdict computer (_compute_verdict),
+                    # the IV-structure filter, the fact gate, and the journal writer.
+                    "mode_name": {"type": "string"},
+                    "mechanism": {"type": "string"},
+                    "severity": {"type": "string", "enum": ["LOW", "MEDIUM", "HIGH"]},
+                    "probability_pct": {"type": "integer"},
+                    "trigger_conditions": {"type": "array", "items": {"type": "string"}},
+                    "already_addressed_by_kill_condition": {"type": "boolean"},
+                }, "required": ["mode_name", "severity", "probability_pct"]},
+            },
+            "most_likely_loss_scenario": {"type": "string"},
+            "recommendation_if_pass": {"type": "string"},
+        },
+        "required": ["verdict", "failure_modes"],
+    },
+}
+
 # Transient API failures that should be RETRIED, not fail-closed. The advocate is the
 # single gate every entry funnels through; treating a momentary timeout / 429 / 5xx as a
 # hard BLOCK silently halts the entry engine (observed: 243 fail-closed blocks in a day,
@@ -312,39 +345,23 @@ class AdvocateAgent:
         try:
             # Retry transient API errors before the caller's fail-closed policy blocks the
             # trade — keeps the entry engine alive through momentary outages.
-            response = await _with_retry(lambda: run_with_tools(
-                client=self._client,
-                model=_MODEL,
-                system=_cached_system,
-                messages=[{"role": "user", "content": _compress(payload)}],
-                tools=_tools,
-                handlers=_handlers,
-                max_turns=3,
-                max_tokens=4000,   # headroom: model often writes prose before the JSON
-                thinking={"type": "disabled"},
-                output_config={"effort": "medium"},
-                timeout=anthropic.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0),
-            ), ticker=ticker)
-            latency_ms = int((time.monotonic() - t0) * 1000)
-            in_tok  = response.usage.input_tokens  if response.usage else 0
-            out_tok = response.usage.output_tokens if response.usage else 0
-            cost    = (in_tok * 3.0 + out_tok * 15.0) / 1_000_000  # Sonnet 4.6
-
-            text_blocks = [b for b in response.content if b.type == "text"]
-            raw_text = text_blocks[-1].text if text_blocks else "{}"
-
-            try:
-                raw_output = _parse_json_robust(raw_text)
-            except ValueError:
-                # Parse-fail REGEN: the model occasionally ends its turn with prose analysis and
-                # no JSON object (stop=end_turn, 7 cases on 2026-06-09), which fail-closes a valid
-                # trade. A fresh generation almost always emits parseable JSON — retry ONCE; only
-                # fail-close if the second attempt also can't be parsed.
-                logger.warning(
-                    "Advocate parse FAIL [%s] — regenerating | stop=%s blocks=%s text_len=%d raw=%r",
-                    ticker, getattr(response, "stop_reason", "?"),
-                    [b.type for b in response.content], len(raw_text), raw_text[:300],
-                )
+            #
+            # DEFAULT PATH (MCP tools off): FORCE structured output via the verdict tool. The API
+            # validates the JSON against the schema, so there is no free-text to parse — this
+            # eliminates the residual parse failures (the "prose, no JSON" class) that fail-closed
+            # valid trades, and an injection in the payload can't corrupt schema-validated fields.
+            if not _tools:
+                response = await _with_retry(lambda: self._client.messages.create(
+                    model=_MODEL,
+                    system=_cached_system,
+                    messages=[{"role": "user", "content": _compress(payload)}],
+                    tools=[_ADVOCATE_VERDICT_TOOL],
+                    tool_choice={"type": "tool", "name": "advocate_verdict"},
+                    max_tokens=2000,
+                    thinking={"type": "disabled"},
+                    timeout=anthropic.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0),
+                ), ticker=ticker)
+            else:
                 response = await _with_retry(lambda: run_with_tools(
                     client=self._client,
                     model=_MODEL,
@@ -353,21 +370,60 @@ class AdvocateAgent:
                     tools=_tools,
                     handlers=_handlers,
                     max_turns=3,
-                    max_tokens=4000,
+                    max_tokens=4000,   # headroom: model often writes prose before the JSON
                     thinking={"type": "disabled"},
                     output_config={"effort": "medium"},
                     timeout=anthropic.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0),
                 ), ticker=ticker)
-                _rtb = [b for b in response.content if b.type == "text"]
-                raw_text = _rtb[-1].text if _rtb else "{}"
+            latency_ms = int((time.monotonic() - t0) * 1000)
+            in_tok  = response.usage.input_tokens  if response.usage else 0
+            out_tok = response.usage.output_tokens if response.usage else 0
+            cost    = (in_tok * 3.0 + out_tok * 15.0) / 1_000_000  # Sonnet 4.6
+
+            # Forced-tool path (default, MCP off) → verdict is the validated tool input
+            # (guaranteed JSON, no parse, no regen needed).
+            _tool_blocks = [b for b in response.content if b.type == "tool_use"]
+            if _tool_blocks:
+                raw_output = dict(_tool_blocks[0].input or {})
+            else:
+                # MCP-loop path: free-text JSON that may need the parse-fail REGEN below.
+                text_blocks = [b for b in response.content if b.type == "text"]
+                raw_text = text_blocks[-1].text if text_blocks else "{}"
                 try:
                     raw_output = _parse_json_robust(raw_text)
                 except ValueError:
+                    # Parse-fail REGEN: the model occasionally ends its turn with prose analysis and
+                    # no JSON object (stop=end_turn, 7 cases on 2026-06-09), which fail-closes a valid
+                    # trade. A fresh generation almost always emits parseable JSON — retry ONCE; only
+                    # fail-close if the second attempt also can't be parsed.
                     logger.warning(
-                        "Advocate parse FAIL [%s] AFTER regen — fail-closed | raw=%r",
-                        ticker, raw_text[:600],
+                        "Advocate parse FAIL [%s] — regenerating | stop=%s blocks=%s text_len=%d raw=%r",
+                        ticker, getattr(response, "stop_reason", "?"),
+                        [b.type for b in response.content], len(raw_text), raw_text[:300],
                     )
-                    raise
+                    response = await _with_retry(lambda: run_with_tools(
+                        client=self._client,
+                        model=_MODEL,
+                        system=_cached_system,
+                        messages=[{"role": "user", "content": _compress(payload)}],
+                        tools=_tools,
+                        handlers=_handlers,
+                        max_turns=3,
+                        max_tokens=4000,
+                        thinking={"type": "disabled"},
+                        output_config={"effort": "medium"},
+                        timeout=anthropic.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0),
+                    ), ticker=ticker)
+                    _rtb = [b for b in response.content if b.type == "text"]
+                    raw_text = _rtb[-1].text if _rtb else "{}"
+                    try:
+                        raw_output = _parse_json_robust(raw_text)
+                    except ValueError:
+                        logger.warning(
+                            "Advocate parse FAIL [%s] AFTER regen — fail-closed | raw=%r",
+                            ticker, raw_text[:600],
+                        )
+                        raise
             # Enforce deterministic verdict from failure mode analysis
             _kill_conditions = [c for c in (getattr(thesis, "kill_conditions", []) or [])]
             raw_output["verdict"] = _compute_verdict(

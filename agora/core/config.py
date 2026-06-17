@@ -127,6 +127,7 @@ class AgoraSettings(BaseSettings):
     target_dte_entry_min: int = Field(default=30, description="Minimum acceptable DTE at entry")
     target_dte_close: int = Field(default=21, description="Close position at this DTE")
     earnings_blackout_days: int = Field(default=3, description="Block new vol-premium entries within N days of earnings")
+    evaluate_ticker_cooldown_secs: int = Field(default=900, ge=0, description="Skip re-running the full spread eval stack (analyst+strategy+advocate LLM) on the same ticker within N secs for BACKGROUND scans only; catalyst/urgent/normal scans bypass. 0 disables. Cuts the ~11x/session redundant LLM spend.")
     profit_target_pct: float = Field(default=0.50, description="Close at 50% of max profit for 45-DTE vol-premium trades (tastytrade-validated for 30-60 DTE)")
     profit_target_pct_short_dte: float = Field(default=0.75, description="Close at 75% of max profit for short-DTE trades (sector_momentum, event plays ≤14 DTE) — backtested: 75% saves $1,230 vs 50% over 2.4yr")
     short_delta_target: float = Field(default=0.20, description="20-delta short strike for credit spreads")
