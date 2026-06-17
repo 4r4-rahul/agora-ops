@@ -928,6 +928,15 @@ class ScheduledAttributor:
             from agora.agents.lessons_generator import LessonsGenerator
             gen = LessonsGenerator(db_path=self._db_path)
             await gen.generate_all()
+            # Unblock the loop: auto-approve the freshly-generated lessons that clear the strict
+            # evidence bar, so high-confidence learnings flow into agent context instead of
+            # stranding behind manual approval (bounded §17 relaxation — see lessons_store).
+            try:
+                from agora.ops.lessons_store import auto_approve_lessons
+                from agora.core.config import get_settings
+                auto_approve_lessons(self._db_path, get_settings())
+            except Exception as _aex:
+                logger.debug("auto_approve_lessons skipped: %s", _aex)
         except Exception as exc:
             logger.warning("LessonsGenerator skipped: %s", exc)
 

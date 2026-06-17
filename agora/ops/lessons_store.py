@@ -28,6 +28,43 @@ logger = logging.getLogger(__name__)
 _DEFAULT_MAX = 5   # cap to keep prompt token cost manageable
 
 
+def auto_approve_lessons(db_path: str, settings: object | None = None) -> int:
+    """Auto-approve PENDING lessons that clear strict evidence criteria — a bounded relaxation of
+    Sacred Rule §17 so the loop ACTS on what it already learned instead of stranding it (the
+    credit-spread bleed lesson sat pending for weeks). Touches ONLY pending (human_approved IS NULL)
+    active lessons; never rejected ones. Tags approved_by='auto' for audit. Returns count approved.
+
+    Criteria: confidence >= min_confidence AND (times_reinforced >= min_reinforced OR
+    sample_size >= min_sample) — a high-confidence one-shot with no sample still needs a human."""
+    if settings is not None and not getattr(settings, "lesson_auto_approve_enabled", False):
+        return 0
+    g = (lambda k, d: getattr(settings, k, d) if settings is not None else d)
+    min_conf = float(g("lesson_auto_approve_min_confidence", 0.85))
+    min_reinf = int(g("lesson_auto_approve_min_reinforced", 2))
+    min_samp = int(g("lesson_auto_approve_min_sample", 25))
+    try:
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        with sqlite3.connect(db_path, timeout=10) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            cur = conn.execute(
+                """UPDATE agent_lessons
+                   SET human_approved = 1, approved_at_utc = ?, approved_by = 'auto'
+                   WHERE human_approved IS NULL AND active = 1
+                     AND confidence_in_lesson >= ?
+                     AND (times_reinforced >= ? OR COALESCE(sample_size, 0) >= ?)""",
+                (now, min_conf, min_reinf, min_samp),
+            )
+            n = cur.rowcount
+        if n:
+            logger.info("auto_approve_lessons: approved %d high-evidence lessons (conf>=%.2f, "
+                        "reinforced>=%d OR sample>=%d)", n, min_conf, min_reinf, min_samp)
+        return n
+    except Exception as exc:
+        logger.debug("auto_approve_lessons error: %s", exc)
+        return 0
+
+
 def load_approved_lessons(
     db_path: str,
     agent_name: str,

@@ -438,6 +438,26 @@ class AgoraSettings(BaseSettings):
         default=10,
         description="Hard cap on contracts per trade regardless of size_multiplier",
     )
+    # ── Learning-loop auto-approval (bounded §17 relaxation) ────────────────────
+    lesson_auto_approve_enabled: bool = Field(
+        default=True,
+        description="Auto-approve PENDING lessons that clear strict evidence criteria, so the loop "
+                    "ACTS on what it already learned instead of stranding it behind manual approval "
+                    "(451 lessons pending, 10 ever approved — incl. the credit-spread bleed lesson "
+                    "the loop found weeks before we fixed it). Bounded relaxation of Sacred Rule §17: "
+                    "lessons are ADVISORY prompt context (the agent still decides), only PENDING "
+                    "lessons are touched (never rejected), and each is tagged approved_by='auto' for "
+                    "audit. Set False to require manual approval for everything.")
+    lesson_auto_approve_min_confidence: float = Field(
+        default=0.85, ge=0.5, le=1.0,
+        description="Min confidence_in_lesson to auto-approve.")
+    lesson_auto_approve_min_reinforced: int = Field(
+        default=2, ge=1, le=10,
+        description="Auto-approve if reinforced >= this (seen/confirmed more than once) ...")
+    lesson_auto_approve_min_sample: int = Field(
+        default=25, ge=5, le=200,
+        description="... OR if sample_size >= this (a real evidence base). One of the two suffices; "
+                    "a high-confidence one-shot with no sample still needs manual review.")
     csuite_close_min_hold_days: int = Field(
         default=1, ge=0, le=10,
         description="Min hold (days) before the CTO's DISCRETIONARY forced-closes (21-DTE "
