@@ -241,6 +241,9 @@ class OpenPosition(BaseModel):
     conviction_at_entry: float = 0.0
     regime_at_entry: str = ""          # macro_stance at time of entry
 
+    # Precise broker (TWS) fill timestamps — exact execution time, to the second (NOT just a date).
+    entry_ts_utc: str = ""             # f.execution.time of the entry fill; exit set on close.
+
     # Pre-earnings tracking — set for positions opened T-7 to T-1 before earnings
     earnings_date: date | None = None  # the actual earnings date
     is_pre_earnings: bool = False      # True → close T-1 to avoid IV crush

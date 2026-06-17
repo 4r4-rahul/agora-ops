@@ -1146,11 +1146,17 @@ class PositionManager:
             for l in position.legs
         ])
         earnings_date = getattr(position, "earnings_date", None)
+        # Explicit column list (robust to schema additions — a positional VALUES(...) breaks the
+        # moment a migration appends a column, as m008 did for the fill timestamps).
         self._db.execute("""
-            INSERT OR REPLACE INTO positions VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?
-            )
+            INSERT OR REPLACE INTO positions (
+                position_id, ticker, strategy, pillar, status, legs_json, contracts, entry_price,
+                current_price, entry_date, expiry_date, target_close_date, max_loss_dollars,
+                max_gain_dollars, unrealized_pnl, realized_pnl, rolled_count, last_reviewed,
+                ibkr_order_ids, notes, direction, conviction_at_entry, regime_at_entry,
+                earnings_date, is_pre_earnings, close_date, close_price, close_source,
+                entry_ts_utc, exit_ts_utc
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             position.position_id,
             position.ticker,
@@ -1179,6 +1185,8 @@ class PositionManager:
             1 if getattr(position, "is_pre_earnings", False) else 0,
             # close columns — NULL on open
             None, None, "",
+            # precise TWS fill timestamps
+            getattr(position, "entry_ts_utc", "") or None, None,
         ))
         self._db.commit()
         # Register with profit engine so entry-time Greeks are captured
@@ -1295,6 +1303,7 @@ class PositionManager:
         realized_pnl: float = 0.0,
         close_price: float = 0.0,
         source: str = "tws_reconcile",
+        exit_ts_utc: str | None = None,
     ) -> bool:
         """
         Mark a position closed from an external source (TWS fill detector, startup sync).
@@ -1303,7 +1312,9 @@ class PositionManager:
         """
         cursor = self._db.execute(
             "UPDATE positions SET status='closed', realized_pnl=?, close_price=?, "
-            "close_date=?, close_source=?, last_reviewed=? "
+            "close_date=?, close_source=?, last_reviewed=?, "
+            # exact TWS exit-fill time; COALESCE keeps any prior value if this caller has none
+            "exit_ts_utc=COALESCE(?, exit_ts_utc) "
             "WHERE position_id=? AND status IN ('open','tested','rolled')",
             (
                 round(realized_pnl, 2),
@@ -1311,6 +1322,7 @@ class PositionManager:
                 date.today().isoformat(),
                 source,
                 datetime.now(tz=timezone.utc).isoformat(),
+                (exit_ts_utc or None),
                 position_id,
             ),
         )

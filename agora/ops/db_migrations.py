@@ -23,6 +23,7 @@ def run_all(db_path: str) -> None:
         _m005_signal_stats,
         _m006_add_long_options_lesson,
         _m007_long_journal_itm_markers,
+        _m008_position_fill_timestamps,
     ]:
         try:
             fn(db_path)
@@ -274,3 +275,29 @@ def _m007_long_journal_itm_markers(db_path: str) -> None:
                 "CREATE INDEX IF NOT EXISTS ix_long_is_itm ON long_journal(is_itm, decided_at_utc)"
             )
             logger.info("m007 applied: long_journal +%s", "+".join(added))
+
+
+def _m008_position_fill_timestamps(db_path: str) -> None:
+    """Add precise broker (TWS) fill timestamps for entry + exit.
+
+    positions stored only entry_date/close_date (DATE granularity) — we lost the exact time of
+    day. The order fills already carry f.execution.time (the TWS execution timestamp); these two
+    columns persist it so the DB matches TWS to the second. Backward-compatible (NULL for legacy
+    rows). Idempotent."""
+    with sqlite3.connect(db_path, timeout=15) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='positions'"
+        ).fetchone()
+        if row is None:
+            return
+        existing = {r[1] for r in conn.execute("PRAGMA table_info(positions)").fetchall()}
+        added = []
+        if "entry_ts_utc" not in existing:
+            conn.execute("ALTER TABLE positions ADD COLUMN entry_ts_utc TEXT")
+            added.append("entry_ts_utc")
+        if "exit_ts_utc" not in existing:
+            conn.execute("ALTER TABLE positions ADD COLUMN exit_ts_utc TEXT")
+            added.append("exit_ts_utc")
+        if added:
+            logger.info("m008 applied: positions +%s (precise TWS fill timestamps)", "+".join(added))

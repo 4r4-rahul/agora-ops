@@ -1832,6 +1832,7 @@ class AgoraSession:
                                 spot=spot,
                                 fill_price=fill_price,
                                 net_entry_signed=order.get("net_entry_signed"),
+                                entry_ts_utc=(fills[-1].get("time") if fills else "") or "",
                                 target_close_date_override=time_stop_date,
                                 extra_metadata={
                                     "profit_target_pct": decision.profit_target_pct,
@@ -4200,6 +4201,7 @@ class AgoraSession:
                 spot=spot,
                 fill_price=fill_price,
                 net_entry_signed=order.get("net_entry_signed"),
+                entry_ts_utc=(fills[-1].get("time") if fills else "") or "",
             )
             _complete_chain(
                 str(self._settings.db_path), chain_id, "filled",
@@ -4329,6 +4331,7 @@ class AgoraSession:
         net_entry_signed: float | None = None,
         target_close_date_override: "date | None" = None,
         extra_metadata: dict | None = None,
+        entry_ts_utc: str = "",
     ) -> str:
         # extra_metadata (e.g. long-options profit_target_pct/signal_quality/conviction) is
         # accepted so callers don't crash AFTER a fill — which previously left the position
@@ -4385,6 +4388,7 @@ class AgoraSession:
             regime_at_entry=regime,
             earnings_date=earnings_date,
             is_pre_earnings=is_pre_earnings,
+            entry_ts_utc=entry_ts_utc or "",
         )
         self._position_mgr.add_position(pos)
 
@@ -4703,6 +4707,7 @@ class AgoraSession:
                         realized_pnl=realized_pnl,
                         close_price=close_price,
                         source=f"session:{reason[:40]}",
+                        exit_ts_utc=(fills[-1].get("time") if fills else "") or "",
                     )
                     self._compliance.record_close(
                         ticker=position.ticker,

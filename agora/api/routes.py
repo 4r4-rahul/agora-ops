@@ -1388,6 +1388,66 @@ async def get_edge() -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+@router.get("/trades")
+async def get_trades(limit: int = 100) -> JSONResponse:
+    """All trades with their EXACT TWS fill timestamps (entry + exit), to the second — sourced
+    from f.execution.time so the DB matches TWS by construction. Shows precise hold duration and a
+    reconciliation summary (how many trades carry the precise broker timestamp vs date-only legacy)."""
+    session = get_session()
+    if session is None:
+        return JSONResponse({"error": "session not ready"}, status_code=503)
+    try:
+        import sqlite3
+        from datetime import datetime
+        conn = sqlite3.connect(str(session._settings.db_path), timeout=10)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """SELECT position_id, ticker, strategy, status, contracts, entry_price, close_price,
+                      realized_pnl, entry_date, close_date, entry_ts_utc, exit_ts_utc, close_source
+               FROM positions ORDER BY rowid DESC LIMIT ?""", (limit,)).fetchall()
+        conn.close()
+
+        def _hold_secs(e, x):
+            try:
+                return round((datetime.fromisoformat(x) - datetime.fromisoformat(e)).total_seconds(), 1)
+            except Exception:
+                return None
+
+        trades, with_e, with_x = [], 0, 0
+        for r in rows:
+            d = dict(r)
+            e_ts, x_ts = d.get("entry_ts_utc"), d.get("exit_ts_utc")
+            if e_ts:
+                with_e += 1
+            if x_ts:
+                with_x += 1
+            trades.append({
+                "ticker": d["ticker"], "strategy": d["strategy"], "status": d["status"],
+                "contracts": d["contracts"], "realized_pnl": d["realized_pnl"],
+                "entry_ts_utc": e_ts, "exit_ts_utc": x_ts,
+                "entry_date": d["entry_date"], "close_date": d["close_date"],
+                "hold_seconds": _hold_secs(e_ts, x_ts) if (e_ts and x_ts) else None,
+                "close_source": d["close_source"],
+                "precise": bool(e_ts) and (d["status"] != "closed" or bool(x_ts)),
+            })
+        n = len(trades)
+        closed = sum(1 for t in trades if t["status"] == "closed")
+        return JSONResponse({
+            "trades": trades,
+            "reconciliation": {
+                "total": n, "closed": closed,
+                "with_precise_entry_ts": with_e, "with_precise_exit_ts": with_x,
+                "entry_coverage_pct": round(100 * with_e / max(n, 1), 1),
+                "exit_coverage_pct": round(100 * with_x / max(closed, 1), 1),
+                "note": ("Timestamps are the exact TWS execution time (f.execution.time) — DB matches "
+                         "TWS to the second. Legacy rows (pre-2026-06-17) carry date only."),
+            },
+        })
+    except Exception as exc:
+        logger.error("get_trades error: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 @router.post("/health/fill-canary")
 async def run_fill_canary_endpoint() -> JSONResponse:
     """Broker fill-engine canary: place + flatten a 1-lot maximally-marketable SPY ATM call and
