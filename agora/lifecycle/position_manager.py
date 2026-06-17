@@ -600,14 +600,35 @@ class PositionManager:
         # and loss breaches the hard floor.
         hard_stop = -abs(position.entry_price * 100 * position.contracts * self._settings.stop_loss_multiplier)
         if position.unrealized_pnl <= hard_stop:
-            rolled = await self._attempt_roll(position)
-            if not rolled:
-                self._profit_engine.clear_position(position.position_id)
-                await self._close_position(
-                    position,
-                    f"Hard stop: 2× entry hit (unrealized=${position.unrealized_pnl:.0f} ≤ ${hard_stop:.0f})",
-                )
-            return
+            # Credit-spread stop grace (THE expectancy lever): a credit spread's day-1 unrealized
+            # P&L is dominated by bid-ask/natural MARK NOISE, not real loss, so the 2×-credit floor
+            # routinely trips on day 1 and kills the position before theta works — the cause of the
+            # 6% credit-spread win rate (vs ~70% norm; 16/18 closed at 1.0d). Credit spreads are
+            # theta trades AND defined-risk, so within the grace window we suppress the 2×-credit
+            # stop UNLESS the loss is a genuine blowout (near max_loss — the only real risk).
+            _is_credit = (position.entry_price or 0) < 0
+            _grace = int(getattr(self._settings, "spread_stop_min_hold_days", 0))
+            try:
+                _held = (date.today() - position.entry_date).days
+            except Exception:
+                _held = 99
+            _ml = abs(getattr(position, "max_loss_dollars", 0.0) or 0.0)
+            _blowout_frac = float(getattr(self._settings, "spread_stop_blowout_max_loss_frac", 0.85))
+            _genuine_blowout = _ml > 0 and position.unrealized_pnl <= -_blowout_frac * _ml
+            if _is_credit and _held < _grace and not _genuine_blowout:
+                logger.info(
+                    "Credit-spread stop GRACE [%s]: day %d < %d, unrealized=$%.0f not near max_loss "
+                    "$%.0f — holding for theta (defined risk capped)",
+                    position.ticker, _held, _grace, position.unrealized_pnl, _ml)
+            else:
+                rolled = await self._attempt_roll(position)
+                if not rolled:
+                    self._profit_engine.clear_position(position.position_id)
+                    await self._close_position(
+                        position,
+                        f"Hard stop: 2× entry hit (unrealized=${position.unrealized_pnl:.0f} ≤ ${hard_stop:.0f})",
+                    )
+                return
 
         # ── Stale-quote safety backstop ──────────────────────────────
         # The no-data HOLD guard freezes a position's mark when quotes go missing, so a blowout
