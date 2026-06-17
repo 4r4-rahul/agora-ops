@@ -102,6 +102,24 @@ _BETA_MAP: dict[str, float] = {
 }
 
 
+# ── Signal-attribution helper ─────────────────────────────────────────────────
+_BULL_FIRE = ("bullish", "outperform", "positive", "surge")
+_BEAR_FIRE = ("bearish", "underperform", "negative")
+
+
+def _signal_fired_in_dir(tag: Any, direction: str) -> bool:
+    """True only if this signal genuinely FIRED in the trade's direction — so signal_stats
+    differentiates signals instead of crediting all six identically. A stack tag like
+    'bullish+1(sweep)' fired; 'neutral(RSI=48)' / 'none' / 'normal' did not; a counter tag
+    ('bearish' on a bullish trade) fired AGAINST and is not credited as that trade's win/loss."""
+    t = str(tag).lower()
+    if any(k in t for k in ("neutral", "none", "normal")):
+        return False
+    if direction == "bullish":
+        return any(k in t for k in _BULL_FIRE) and not any(k in t for k in _BEAR_FIRE)
+    return any(k in t for k in _BEAR_FIRE) and "bullish" not in t and "outperform" not in t
+
+
 # ── Output ────────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -1622,7 +1640,14 @@ class LongOptionsAgent:
             with sqlite3.connect(db_path, timeout=10) as conn:
                 conn.execute("PRAGMA journal_mode=WAL")
 
-                for signal_name in stack:
+                # Credit ONLY the signals that actually FIRED in the trade's direction. The stack
+                # carries ALL signals every trade — including neutral/none/normal ones that
+                # contributed nothing — and the old code credited every key, so all six signals
+                # ended up byte-for-byte identical (n=21 8W/13L) and the calibration loop could
+                # never tell a real edge from noise. Skip neutral signals and counter-signals.
+                for signal_name, _tag in stack.items():
+                    if not _signal_fired_in_dir(_tag, direction):
+                        continue
                     # Upsert into signal_stats
                     conn.execute("""
                         INSERT INTO signal_stats (signal_name, direction, total_trades, wins, losses,
