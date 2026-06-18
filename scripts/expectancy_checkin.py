@@ -25,6 +25,28 @@ def _fmt_money(v):
     return "—" if v is None else (f"+${v:.0f}" if v >= 0 else f"-${abs(v):.0f}")
 
 
+def _credit_spread_stats(db_path: str, since: str = "2026-06-18") -> dict:
+    """W1/W1b/W1c tracking: did credit spreads actually start trading, and are they winning?
+    Counts bull_put/bear_call entered since the W1 change. Never raises."""
+    import sqlite3
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        creds = ("bull_put_spread", "bear_call_spread")
+        ph = ",".join("?" * len(creds))
+        rows = conn.execute(
+            f"SELECT realized_pnl, close_date FROM positions "
+            f"WHERE strategy IN ({ph}) AND entry_date >= ?", (*creds, since)).fetchall()
+        conn.close()
+        closed = [r for r in rows if (r["close_date"] or "") != ""]
+        wins = sum(1 for r in closed if (r["realized_pnl"] or 0) > 0)
+        return {"entered": len(rows), "open": len(rows) - len(closed),
+                "closed": len(closed),
+                "win_rate": (wins / len(closed)) if closed else None}
+    except Exception:
+        return {"entered": 0, "open": 0, "closed": 0, "win_rate": None}
+
+
 def build_snapshot() -> tuple[dict, str]:
     """Returns (snapshot_dict, human_summary). Never raises."""
     try:
@@ -72,6 +94,7 @@ def build_snapshot() -> tuple[dict, str]:
             "blocked_cells": list(cells.get("blocked", {}).keys()),
             "exit_regret": regret.get("by_exit_reason", {}),
             "regret_evaluated": regret.get("total_evaluated", 0),
+            "credit_spreads": _credit_spread_stats(db),
         }
 
         wr = f"{cur.get('win_rate', 0) * 100:.0f}%" if cur.get("win_rate") is not None else "—"
@@ -91,6 +114,13 @@ def build_snapshot() -> tuple[dict, str]:
                          + ", ".join(f"{r} {d['early_exit_rate']:.0%} (n={d['n']})" for r, d in worst))
         else:
             lines.append("_Exit-regret: no closed-trade counterfactuals scored yet — accumulating._")
+        cs = snap["credit_spreads"]
+        if cs["entered"]:
+            wr = f"{cs['win_rate'] * 100:.0f}%" if cs["win_rate"] is not None else "—"
+            lines.append(f"📐 Credit spreads (W1, since 06-18): {cs['entered']} entered · "
+                         f"{cs['open']} open · {cs['closed']} closed · win {wr}")
+        else:
+            lines.append("_📐 Credit spreads (W1): none traded yet — cr/w still clustering at the 0.30 gate._")
         return snap, "\n".join(lines)
     except Exception as exc:  # pragma: no cover - defensive
         return {"error": str(exc)}, f"⚠️ expectancy check-in failed: {exc}"
