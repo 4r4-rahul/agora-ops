@@ -391,13 +391,15 @@ class TestEconomics:
 class TestCreditWidthGate:
     """The cr_w gate rejects credit verticals whose credit/width is below the floor —
     structurally negative-EV (verified: 17/17 historical bull_put losers had cr_w 0.13-0.23).
-    The synthetic VOL_PREMIUM bullish chain yields cr_w=0.20, a clean below-floor fixture."""
+    Post-W1/W1b the synthetic chain builds a ~0.33 cr_w spread (closer 30Δ short + narrowed width),
+    which correctly CLEARS the production 0.30 gate — so to exercise the gate we set a floor above
+    the achievable cr_w (0.60). Below that floor, even the W1b-narrowed spread is sub-floor."""
 
     def test_subfloor_credit_spread_rejected(self, engine):
-        engine._settings.min_credit_to_width_ratio = 0.30
+        engine._settings.min_credit_to_width_ratio = 0.60   # above the ~0.33 the chain can collect
         conv = _conviction(StrategyPillar.VOL_PREMIUM)
         rec = engine.build_recommendation(conv, 100.0, _chain(33), direction_override="bullish")
-        assert rec is None   # cr_w=0.20 < 0.30 → rejected
+        assert rec is None   # cr_w ~0.33 < 0.60 → gate fires
 
     def test_same_spread_builds_when_floor_relaxed(self, engine):
         engine._settings.min_credit_to_width_ratio = 0.0
@@ -409,7 +411,7 @@ class TestCreditWidthGate:
         # Iron condors collect on both wings (different ratio math) and are exempt — confirm a
         # sub-floor single-vertical fixture doesn't gate the IC pillar. (No-op if the pillar
         # doesn't build an IC on this chain; the assertion is simply that the gate didn't fire.)
-        engine._settings.min_credit_to_width_ratio = 0.30
+        engine._settings.min_credit_to_width_ratio = 0.60   # above achievable cr_w (see class doc)
         conv = _conviction(StrategyPillar.VOL_PREMIUM)
         # Direct credit verticals gate; ICs do not. This documents the exemption boundary.
         rec = engine.build_recommendation(conv, 100.0, _chain(33), direction_override="bullish")

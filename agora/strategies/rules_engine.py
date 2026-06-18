@@ -504,6 +504,58 @@ class StrategyRulesEngine:
             self._make_leg(puts, short_strike, "put", "sell", expiry, spot),
         ]
 
+    def _credit_spread_long_strike(self, chain: Any, short_strike: float | None,
+                                   opt_type: str, direction: int) -> float | None:
+        """W1b: choose the long strike for a CREDIT vertical so credit/width clears the EV gate.
+
+        credit/width FALLS as the spread widens (the far leg buys back proportionally less cheap
+        premium), so a 2-strike spread that lands at 0.22-0.29 cr/w (just under the 0.30 gate) is
+        rescued by narrowing it — same ~30Δ short, same win%, but a fatter cr/w. Search 1..2 strikes
+        out (capped at the original 2-strike width so we only ever NARROW to rescue, never widen and
+        add risk) and take the WIDEST whose cr/w clears the floor (most premium that's still
+        positive-EV); if neither clears, return the narrowest (highest cr/w — best shot, the gate
+        then decides). Falls back to the plain 2-strike picker on any data issue (fail-safe)."""
+        try:
+            if short_strike is None or chain is None or getattr(chain, "empty", False):
+                return self._spread_width_strike(chain, short_strike, opt_type, direction)
+            floor = float(getattr(self._settings, "min_credit_to_width_ratio", 0.30))
+
+            def _mid(k: float) -> float | None:
+                row = chain[chain["strike"] == k]
+                if row.empty:
+                    return None
+                b = float(row.iloc[0].get("bid", 0) or 0)
+                a = float(row.iloc[0].get("ask", 0) or 0)
+                return (b + a) / 2 if (b > 0 or a > 0) else None
+
+            short_mid = _mid(short_strike)
+            if short_mid is None:
+                return self._spread_width_strike(chain, short_strike, opt_type, direction)
+            strikes = sorted(chain["strike"].unique().tolist())
+            idx = min(range(len(strikes)), key=lambda i: abs(strikes[i] - short_strike))
+            widest_pass: float | None = None
+            narrowest: float | None = None
+            for n in (1, 2):
+                ti = idx + direction * n
+                if not (0 <= ti < len(strikes)):
+                    continue
+                lk = float(strikes[ti])
+                lm = _mid(lk)
+                if lm is None:
+                    continue
+                width = abs(short_strike - lk)
+                credit = short_mid - lm
+                if width <= 0 or credit <= 0:
+                    continue
+                if narrowest is None:
+                    narrowest = lk
+                if (credit / width) >= floor:
+                    widest_pass = lk   # cr/w decreases with n, so last pass = widest pass
+            return (widest_pass or narrowest
+                    or self._spread_width_strike(chain, short_strike, opt_type, direction))
+        except Exception:
+            return self._spread_width_strike(chain, short_strike, opt_type, direction)
+
     def _bull_put_spread(self, puts: Any, spot: float, expiry: date,
                          short_delta: float | None = None) -> list[SpreadLeg]:
         """Sell OTM put (20-delta), buy further OTM put for defined risk."""
@@ -513,7 +565,7 @@ class StrategyRulesEngine:
         short_strike = self._best_credit_per_delta_short(
             otm_puts, sd, "put", wing_direction=-1, spot=spot, expiry=expiry
         )
-        long_strike  = self._spread_width_strike(otm_puts, short_strike, "put", -1)
+        long_strike  = self._credit_spread_long_strike(otm_puts, short_strike, "put", -1)
         if not short_strike or not long_strike or short_strike <= long_strike:
             return []
         return [
@@ -530,7 +582,7 @@ class StrategyRulesEngine:
         short_strike = self._best_credit_per_delta_short(
             otm_calls, sd, "call", wing_direction=+1, spot=spot, expiry=expiry
         )
-        long_strike  = self._spread_width_strike(otm_calls, short_strike, "call", +1)
+        long_strike  = self._credit_spread_long_strike(otm_calls, short_strike, "call", +1)
         if not short_strike or not long_strike or short_strike >= long_strike:
             return []
         return [
