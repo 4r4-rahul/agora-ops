@@ -1052,9 +1052,13 @@ class PositionManager:
                 _row = None
             _real_pnl = float(_row[0]) if _row and _row[0] is not None else round(position.unrealized_pnl, 2)
             _real_cp  = float(_row[1]) if _row and _row[1] is not None else round(position.current_price, 4)
+            _now_ts = datetime.now(tz=UTC).isoformat()
             self._db.execute(
-                "UPDATE positions SET close_source=?, last_reviewed=? WHERE position_id=?",
-                (source, datetime.now(tz=UTC).isoformat(), position.position_id),
+                # keep the precise broker exit-fill time if mark_position_closed already set it,
+                # else stamp now() — exit_ts_utc is never left null on a real close.
+                "UPDATE positions SET close_source=?, last_reviewed=?, "
+                "exit_ts_utc=COALESCE(exit_ts_utc, ?) WHERE position_id=?",
+                (source, _now_ts, _now_ts, position.position_id),
             )
             self._db.commit()
             logger.info("CLOSED (real fill): %s | reason: %s | realized=$%.0f close=%.2f",
@@ -1067,16 +1071,18 @@ class PositionManager:
 
         # No real-close callback wired (pure paper SIMULATION) — book from the in-memory mark.
         # This is the only path where the unrealized mark is the realized result, by design.
+        _sim_now = datetime.now(tz=UTC).isoformat()
         self._db.execute(
             "UPDATE positions SET status=?, close_date=?, close_price=?, close_source=?, "
-            "realized_pnl=?, last_reviewed=? WHERE position_id=?",
+            "realized_pnl=?, last_reviewed=?, exit_ts_utc=? WHERE position_id=?",
             (
                 PositionStatus.CLOSED.value,
                 date.today().isoformat(),
                 round(position.current_price, 4),
                 source,
                 round(position.unrealized_pnl, 2),
-                datetime.now(tz=UTC).isoformat(),
+                _sim_now,
+                _sim_now,   # simulation close: record moment is the exit time (seconds precision)
                 position.position_id,
             ),
         )
@@ -1205,8 +1211,9 @@ class PositionManager:
             1 if getattr(position, "is_pre_earnings", False) else 0,
             # close columns — NULL on open
             None, None, "",
-            # precise TWS fill timestamps
-            getattr(position, "entry_ts_utc", "") or None, None,
+            # precise TWS fill timestamps — prefer the broker fill time; fall back to the record
+            # moment (full UTC, seconds) so entry_ts_utc is NEVER null going forward. exit NULL on open.
+            getattr(position, "entry_ts_utc", "") or datetime.now(tz=UTC).isoformat(), None,
         ))
         self._db.commit()
         # Register with profit engine so entry-time Greeks are captured
@@ -1333,8 +1340,9 @@ class PositionManager:
         cursor = self._db.execute(
             "UPDATE positions SET status='closed', realized_pnl=?, close_price=?, "
             "close_date=?, close_source=?, last_reviewed=?, "
-            # exact TWS exit-fill time; COALESCE keeps any prior value if this caller has none
-            "exit_ts_utc=COALESCE(?, exit_ts_utc) "
+            # exact TWS exit-fill time when supplied; else keep any prior value; else stamp now() —
+            # never leave exit_ts_utc null on a close.
+            "exit_ts_utc=COALESCE(?, exit_ts_utc, ?) "
             "WHERE position_id=? AND status IN ('open','tested','rolled')",
             (
                 round(realized_pnl, 2),
@@ -1343,6 +1351,7 @@ class PositionManager:
                 source,
                 datetime.now(tz=UTC).isoformat(),
                 (exit_ts_utc or None),
+                datetime.now(tz=UTC).isoformat(),
                 position_id,
             ),
         )

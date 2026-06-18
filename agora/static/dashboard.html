@@ -1716,7 +1716,7 @@ async function fetchPositions() {
         <td>${pos.contracts || 1}</td>
         <td>${entryLabel}</td>
         <td class="${pnlCls}">${pnlStr}${srcBadge}</td>
-        <td style="font-size:10px;color:var(--text2)" title="Opened ${entryD}">${entryD}${heldDays!=null?` <span style="color:var(--text3,#667)">(${heldDays}d held)</span>`:''}</td>
+        <td style="font-size:10px;color:var(--text2)" title="Opened ${_fmtTs(pos.entry_ts_utc, entryD)} (local)">${_fmtTs(pos.entry_ts_utc, entryD)}${heldDays!=null?` <span style="color:var(--text3,#667)">(${heldDays}d)</span>`:''}</td>
         <td style="color:${dteCol}">${dte}d</td>
       </tr>
       <tr class="pos-detail-row" id="detail-${pid}">
@@ -2152,6 +2152,15 @@ function _renderPerfPeriods() {
   }).join('');
 }
 function _exp$(v){ return (v===null||v===undefined) ? '—' : (v>=0?'+$':'-$')+Math.abs(v).toFixed(0); }
+// Format a UTC ISO timestamp → local date + time WITH SECONDS (e.g. "2026-06-18 14:23:07").
+// Falls back to the given date string when no precise timestamp exists (older trades).
+function _fmtTs(iso, dateFallback){
+  if(!iso) return dateFallback ? dateFallback.slice(0,10) : '—';
+  const d = new Date(iso);
+  if(isNaN(d.getTime())) return dateFallback ? dateFallback.slice(0,10) : '—';
+  const p = n => String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
 async function fetchExpectancy() {
   try {
     const r = await fetch('/agora/expectancy');
@@ -3008,8 +3017,8 @@ async function fetchToday() {
           const strat   = (r.strategy || '').replace(/_/g,' ');
           const src     = _sourceLabel(r.close_source || '');
           const dir     = `<span style="color:${r.direction==='bullish'?'var(--green)':'var(--red)'}">${_dirArrow(r.direction)}</span>`;
-          const oD      = (r.entry_date||'').slice(0,10) || '—';
-          const cD      = (r.close_date||'').slice(0,10) || '—';
+          const oD      = _fmtTs(r.entry_ts_utc, r.entry_date);
+          const cD      = _fmtTs(r.exit_ts_utc,  r.close_date);
           const held    = (r.entry_date && r.close_date)
             ? Math.max(0, Math.round((new Date(r.close_date) - new Date(r.entry_date)) / 86_400_000)) : null;
           return `<tr>

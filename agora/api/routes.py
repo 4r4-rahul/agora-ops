@@ -165,6 +165,20 @@ async def get_positions() -> JSONResponse:
         and bool(ibkr_by_symbol)
     )
 
+    # Batch-fetch precise entry timestamps (seconds-granularity UTC) keyed by position_id — the
+    # OpenPosition object doesn't carry them, so read straight from the DB once for all open rows.
+    _entry_ts: dict[str, str] = {}
+    try:
+        import sqlite3 as _sql3
+        _c = _sql3.connect(str(session._settings.db_path))
+        _c.row_factory = _sql3.Row
+        for _r in _c.execute("SELECT position_id, entry_ts_utc FROM positions WHERE status NOT IN ('closed')"):
+            if _r["entry_ts_utc"]:
+                _entry_ts[_r["position_id"]] = _r["entry_ts_utc"]
+        _c.close()
+    except Exception:
+        pass
+
     data = []
     for pos in positions:
         legs = [
@@ -198,6 +212,7 @@ async def get_positions() -> JSONResponse:
             "contracts":           pos.contracts,
             "entry_price":         pos.entry_price,
             "entry_date":          pos.entry_date.isoformat(),
+            "entry_ts_utc":        _entry_ts.get(pos.position_id),
             "expiry_date":         pos.expiry_date.isoformat(),
             "target_close_date":   pos.target_close_date.isoformat(),
             "max_loss_dollars":    pos.max_loss_dollars,
@@ -1124,10 +1139,10 @@ async def get_today_summary() -> JSONResponse:
         rows = conn.execute(
             """SELECT ticker, strategy, direction, contracts,
                       entry_price, close_price, realized_pnl, close_source,
-                      entry_date, close_date
+                      entry_date, close_date, entry_ts_utc, exit_ts_utc
                FROM positions
                WHERE close_date = ?
-               ORDER BY rowid DESC""",
+               ORDER BY exit_ts_utc DESC, rowid DESC""",
             (today,),
         ).fetchall()
         conn.close()
@@ -1145,6 +1160,8 @@ async def get_today_summary() -> JSONResponse:
                 "close_source": r[7] or "",
                 "entry_date":   r[8] or "",
                 "close_date":   r[9] or "",
+                "entry_ts_utc": r[10] or "",
+                "exit_ts_utc":  r[11] or "",
             })
     except Exception as exc:
         logger.warning("today: DB query failed — %s", exc)

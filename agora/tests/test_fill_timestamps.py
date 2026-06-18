@@ -50,6 +50,16 @@ def test_entry_ts_persisted(tmp_path):
     assert r[0] == _E and r[1] is None      # exit NULL on open
 
 
+def test_entry_ts_autostamped_when_no_broker_time(tmp_path):
+    """New requirement: entry_ts_utc is NEVER null — when no precise broker fill time is supplied,
+    add_position stamps the record moment (full ISO w/ seconds)."""
+    pm = _pm(tmp_path)
+    pm.add_position(_pos(entry_ts=""))      # no broker fill time supplied
+    r = sqlite3.connect(str(pm._settings.db_path)).execute(
+        "SELECT entry_ts_utc FROM positions WHERE position_id='p1'").fetchone()
+    assert r[0] and "T" in r[0] and len(r[0]) >= 19      # YYYY-MM-DDTHH:MM:SS at minimum
+
+
 def test_exit_ts_persisted_on_close(tmp_path):
     pm = _pm(tmp_path)
     pm.add_position(_pos(entry_ts=_E))
@@ -61,13 +71,15 @@ def test_exit_ts_persisted_on_close(tmp_path):
 
 
 def test_close_without_ts_preserves_entry(tmp_path):
-    """A close path that has no exit timestamp (e.g. TWS-sync) must not wipe entry_ts (COALESCE)."""
+    """A close with no precise TWS exit time must keep entry_ts (COALESCE) AND still stamp an exit
+    time — per the requirement that exit_ts_utc is never left null (falls back to now())."""
     pm = _pm(tmp_path)
     pm.add_position(_pos(entry_ts=_E))
     pm.mark_position_closed("p1", realized_pnl=10.0, close_price=0.1, source="tws_reconcile")
     r = sqlite3.connect(str(pm._settings.db_path)).execute(
         "SELECT entry_ts_utc, exit_ts_utc FROM positions WHERE position_id='p1'").fetchone()
-    assert r[0] == _E and r[1] is None      # entry kept; exit stays NULL, not blanked
+    assert r[0] == _E              # entry timestamp preserved, not blanked
+    assert r[1] and "T" in r[1]    # exit timestamp now stamped (full ISO w/ seconds), never NULL
 
 
 def test_add_position_robust_to_schema(tmp_path):
