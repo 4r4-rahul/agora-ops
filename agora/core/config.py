@@ -147,6 +147,16 @@ class AgoraSettings(BaseSettings):
     cell_gate_enabled: bool = Field(default=True, description="S1.3: suppress new entries in strategy×pillar cells with proven-negative post-fix expectancy.")
     cell_gate_min_samples: int = Field(default=8, ge=1, description="S1.3: a cell needs at least this many post-fix closes before it can be benched.")
     cell_gate_min_expectancy: float = Field(default=-15.0, description="S1.3: bench a cell when its post-fix expectancy ($/trade) is below this.")
+    # ── Tier 2 — raise payoff / concentrate edge ──────────────────────────────
+    # S2.1: a bearish DEBIT (long_put / bear_put_spread) in a CONFIRMED risk-on tape fights positive
+    # drift + theta — the directional pillar's −$2,476 bleed. Block it; bearish premium-selling
+    # (bear_call, IVR-gated) and the long_call side are unaffected.
+    block_bearish_debit_in_risk_on: bool = Field(default=True, description="S2.1: block bearish debit entries when macro is confirmed risk-on.")
+    block_bearish_debit_min_confidence: float = Field(default=0.60, ge=0, le=1, description="S2.1: only block when risk-on confidence is at least this (avoid blocking on an ambiguous regime).")
+    # S2.2 (conviction-scaled trailing), S2.3 (combo-liquidity prescreen) already exist + on.
+    # S2.4 expectancy-weighted sizing reuses the existing edge_size_multiplier — flipped ON below
+    # (it ONLY sizes DOWN proven-negative cells, so it is purely protective; the "enable after
+    # win≥55%" caveat was about UP-sizing, which it never does, and exits are now fixed).
     profit_target_pct: float = Field(default=0.50, description="Close at 50% of max profit for 45-DTE vol-premium trades (tastytrade-validated for 30-60 DTE)")
     profit_target_pct_short_dte: float = Field(default=0.75, description="Close at 75% of max profit for short-DTE trades (sector_momentum, event plays ≤14 DTE) — backtested: 75% saves $1,230 vs 50% over 2.4yr")
     short_delta_target: float = Field(default=0.20, description="20-delta short strike for credit spreads")
@@ -196,7 +206,7 @@ class AgoraSettings(BaseSettings):
                     "still hard-stops immediately (a genuine adverse move, not mark noise). 0.85 = "
                     "stop if within 15% of max defined loss; otherwise hold for theta.")
     # ── Edge-aware sizing (C-suite rank 12 — SHIPPED DARK) ───────────────────────
-    edge_sizing_enabled: bool = Field(default=False, description="DARK. When True, scale position size by a (pillar,regime) cell's real-fill Sharpe (StrategyHealth). Only ever sizes DOWN. Enable only after exits are fixed AND >=edge_min_sample closes show win>=55%.")
+    edge_sizing_enabled: bool = Field(default=True, description="S2.4: scale position size by a (pillar,regime) cell's real-fill Sharpe (StrategyHealth). ONLY ever sizes DOWN (capped at 1.0) → purely protective. Enabled 2026-06-18 with Tier 2: exits are now fixed and down-only sizing carries no up-sizing risk; ramps with data (needs >=edge_min_sample closes/cell).")
     edge_size_up_max: float = Field(default=1.0, ge=1.0, le=2.0, description="Hard cap on the edge multiplier — PINNED at 1.0 so no subset is ever sized UP on unproven edge. Raise only with proven positive edge.")
     edge_size_down_min: float = Field(default=0.5, ge=0.1, le=1.0, description="Floor for sizing DOWN a negative-edge cell.")
     edge_min_sample: int = Field(default=30, ge=10, le=200, description="Min real closes in a (pillar,regime) cell before edge sizing acts; below this the multiplier is neutral (1.0).")

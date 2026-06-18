@@ -71,6 +71,7 @@ files = [
     "agora/ops/post_close_watch.py",
     "agora/ops/performance_metrics.py",
     "agora/ops/cell_gate.py",
+    "agora/ops/entry_filters.py",
     "agora/ops/position_reconciler.py",
     "agora/ops/live_readiness.py",
     "agora/ops/outcome_attributor.py",

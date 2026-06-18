@@ -3708,6 +3708,23 @@ class AgoraSession:
                     return _block(f"cell-gate: {_cg_why}", ["timing"])
             except Exception as _cg_exc:
                 logger.debug("cell-gate check failed [%s]: %s", ticker, _cg_exc)
+        # S2.1 regime filter — a bearish DEBIT (long_put / bear_put_spread, we PAY premium) in a
+        # CONFIRMED risk-on tape fights drift + theta (the directional pillar's −$2,476 bleed).
+        # Bearish premium-selling (bear_call) and the long_call side are untouched. Fail-open.
+        if getattr(self._settings, "block_bearish_debit_in_risk_on", False) and self._macro_context:
+            try:
+                from agora.ops.entry_filters import bearish_debit_blocked_in_risk_on
+                _conf = float(getattr(self._macro_context, "confidence", 0) or 0)
+                if bearish_debit_blocked_in_risk_on(
+                    getattr(rec, "direction", ""), getattr(rec, "entry_debit_credit", 0),
+                    getattr(self._macro_context, "macro_stance", ""), _conf,
+                    min_confidence=getattr(self._settings, "block_bearish_debit_min_confidence", 0.60),
+                ):
+                    return _block(
+                        f"regime: bearish debit blocked in confirmed risk-on (conf {_conf:.0%}) — "
+                        f"fights drift+theta", ["timing"])
+            except Exception as _rf_exc:
+                logger.debug("regime filter check failed [%s]: %s", ticker, _rf_exc)
         _can_trade, _cal_why = get_macro_calendar().should_trade()
         if not _can_trade:
             return _block(f"macro calendar: {_cal_why}", ["timing"])
