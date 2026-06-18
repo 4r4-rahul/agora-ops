@@ -106,6 +106,16 @@ class AgoraSettings(BaseSettings):
         "MUST differ from fundamental_data's clientId 13 — sharing 13 caused Error 326 collisions "
         "that left ib.portfolio() unread (TWS P&L never populated). 17 is clear of the 10-16 cluster.",
     )
+    ibkr_portfolio_client_id: int = Field(
+        default=18,
+        description="Dedicated clientId for the lightweight TWS portfolio-P&L poller (separate from "
+        "the heavy 30-min knowledge scan on 17, so a frequent poll never collides with it). "
+        "Sources IBKR's exact per-leg unrealizedPNL for the live P&L display.",
+    )
+    ibkr_portfolio_refresh_secs: int = Field(
+        default=90,
+        description="How often the dedicated portfolio poller refreshes TWS unrealized P&L.",
+    )
 
     # ── IBKR GTC / order lifecycle ─────────────────────────────────
     gtc_max_concurrent: int = Field(

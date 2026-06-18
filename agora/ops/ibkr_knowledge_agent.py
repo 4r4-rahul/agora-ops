@@ -580,6 +580,10 @@ class IBKRKnowledgeAgent:
     async def start(self) -> None:
         self._running = True
         logger.info("IBKRKnowledgeAgent started (scan every 30 min)")
+        # Dedicated lightweight portfolio-P&L poller — decoupled from the heavy 30-min scan so the
+        # live TWS unrealizedPNL refreshes frequently and reliably (the scan can hang/slow; this
+        # can't take it down). Runs concurrently on its own clientId.
+        asyncio.create_task(self._portfolio_refresh_loop())
         await asyncio.sleep(30)  # let session stabilize before first scan
         while self._running:
             try:
@@ -587,6 +591,68 @@ class IBKRKnowledgeAgent:
             except Exception as exc:
                 logger.error("IBKRKnowledgeAgent scan error: %s", exc)
             await asyncio.sleep(_SCAN_INTERVAL_SEC)
+
+    async def _portfolio_refresh_loop(self) -> None:
+        """Refresh IBKR's exact per-leg unrealized P&L on a short cadence, into the cache the API
+        reads. Hard-timeout-guarded so a stuck IBKR call can never wedge the loop."""
+        await asyncio.sleep(12)  # let the main connections settle first
+        interval = int(getattr(self._settings, "ibkr_portfolio_refresh_secs", 90))
+        while self._running:
+            try:
+                items = await asyncio.wait_for(
+                    asyncio.get_event_loop().run_in_executor(
+                        _IBKR_EXECUTOR, lambda: _run_in_new_loop(self._fetch_portfolio_only())),
+                    timeout=20,
+                )
+                if items is not None:
+                    if self._last_scan is None:
+                        self._last_scan = {}
+                    self._last_scan["ibkr_portfolio_items"] = items
+                    self._last_scan_time = datetime.now(tz=ET)
+            except Exception as exc:
+                logger.debug("portfolio refresh failed: %s", exc)
+            await asyncio.sleep(interval)
+
+    async def _fetch_portfolio_only(self) -> list[dict] | None:
+        """Minimal TWS portfolio fetch: connect on the dedicated clientId, pull IBKR's own per-leg
+        unrealizedPNL/market price, disconnect. No LLM, no order/fill scans — fast + robust."""
+        from ib_insync import IB
+        ib = IB()
+        cid = getattr(self._settings, "ibkr_portfolio_client_id", 18)
+        try:
+            await ib.connectAsync(self._settings.ibkr_host, self._settings.ibkr_port,
+                                  clientId=cid, timeout=8)
+            accounts = ib.managedAccounts()
+            if not accounts:
+                return None
+            await ib.reqAccountUpdatesAsync(accounts[0])
+            items: list = []
+            for _ in range(25):  # up to ~5s for IBKR's account push to land
+                items = [it for it in ib.portfolio() if it.position]
+                if items:
+                    break
+                await asyncio.sleep(0.2)
+            return [
+                {
+                    "symbol":         it.contract.symbol,
+                    "secType":        it.contract.secType,
+                    "strike":         getattr(it.contract, "strike", None),
+                    "right":          getattr(it.contract, "right", None),
+                    "position":       it.position,
+                    "market_price":   round(float(it.marketPrice or 0), 4),
+                    "market_value":   round(float(it.marketValue or 0), 2),
+                    "avg_cost":       round(float(it.averageCost or 0), 4),
+                    "unrealized_pnl": round(float(it.unrealizedPNL or 0), 2),
+                    "realized_pnl":   round(float(it.realizedPNL or 0), 2),
+                    "account":        it.account,
+                }
+                for it in items[:50]
+            ]
+        finally:
+            try:
+                ib.disconnect()
+            except Exception:
+                pass
 
     async def stop(self) -> None:
         self._running = False
