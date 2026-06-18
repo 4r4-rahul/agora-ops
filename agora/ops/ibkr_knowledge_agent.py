@@ -1028,7 +1028,11 @@ class IBKRKnowledgeAgent:
             accounts = result.get("managed_accounts") or ib.managedAccounts()
             if accounts:
                 try:
-                    await ib.reqAccountUpdatesAsync(subscribe=True, account=accounts[0])
+                    # NOTE: this ib_insync build's reqAccountUpdatesAsync takes the account
+                    # POSITIONALLY — the old subscribe=/account= kwargs raised TypeError, which the
+                    # except below swallowed, so ibkr_portfolio_items was ALWAYS empty and the UI
+                    # silently fell back to yfinance. Correct signature below.
+                    await ib.reqAccountUpdatesAsync(accounts[0])
                     # Poll until IBKR's account push actually populates ib.portfolio(). The old fixed
                     # 0.5s sleep often fired BEFORE the push landed → empty cache → the API fell back
                     # to yfinance (a non-TWS estimate). Wait up to ~4s for the real per-leg
