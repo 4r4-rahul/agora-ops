@@ -3126,6 +3126,20 @@ class AgoraSession:
             except Exception as _skew_exc:
                 logger.debug("Skew analysis failed for %s: %s", ticker, _skew_exc)
 
+            # S1.2 — only SELL premium when IV is rich. A credit spread (we collect premium,
+            # entry_debit_credit < 0) entered at a low IV-rank has no volatility edge. Debit/long
+            # structures are exempt — cheap vol HELPS a buyer. Fail-open when IVR is unknown.
+            _min_ivr = float(getattr(self._settings, "credit_spread_min_ivr", 0) or 0)
+            _is_credit = float(getattr(recommendation, "entry_debit_credit", 0) or 0) < 0
+            _ivr = getattr(snap, "iv_rank", None)
+            if _min_ivr > 0 and _is_credit and _ivr is not None and _ivr < _min_ivr:
+                logger.info("S1.2 IVR-GATE: %s credit spread blocked — IVR %.0f < %.0f "
+                            "(selling cheap vol, no edge)", ticker, _ivr, _min_ivr)
+                if _chain_id:
+                    _complete_chain(str(self._settings.db_path), _chain_id, "rejected",
+                                    gates_passed=["ivr_gate"])
+                return
+
             await self._submit_recommendation(
                 recommendation, ticker, snap.price,
                 chain_id=_chain_id, thesis=_thesis,
@@ -3677,6 +3691,23 @@ class AgoraSession:
             return _block(f"timing: {_why}", [])
         if self._risk.is_kill_switch_active():
             return _block("kill switch active", ["timing"])
+        # S1.3 expectancy cell-gate — bench a strategy×pillar cell that has proven a clearly-negative
+        # post-fix expectancy (auto-reopens when it recovers). Fail-open on thin data / error.
+        if getattr(self._settings, "cell_gate_enabled", False):
+            try:
+                from agora.ops.cell_gate import is_cell_blocked
+                _cg_blocked, _cg_why = is_cell_blocked(
+                    str(self._settings.db_path),
+                    str(getattr(getattr(rec, "strategy", ""), "value", getattr(rec, "strategy", ""))),
+                    str(getattr(getattr(rec, "pillar", ""), "value", getattr(rec, "pillar", ""))),
+                    cutoff=getattr(self._settings, "expectancy_legacy_cutoff_date", "2026-06-12"),
+                    min_samples=getattr(self._settings, "cell_gate_min_samples", 8),
+                    min_expectancy=getattr(self._settings, "cell_gate_min_expectancy", -15.0),
+                )
+                if _cg_blocked:
+                    return _block(f"cell-gate: {_cg_why}", ["timing"])
+            except Exception as _cg_exc:
+                logger.debug("cell-gate check failed [%s]: %s", ticker, _cg_exc)
         _can_trade, _cal_why = get_macro_calendar().should_trade()
         if not _can_trade:
             return _block(f"macro calendar: {_cal_why}", ["timing"])

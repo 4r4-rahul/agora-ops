@@ -135,6 +135,18 @@ class AgoraSettings(BaseSettings):
     expectancy_legacy_cutoff_date: str = Field(default="2026-06-12", description="Exclude trades closed before this date from the post-fix expectancy view + cell gate (pre-churn-fix legacy).")
     expectancy_target_per_trade: float = Field(default=25.0, description="Target expectancy ($/trade) the whole system thrives toward — shown on the dashboard meter.")
     expectancy_target_date: str = Field(default="2026-09-30", description="Date the expectancy target is 'locked' for — drives the meter countdown/ETA.")
+    # ── Tier 1 — stop the bleed (reversible, paper-gated) ─────────────────────
+    # S1.1 long-options DTE floor: median entry was 15 DTE (theta knife). Lift the window out of the
+    # worst decay zone so the directional thesis has room. Was the hardcoded _DTE_MIN/MAX 14/30.
+    long_options_min_dte: int = Field(default=21, ge=7, description="S1.1: minimum DTE for a long-option entry (raised off the 14-DTE theta knife).")
+    long_options_max_dte: int = Field(default=35, ge=14, description="S1.1: maximum DTE for a long-option entry.")
+    # S1.2 credit spreads only sell premium when IV is rich — no edge selling cheap vol.
+    credit_spread_min_ivr: float = Field(default=50.0, ge=0, le=100, description="S1.2: block credit-spread entries when IV-rank < this (only sell rich premium). 0 disables.")
+    # S1.3 expectancy cell-gate: bench any strategy×pillar cell with a proven-negative post-fix
+    # expectancy; auto-reopens when it recovers. Uses post-fix data only (excludes legacy churn).
+    cell_gate_enabled: bool = Field(default=True, description="S1.3: suppress new entries in strategy×pillar cells with proven-negative post-fix expectancy.")
+    cell_gate_min_samples: int = Field(default=8, ge=1, description="S1.3: a cell needs at least this many post-fix closes before it can be benched.")
+    cell_gate_min_expectancy: float = Field(default=-15.0, description="S1.3: bench a cell when its post-fix expectancy ($/trade) is below this.")
     profit_target_pct: float = Field(default=0.50, description="Close at 50% of max profit for 45-DTE vol-premium trades (tastytrade-validated for 30-60 DTE)")
     profit_target_pct_short_dte: float = Field(default=0.75, description="Close at 75% of max profit for short-DTE trades (sector_momentum, event plays ≤14 DTE) — backtested: 75% saves $1,230 vs 50% over 2.4yr")
     short_delta_target: float = Field(default=0.20, description="20-delta short strike for credit spreads")

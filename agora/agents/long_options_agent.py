@@ -165,6 +165,9 @@ class LongOptionsAgent:
     def __init__(self, settings: AgoraSettings | None = None) -> None:
         self._settings = settings or get_settings()
         self._db_path  = str(getattr(self._settings, "db_path", "trade_journal.db"))
+        # S1.1: configurable entry-DTE window (was hardcoded 14/30 — median 15-DTE theta knives).
+        self._dte_min  = int(getattr(self._settings, "long_options_min_dte", _DTE_MIN))
+        self._dte_max  = int(getattr(self._settings, "long_options_max_dte", _DTE_MAX))
 
     # ── Signal calibration (deterministic learning loop) ───────────────────────
     # signal_stats is written on every position close (update_signal_stats). Here we
@@ -489,7 +492,7 @@ class LongOptionsAgent:
         )
 
         # ── 5. Expiry selection ───────────────────────────────────────────────
-        expiry, chain_slice = self._select_expiry(options_chain, target_dte)
+        expiry, chain_slice = self._select_expiry(options_chain, target_dte, self._dte_min, self._dte_max)
         if expiry is None:
             return LongDecision(
                 ticker=ticker, strategy=str(strategy), outcome="skipped",
@@ -1308,7 +1311,8 @@ class LongOptionsAgent:
 
     @staticmethod
     def _select_expiry(
-        options_chain: dict[str, Any], target_dte: int
+        options_chain: dict[str, Any], target_dte: int,
+        dte_min: int = _DTE_MIN, dte_max: int = _DTE_MAX,   # S1.1: configurable entry-DTE window
     ) -> tuple[date | None, dict | None]:
         today = date.today()
         candidates = []
@@ -1318,7 +1322,7 @@ class LongOptionsAgent:
             except ValueError:
                 continue
             dte = (exp_date - today).days
-            if _DTE_MIN <= dte <= _DTE_MAX:
+            if dte_min <= dte <= dte_max:
                 candidates.append((dte, exp_date, chain))
         if not candidates:
             return None, None
