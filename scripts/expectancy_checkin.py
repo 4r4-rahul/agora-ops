@@ -25,34 +25,12 @@ def _fmt_money(v):
     return "—" if v is None else (f"+${v:.0f}" if v >= 0 else f"-${abs(v):.0f}")
 
 
-def _credit_spread_stats(db_path: str, since: str = "2026-06-18") -> dict:
-    """W1/W1b/W1c tracking: did credit spreads actually start trading, and are they winning?
-    Counts bull_put/bear_call entered since the W1 change. Never raises."""
-    import sqlite3
-    try:
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        creds = ("bull_put_spread", "bear_call_spread")
-        ph = ",".join("?" * len(creds))
-        rows = conn.execute(
-            f"SELECT realized_pnl, close_date FROM positions "
-            f"WHERE strategy IN ({ph}) AND entry_date >= ?", (*creds, since)).fetchall()
-        conn.close()
-        closed = [r for r in rows if (r["close_date"] or "") != ""]
-        wins = sum(1 for r in closed if (r["realized_pnl"] or 0) > 0)
-        return {"entered": len(rows), "open": len(rows) - len(closed),
-                "closed": len(closed),
-                "win_rate": (wins / len(closed)) if closed else None}
-    except Exception:
-        return {"entered": 0, "open": 0, "closed": 0, "win_rate": None}
-
-
 def build_snapshot() -> tuple[dict, str]:
     """Returns (snapshot_dict, human_summary). Never raises."""
     try:
         from agora.core.config import get_settings
         from agora.ops.cell_gate import blocked_cells
-        from agora.ops.expectancy_meter import build_meter
+        from agora.ops.expectancy_meter import build_meter, credit_spread_stats
         from agora.ops.post_close_watch import evaluate_due, exit_regret_report
 
         s = get_settings()
@@ -94,7 +72,7 @@ def build_snapshot() -> tuple[dict, str]:
             "blocked_cells": list(cells.get("blocked", {}).keys()),
             "exit_regret": regret.get("by_exit_reason", {}),
             "regret_evaluated": regret.get("total_evaluated", 0),
-            "credit_spreads": _credit_spread_stats(db),
+            "credit_spreads": credit_spread_stats(db),
         }
 
         wr = f"{cur.get('win_rate', 0) * 100:.0f}%" if cur.get("win_rate") is not None else "—"

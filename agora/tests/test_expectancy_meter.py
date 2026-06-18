@@ -105,3 +105,49 @@ class TestMeter:
         # never raises — returns a shell with the target still present
         assert m["target"]["per_trade"] == 25.0
         assert m["current"]["expectancy"] is None or "error" in m
+
+
+# ── W1/W1b/W1c credit-spread follow-through tracking ──────────────────────────
+def _cs_db(rows):
+    """rows: (strategy, entry_date, status, close_date, realized_pnl)."""
+    p = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
+    c = sqlite3.connect(p)
+    c.execute("""CREATE TABLE positions (strategy TEXT, entry_date TEXT, status TEXT,
+                 close_date TEXT, realized_pnl REAL)""")
+    c.executemany("INSERT INTO positions VALUES (?,?,?,?,?)", rows)
+    c.commit(); c.close()
+    return p
+
+
+class TestCreditSpreadStats:
+    def test_counts_open_closed_and_winrate(self):
+        from agora.ops.expectancy_meter import credit_spread_stats
+        db = _cs_db([
+            ("bull_put_spread", "2026-06-19", "open",   "",           None),   # open
+            ("bull_put_spread", "2026-06-19", "closed", "2026-06-22",  120.0), # win
+            ("bear_call_spread", "2026-06-20", "closed", "2026-06-23", -80.0), # loss
+        ])
+        s = credit_spread_stats(db, since="2026-06-18")
+        assert s["entered"] == 3 and s["open"] == 1 and s["closed"] == 2
+        assert s["win_rate"] == 0.5
+
+    def test_excludes_non_credit_and_pre_window(self):
+        from agora.ops.expectancy_meter import credit_spread_stats
+        db = _cs_db([
+            ("long_call",        "2026-06-20", "open", "", None),        # not a credit vertical
+            ("bull_put_spread",  "2026-06-10", "open", "", None),        # before the W1 window
+            ("bear_call_spread", "2026-06-20", "open", "", None),        # counted
+        ])
+        s = credit_spread_stats(db, since="2026-06-18")
+        assert s["entered"] == 1
+
+    def test_no_closed_yields_none_winrate(self):
+        from agora.ops.expectancy_meter import credit_spread_stats
+        db = _cs_db([("bull_put_spread", "2026-06-19", "open", "", None)])
+        s = credit_spread_stats(db, since="2026-06-18")
+        assert s["entered"] == 1 and s["win_rate"] is None
+
+    def test_error_safe(self):
+        from agora.ops.expectancy_meter import credit_spread_stats
+        s = credit_spread_stats("/nonexistent/path.db")
+        assert s["entered"] == 0 and s["win_rate"] is None

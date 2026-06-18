@@ -596,6 +596,11 @@ tr.pos-detail-row td { padding: 0; background: var(--bg1); }
         <span>This month <b id="exp-month">—</b></span>
         <span style="color:#789">proj/day <b id="exp-proj-day">—</b> → target <b id="exp-proj-day-tgt">—</b></span>
       </div>
+      <div style="margin-top:8px;padding-top:8px;border-top:1px solid #222b40;font-size:11px;color:#9ab">
+        📐 Credit spreads <span style="color:#789">(W1, since 06-18)</span>:
+        <b id="cs-entered">—</b> entered · <b id="cs-open">—</b> open · <b id="cs-closed">—</b> closed · win <b id="cs-win">—</b>
+        <span id="cs-note" style="color:#789;margin-left:6px"></span>
+      </div>
     </div>
 
     <!-- Kill switch banner (shown prominently when active) -->
@@ -2168,6 +2173,15 @@ async function fetchExpectancy() {
     setT('exp-today', pe(per.today)); setT('exp-week', pe(per.this_week)); setT('exp-month', pe(per.this_month));
     setT('exp-proj-day', _exp$((proj.current||{}).per_day));
     setT('exp-proj-day-tgt', _exp$((proj.target||{}).per_day));
+    // W1/W1b/W1c — did credit spreads start trading, and are they winning?
+    const cs = m.credit_spreads || {};
+    setT('cs-entered', cs.entered ?? '—');
+    setT('cs-open', cs.open ?? '—');
+    setT('cs-closed', cs.closed ?? '—');
+    const cw = document.getElementById('cs-win');
+    if (cw){ cw.textContent = cs.win_rate!=null ? (cs.win_rate*100).toFixed(0)+'%' : '—';
+             cw.style.color = cs.win_rate!=null ? col(cs.win_rate-0.5) : '#cdd'; }
+    setT('cs-note', (cs.entered===0) ? '— none yet: cr/w still clustering at the 0.30 gate' : '');
   } catch(e){ /* dashboard must always render */ }
 }
 async function fetchPerformance() {

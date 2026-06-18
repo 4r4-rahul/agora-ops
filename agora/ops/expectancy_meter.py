@@ -45,6 +45,26 @@ def _trades_per_day(conn: sqlite3.Connection, cutoff: str) -> float:
     return round(n / span, 3)
 
 
+def credit_spread_stats(db_path: str, since: str = "2026-06-18") -> dict[str, Any]:
+    """W1/W1b/W1c follow-through — did the credit-spread changes get them trading, and winning?
+    Counts bull_put/bear_call entered since the W1 change (default 2026-06-18). Read-only; never
+    raises. Mirrored by scripts/expectancy_checkin.py for the daily Discord push."""
+    creds = ("bull_put_spread", "bear_call_spread")
+    try:
+        with sqlite3.connect(db_path, timeout=10) as conn:
+            ph = ",".join("?" * len(creds))
+            rows = conn.execute(
+                f"SELECT realized_pnl, close_date FROM positions "
+                f"WHERE strategy IN ({ph}) AND entry_date >= ?", (*creds, since)).fetchall()
+        closed = [r for r in rows if (r[1] or "") != ""]
+        wins = sum(1 for r in closed if (r[0] or 0) > 0)
+        return {"since": since, "entered": len(rows), "open": len(rows) - len(closed),
+                "closed": len(closed),
+                "win_rate": round(wins / len(closed), 3) if closed else None}
+    except Exception:
+        return {"since": since, "entered": 0, "open": 0, "closed": 0, "win_rate": None}
+
+
 def build_meter(db_path: str, *, target_per_trade: float = 25.0,
                 target_date: str = "2026-09-30", legacy_cutoff: str = "2026-06-12") -> dict[str, Any]:
     """Compute the full expectancy meter payload. Read-only; never raises."""
@@ -105,6 +125,7 @@ def build_meter(db_path: str, *, target_per_trade: float = 25.0,
             "gap_to_target": gap,
             "progress_pct": progress,
             "status": status,
+            "credit_spreads": credit_spread_stats(db_path),
             "validated": validated,
             "periods": periods,
             "projection": {"trades_per_day": tpd,
