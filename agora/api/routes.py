@@ -1139,7 +1139,9 @@ async def get_today_summary() -> JSONResponse:
         rows = conn.execute(
             """SELECT ticker, strategy, direction, contracts,
                       entry_price, close_price, realized_pnl, close_source,
-                      entry_date, close_date, entry_ts_utc, exit_ts_utc
+                      entry_date, close_date, entry_ts_utc, exit_ts_utc,
+                      pillar, max_gain_dollars, max_loss_dollars,
+                      conviction_at_entry, regime_at_entry, legs_json, expiry_date
                FROM positions
                WHERE close_date = ?
                ORDER BY exit_ts_utc DESC, rowid DESC""",
@@ -1162,6 +1164,13 @@ async def get_today_summary() -> JSONResponse:
                 "close_date":   r[9] or "",
                 "entry_ts_utc": r[10] or "",
                 "exit_ts_utc":  r[11] or "",
+                "pillar":            r[12] or "",
+                "max_gain_dollars":  r[13],
+                "max_loss_dollars":  r[14],
+                "conviction_at_entry": r[15],
+                "regime_at_entry":   r[16] or "",
+                "legs_json":         r[17] or "",
+                "expiry_date":       r[18] or "",
             })
     except Exception as exc:
         logger.warning("today: DB query failed — %s", exc)

@@ -198,6 +198,10 @@ tr.pos-detail-row td { padding: 0; background: var(--bg1); }
 .detail-kv .dk { color: var(--text2); }
 .detail-kv .dv { color: var(--text); font-weight: 600; }
 .detail-legs { display: flex; flex-direction: column; gap: 4px; }
+/* closed-trade expandable detail */
+.closed-detail { background: var(--bg1); border-bottom: 1px solid var(--border); }
+.closed-detail .detail-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1px 16px; padding: 10px 14px; }
+.closed-detail .detail-legs-row { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 14px 10px; }
 .leg-chip {
   display: flex; gap: 6px; align-items: center;
   background: var(--bg3); border-radius: 4px; padding: 4px 8px; font-size: 10.5px;
@@ -1932,6 +1936,13 @@ async function _loadIvChart(pid, ticker) {
   } catch {}
 }
 
+function toggleClosedDetail(i) {
+  const row = document.getElementById('cdetail-' + i);
+  if (!row) return;
+  const open = row.classList.toggle('open');
+  const chev = document.getElementById('cchev-' + i);
+  if (chev) chev.textContent = open ? '▼' : '▶';
+}
 function togglePosDetail(pid, ticker) {
   const detailRow = document.getElementById('detail-' + pid);
   if (!detailRow) return;
@@ -3010,7 +3021,7 @@ async function fetchToday() {
 
         const _dirArrow = d => d === 'bullish' ? '▲' : d === 'bearish' ? '▼' : '—';
 
-        ctTbody.innerHTML = rows.map(r => {
+        ctTbody.innerHTML = rows.map((r, i) => {
           const pnl = r.realized_pnl;
           const pnlCls2 = pnl >= 0 ? 'pnl-pos' : 'pnl-neg';
           const pnlStr  = fmt$(pnl);
@@ -3021,8 +3032,49 @@ async function fetchToday() {
           const cD      = _fmtTs(r.exit_ts_utc,  r.close_date);
           const held    = (r.entry_date && r.close_date)
             ? Math.max(0, Math.round((new Date(r.close_date) - new Date(r.entry_date)) / 86_400_000)) : null;
-          return `<tr>
-            <td><strong>${r.ticker}</strong></td>
+
+          // ── rich detail metrics ──
+          const cts     = r.contracts || 1;
+          const maxL    = Math.abs(r.max_loss_dollars || 0);
+          const maxG    = Math.abs(r.max_gain_dollars || 0);
+          const ror     = maxL > 0 ? (pnl / maxL * 100) : null;          // return on risk
+          const capt    = (pnl > 0 && maxG > 0) ? (pnl / maxG * 100) : null; // % of max profit captured
+          const conv    = r.conviction_at_entry;
+          const convStr = (conv != null && conv > 0) ? (conv <= 1 ? (conv*100).toFixed(0)+'%' : conv.toFixed(0)) : '—';
+          const regime  = r.regime_at_entry || '—';
+          const pillar  = r.pillar || '—';
+          let legsHtml  = '';
+          try {
+            const legs = JSON.parse(r.legs_json || '[]');
+            legsHtml = legs.map(l => {
+              const a = (l.action||'').toLowerCase()==='sell' ? 'la-sell':'la-buy';
+              return `<span class="leg-chip"><span class="la ${a}">${(l.action||'').toUpperCase().slice(0,4)}</span>`
+                   + `<span class="lt">${(l.option_type||'').toUpperCase().slice(0,1)}</span>`
+                   + `<span class="ls">$${l.strike}</span></span>`;
+            }).join('');
+          } catch(e) {}
+          const kv = (k,v,c) => `<div class="detail-kv"><span class="dk">${k}</span><span class="dv"${c?` style="color:${c}"`:''}>${v}</span></div>`;
+          const detail = `<div class="closed-detail">
+            <div class="detail-grid">
+              ${kv('Realized P&L', pnlStr, pnl>=0?'var(--green)':'var(--red)')}
+              ${kv('Return on risk', ror!=null?(ror>=0?'+':'')+ror.toFixed(0)+'%':'—', ror!=null?(ror>=0?'var(--green)':'var(--red)'):'')}
+              ${kv('% of max profit', capt!=null?capt.toFixed(0)+'%':'—')}
+              ${kv('Contracts', cts)}
+              ${kv('Entry → Close', `$${(r.entry_price||0).toFixed(2)} → $${(r.close_price||0).toFixed(2)}`)}
+              ${kv('Max gain / loss', `+$${maxG.toFixed(0)} / -$${maxL.toFixed(0)}`)}
+              ${kv('Opened', oD)}
+              ${kv('Closed', cD)}
+              ${kv('Held', held!=null?held+' day(s)':'—')}
+              ${kv('Pillar', pillar)}
+              ${kv('Conviction @ entry', convStr)}
+              ${kv('Regime @ entry', regime)}
+              ${kv('How closed', src)}
+            </div>
+            ${legsHtml?`<div class="detail-legs-row">${legsHtml}</div>`:''}
+          </div>`;
+
+          return `<tr class="pos-row" onclick="toggleClosedDetail(${i})">
+            <td><span class="chevron" id="cchev-${i}">▶</span> <strong>${r.ticker}</strong></td>
             <td style="font-size:10px">${strat}</td>
             <td>${dir}</td>
             <td>$${(r.entry_price||0).toFixed(2)}</td>
@@ -3031,7 +3083,8 @@ async function fetchToday() {
             <td style="font-size:10px;color:var(--text2)">${oD}${held!=null?` <span style="color:var(--text3,#667)">(${held}d)</span>`:''}</td>
             <td style="font-size:10px;color:var(--text2)">${cD}</td>
             <td style="font-size:10px;color:var(--text2)">${src}</td>
-          </tr>`;
+          </tr>
+          <tr class="pos-detail-row" id="cdetail-${i}"><td colspan="9">${detail}</td></tr>`;
         }).join('');
       }
     }
