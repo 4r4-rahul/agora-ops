@@ -92,6 +92,10 @@ class PositionManager:
         # of positions already scaled (one-time per position). Handler injected at startup.
         self._on_partial_close = None
         self._long_scaled: set[str] = set()
+        # Stage 2: exit decisions mark off TWS/IBKR's exact per-leg unrealizedPNL (not a yfinance
+        # estimate). Injected by the session → returns the live portfolio items from the TWS poller.
+        # None / no-match → fall back to the existing yfinance mark (with its no-data HOLD guard).
+        self._tws_pnl_getter: Any = None
         # Stale-mark safety backstop: count consecutive no-quote refresh cycles per position and
         # cache the last good underlying spot, so a position blowing out DURING a chronic quote
         # outage can still be stopped on a conservative intrinsic mark (the no-data HOLD guard
@@ -465,13 +469,65 @@ class PositionManager:
                 "legs_quoted": n_quoted, "legs_total": len(legs),
                 "quote_ok": (spot > 0 and n_quoted == len(legs) and len(legs) > 0)}
 
+    def set_tws_pnl_getter(self, getter: Any) -> None:
+        """Inject the live TWS portfolio-items source (the IBKR poller). Exit P&L marks off this."""
+        self._tws_pnl_getter = getter
+
+    def _tws_unrealized(self, position: OpenPosition) -> float | None:
+        """Exact unrealized P&L from TWS for THIS position, matched leg-by-leg (symbol+strike+right+
+        expiry) against IBKR's portfolio items. Returns None if the feed is absent or any leg is
+        unmatched (→ caller uses the yfinance fallback) — never a partial/guessed number."""
+        getter = self._tws_pnl_getter
+        if getter is None:
+            return None
+        try:
+            items = getter() or []
+            if not items:
+                return None
+            book: dict[tuple, float] = {}
+            for it in items:
+                key = (str(it.get("symbol")), float(it.get("strike") or 0),
+                       str(it.get("right") or "").upper(), str(it.get("expiry") or ""))
+                book[key] = book.get(key, 0.0) + float(it.get("unrealized_pnl") or 0)
+            total = 0.0
+            for lg in getattr(position, "legs", []) or []:
+                right = "C" if str(getattr(lg, "option_type", "")).lower().startswith("c") else "P"
+                exp = getattr(lg, "expiration", None)
+                exp_str = exp.strftime("%Y%m%d") if isinstance(exp, date) else str(exp or "")
+                key = (position.ticker, float(getattr(lg, "strike", 0) or 0), right, exp_str)
+                if key not in book:
+                    return None   # a leg isn't in the TWS book → don't trust a partial match
+                total += book[key]
+            return round(total, 2)
+        except Exception:
+            return None
+
     async def _refresh_position_price(self, position: OpenPosition) -> None:
         """
-        Fetch current spread mid price and live greeks from yfinance options chain.
+        Mark the position for exit decisions. PRIMARY source = TWS/IBKR's exact per-leg unrealizedPNL
+        (Stage 2); the yfinance options-chain mid is the fallback + supplies per-leg greeks.
 
-        Runs the synchronous yfinance calls in a thread pool so the event loop
-        stays unblocked. Updates unrealized P&L and per-leg greeks.
+        Runs the synchronous yfinance calls in a thread pool so the event loop stays unblocked.
         """
+        # ── TWS-FIRST: use IBKR's exact unrealizedPNL when the live poller has this position ──
+        _tws_u = self._tws_unrealized(position)
+        if _tws_u is not None:
+            _ctr = max(1, int(getattr(position, "contracts", 1) or 1))
+            _tws_mid = round(position.entry_price + _tws_u / (100 * _ctr), 4)
+            self._stale_cycles[position.position_id] = 0
+            self._update_position_price(position.position_id, _tws_mid, _tws_u)
+            # still refresh per-leg greeks from yfinance (best-effort, display only)
+            try:
+                _r = await asyncio.to_thread(self._fetch_price_data_sync,
+                                             position.ticker, position.legs, date.today())
+                if _r and _r.get("quote_ok") and _r.get("updated_legs"):
+                    self._db.execute("UPDATE positions SET legs_json=? WHERE position_id=?",
+                                     (json.dumps(_r["updated_legs"]), position.position_id))
+                    self._db.commit()
+            except Exception:
+                pass
+            return
+        # ── FALLBACK: TWS feed has no value for this position → yfinance mid (with HOLD guard) ──
         try:
             result = await asyncio.to_thread(
                 self._fetch_price_data_sync,

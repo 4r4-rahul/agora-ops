@@ -666,6 +666,10 @@ class AgoraSession:
             )
         # Partial scale-out executor — wired unconditionally (PositionManager owns it).
         self._position_mgr.set_partial_close_handler(self._execute_partial_close)
+        # Stage 2: exit decisions mark off TWS/IBKR's exact per-leg unrealizedPNL (the live poller),
+        # not a yfinance estimate. Returns the cached portfolio items list (fresh ~60s).
+        self._position_mgr.set_tws_pnl_getter(
+            lambda: (self._ibkr_agent.get_cached_portfolio()[0] if self._ibkr_agent else []))
 
         # ── LongOptionsAgent — directional swing (independent 15-min cycle) ───
         self._long_options_agent = None

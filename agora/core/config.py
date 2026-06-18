@@ -113,8 +113,10 @@ class AgoraSettings(BaseSettings):
         "Sources IBKR's exact per-leg unrealizedPNL for the live P&L display.",
     )
     ibkr_portfolio_refresh_secs: int = Field(
-        default=90,
-        description="How often the dedicated portfolio poller refreshes TWS unrealized P&L.",
+        default=60,
+        description="How often the dedicated portfolio poller refreshes TWS unrealized P&L. Aligned "
+        "with the 60s position-lifecycle loop so exit decisions act on TWS P&L <=60s old. Fast moves "
+        "are caught separately by the event-driven shock detector.",
     )
 
     # ── IBKR GTC / order lifecycle ─────────────────────────────────

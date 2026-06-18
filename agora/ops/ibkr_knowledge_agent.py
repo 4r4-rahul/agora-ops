@@ -634,7 +634,7 @@ class IBKRKnowledgeAgent:
             # a short timeout, ignore the (never-coming) completion, then poll portfolio().
             try:
                 await asyncio.wait_for(ib.reqAccountUpdatesAsync(accounts[0]), timeout=2)
-            except (TimeoutError, asyncio.TimeoutError):
+            except TimeoutError:
                 pass
             items: list = []
             for _ in range(25):  # up to ~5s for IBKR's account push to land
@@ -648,6 +648,7 @@ class IBKRKnowledgeAgent:
                     "secType":        it.contract.secType,
                     "strike":         getattr(it.contract, "strike", None),
                     "right":          getattr(it.contract, "right", None),
+                    "expiry":         getattr(it.contract, "lastTradeDateOrContractMonth", None),
                     "position":       it.position,
                     "market_price":   round(float(it.marketPrice or 0), 4),
                     "market_value":   round(float(it.marketValue or 0), 2),
@@ -1112,7 +1113,7 @@ class IBKRKnowledgeAgent:
                     # is why ibkr_portfolio_items was always empty → yfinance fallback.)
                     try:
                         await asyncio.wait_for(ib.reqAccountUpdatesAsync(accounts[0]), timeout=2)
-                    except (TimeoutError, asyncio.TimeoutError):
+                    except TimeoutError:
                         pass
                     # Poll until the push populates ib.portfolio() — break on first live position.
                     portfolio_items: list = []
