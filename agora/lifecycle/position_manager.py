@@ -1061,6 +1061,8 @@ class PositionManager:
                         position.ticker, reason, _real_pnl, _real_cp)
             _decision_chain_close(str(self._settings.db_path), position.position_id, round(_real_pnl, 2))
             self._write_trade_record(position, reason, realized_pnl=_real_pnl, close_price=_real_cp)
+            # observe-only post-close counterfactual hook — fire-if-present, never break a close
+            getattr(self, "_watch_after_close", lambda *a: None)(position, source)
             return
 
         # No real-close callback wired (pure paper SIMULATION) — book from the in-memory mark.
@@ -1091,6 +1093,17 @@ class PositionManager:
 
         # Write to trade_records for attribution
         self._write_trade_record(position, reason)
+        getattr(self, "_watch_after_close", lambda *a: None)(position, source)
+
+    def _watch_after_close(self, position: OpenPosition, source: str) -> None:
+        """S0.2: register the just-closed position for post-close counterfactual scoring (did the
+        move continue in our favor → we exited early, or against → exit was correct). Observe-only,
+        best-effort, never disrupts the close."""
+        try:
+            from agora.ops.post_close_watch import record_close
+            record_close(str(self._settings.db_path), position, source)
+        except Exception as exc:
+            logger.debug("post_close_watch.record_close wiring [%s]: %s", position.ticker, exc)
 
     async def _auto_close_expiring(
         self, positions: list[OpenPosition], today: date

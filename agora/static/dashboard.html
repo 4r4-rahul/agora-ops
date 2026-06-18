@@ -572,6 +572,32 @@ tr.pos-detail-row td { padding: 0; background: var(--bg1); }
       </div>
     </div>
 
+    <!-- ★ EXPECTANCY METER — the North-Star gauge (target locked for a date) -->
+    <div id="expectancy-meter" style="margin:10px 0;padding:14px 18px;border:1px solid #2a3550;border-radius:10px;background:linear-gradient(90deg,#10141f,#161c2c)">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px">
+        <div>
+          <div style="font-size:11px;letter-spacing:.08em;color:#8aa;text-transform:uppercase">Expectancy / Trade <span id="exp-status" style="margin-left:8px;padding:1px 7px;border-radius:8px;font-size:10px;background:#223;color:#9bd">—</span></div>
+          <div style="font-size:34px;font-weight:700" id="exp-current">—</div>
+          <div style="font-size:11px;color:#789" id="exp-sub">post-fix · n=— · baseline —</div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-size:11px;letter-spacing:.08em;color:#8aa;text-transform:uppercase">🎯 Target — LOCKED</div>
+          <div style="font-size:22px;font-weight:600" id="exp-target">—</div>
+          <div style="font-size:11px;color:#789"><span id="exp-target-date">—</span> · <span id="exp-days">—</span> days left</div>
+        </div>
+      </div>
+      <div style="margin-top:10px;height:14px;background:#0c0f18;border-radius:7px;overflow:hidden;border:1px solid #222b40">
+        <div id="exp-progress-bar" style="height:100%;width:0%;background:linear-gradient(90deg,#3a6,#6c9);transition:width .6s"></div>
+      </div>
+      <div style="margin-top:4px;font-size:11px;color:#789"><span id="exp-progress-label">—</span> · gap to target <span id="exp-gap">—</span></div>
+      <div style="margin-top:10px;display:flex;gap:18px;flex-wrap:wrap;font-size:11px;color:#9ab">
+        <span>Today <b id="exp-today">—</b></span>
+        <span>This week <b id="exp-week">—</b></span>
+        <span>This month <b id="exp-month">—</b></span>
+        <span style="color:#789">proj/day <b id="exp-proj-day">—</b> → target <b id="exp-proj-day-tgt">—</b></span>
+      </div>
+    </div>
+
     <!-- Kill switch banner (shown prominently when active) -->
     <div id="ks-banner">
       🚨 KILL SWITCH ACTIVE — <span id="ks-reason">—</span>
@@ -2118,6 +2144,32 @@ function _renderPerfPeriods() {
     </tr>`;
   }).join('');
 }
+function _exp$(v){ return (v===null||v===undefined) ? '—' : (v>=0?'+$':'-$')+Math.abs(v).toFixed(0); }
+async function fetchExpectancy() {
+  try {
+    const r = await fetch('/agora/expectancy');
+    const m = await r.json();
+    if (m.error) return;
+    const cur = m.current || {}, tgt = m.target || {}, per = m.periods || {}, proj = m.projection || {};
+    const setT = (id,t)=>{ const e=document.getElementById(id); if(e) e.textContent=t; };
+    const col = (v)=> (v===null||v===undefined) ? '#cdd' : (v>=0 ? '#5d9' : '#e76');
+    const ce = document.getElementById('exp-current');
+    if (ce){ ce.textContent=_exp$(cur.expectancy)+' /trade'; ce.style.color=col(cur.expectancy); }
+    setT('exp-status', m.status || '—');
+    setT('exp-sub', `post-fix · n=${cur.n??'—'} · WR ${cur.win_rate!=null?(cur.win_rate*100).toFixed(0)+'%':'—'} · baseline ${_exp$(m.baseline_expectancy)}`);
+    setT('exp-target', _exp$(tgt.per_trade)+' /trade');
+    setT('exp-target-date', tgt.date || '—');
+    setT('exp-days', tgt.days_remaining ?? '—');
+    setT('exp-gap', _exp$(m.gap_to_target));
+    const p = Math.max(0, Math.min(100, m.progress_pct ?? 0));
+    const bar = document.getElementById('exp-progress-bar'); if(bar) bar.style.width = p+'%';
+    setT('exp-progress-label', `${(m.progress_pct??0).toFixed(0)}% baseline→target`);
+    const pe=(o)=> o&&o.expectancy!=null ? `${_exp$(o.expectancy)} (n=${o.n})` : '—';
+    setT('exp-today', pe(per.today)); setT('exp-week', pe(per.this_week)); setT('exp-month', pe(per.this_month));
+    setT('exp-proj-day', _exp$((proj.current||{}).per_day));
+    setT('exp-proj-day-tgt', _exp$((proj.target||{}).per_day));
+  } catch(e){ /* dashboard must always render */ }
+}
 async function fetchPerformance() {
   try {
     const r = await fetch('/agora/performance');
@@ -2969,12 +3021,13 @@ async function fetchToday() {
   await Promise.all([
     fetchHealth(), fetchOrders(), fetchPositions(), fetchAttribution(), fetchSignals(),
     fetchMarket(), fetchReadiness(), fetchCsuite(), fetchToday(), fetchLong(), fetchExits(), fetchCosts(), fetchFactCheck(),
-    fetchPerformance(),
+    fetchPerformance(), fetchExpectancy(),
   ]);
 
   // TWS live data — fetch once on load then every 30s (makes a real IBKR connection)
   fetchTwsLive();
 
+  setInterval(fetchExpectancy,  60_000);  // North-Star meter
   setInterval(fetchHealth,      10_000);
   setInterval(fetchOrders,       8_000);  // orders refresh every 8s — catches fills fast
   setInterval(fetchPositions,   15_000);

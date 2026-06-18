@@ -536,6 +536,13 @@ def attribute_closed_trades(db_path: str) -> dict:
     except Exception as exc:
         logger.debug("shadow_book.evaluate_due: %s", exc)
 
+    # S0.2: score post-close counterfactuals whose horizon has passed (did our exit cut a winner?).
+    try:
+        from agora.ops.post_close_watch import evaluate_due as _pcw_eval
+        _pcw_eval(db_path)
+    except Exception as exc:
+        logger.debug("post_close_watch.evaluate_due: %s", exc)
+
     try:
         with sqlite3.connect(db_path) as conn:
             if _table_exists(db_path, "exit_journal"):

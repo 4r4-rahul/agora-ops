@@ -633,6 +633,31 @@ def _blank() -> dict:
     return {"deployed": 0.0, "realized": 0.0, "entries": 0, "closes": 0, "wins": 0}
 
 
+@router.get("/expectancy")
+async def get_expectancy() -> JSONResponse:
+    """The North-Star expectancy meter: current post-fix expectancy ($/trade) vs the date-locked
+    target, with progress, per-period buckets, and per-day/week/month projection. Read-only."""
+    session = get_session()
+    s = session._settings
+    from agora.ops.expectancy_meter import build_meter
+    meter = build_meter(
+        str(s.db_path),
+        target_per_trade=getattr(s, "expectancy_target_per_trade", 25.0),
+        target_date=getattr(s, "expectancy_target_date", "2026-09-30"),
+        legacy_cutoff=getattr(s, "expectancy_legacy_cutoff_date", "2026-06-12"),
+    )
+    return JSONResponse(meter)
+
+
+@router.get("/exit-regret")
+async def get_exit_regret() -> JSONResponse:
+    """S0.2 post-close counterfactual: regret aggregated by exit reason — which exit type cuts
+    winners short (high early_exit_rate) vs protects the book (high correct_exit_rate). Read-only."""
+    session = get_session()
+    from agora.ops.post_close_watch import exit_regret_report
+    return JSONResponse(exit_regret_report(str(session._settings.db_path)))
+
+
 @router.get("/health")
 async def get_health() -> JSONResponse:
     """

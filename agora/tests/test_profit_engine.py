@@ -42,7 +42,7 @@ class _Position:
 
 
 def _make_debit_spread(pid: str = "test-001", dte: int = 45) -> tuple[_Position, IntelligentProfitEngine]:
-    entry = date(2026, 5, 18)
+    entry = date.today()   # anchored to today → DTE stays = `dte` regardless of calendar
     eng = IntelligentProfitEngine()
     pos = _Position(
         position_id=pid,
@@ -67,7 +67,7 @@ def _make_debit_spread(pid: str = "test-001", dte: int = 45) -> tuple[_Position,
 
 
 def _make_credit_spread(pid: str = "test-002", dte: int = 35) -> tuple[_Position, IntelligentProfitEngine]:
-    entry = date(2026, 5, 18)
+    entry = date.today()   # anchored to today → DTE stays = `dte` regardless of calendar
     eng = IntelligentProfitEngine()
     pos = _Position(
         position_id=pid,

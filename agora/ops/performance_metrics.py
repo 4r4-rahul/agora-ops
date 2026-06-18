@@ -61,16 +61,27 @@ def _metrics_from(pnls: list[float]) -> dict[str, Any]:
     }
 
 
-def compute_metrics(db_path: str) -> dict[str, Any]:
-    """All-time + rolling (last-20, last-30d) headline metrics over REAL fills. Never raises."""
+def compute_metrics(db_path: str, legacy_cutoff: str | None = None) -> dict[str, Any]:
+    """All-time + rolling (last-20, last-30d) headline metrics over REAL fills. Never raises.
+
+    When ``legacy_cutoff`` (a 'YYYY-MM-DD' date) is given, a ``post_fix`` view is added that excludes
+    trades closed before it — the honest expectancy of the *repaired* system, free of pre-churn-fix
+    legacy that would otherwise condemn now-working cells (S0.4)."""
     try:
         with sqlite3.connect(db_path, timeout=10) as conn:
             allt = _metrics_from(_rows(conn))
             last20 = _metrics_from(_rows(conn)[-20:])
             d30 = _metrics_from(_rows(conn, "AND close_date >= date('now','-30 day')"))
-            return {"overall": allt, "last_20": last20, "last_30d": d30,
-                    "min_sample": MIN_SAMPLE,
-                    "computed_at_utc": datetime.now(tz=UTC).isoformat()}
+            out = {"overall": allt, "last_20": last20, "last_30d": d30,
+                   "min_sample": MIN_SAMPLE,
+                   "computed_at_utc": datetime.now(tz=UTC).isoformat()}
+            if legacy_cutoff:
+                # parameterless interpolation is safe — cutoff is a config date, never user input,
+                # but guard the shape anyway so a malformed value can't break the SQL.
+                _cut = str(legacy_cutoff)[:10]
+                out["post_fix"] = _metrics_from(_rows(conn, f"AND close_date >= '{_cut}'"))
+                out["legacy_cutoff"] = _cut
+            return out
     except Exception as exc:
         return {"error": str(exc)}
 

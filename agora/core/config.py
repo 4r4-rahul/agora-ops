@@ -128,6 +128,13 @@ class AgoraSettings(BaseSettings):
     target_dte_close: int = Field(default=21, description="Close position at this DTE")
     earnings_blackout_days: int = Field(default=3, description="Block new vol-premium entries within N days of earnings")
     evaluate_ticker_cooldown_secs: int = Field(default=900, ge=0, description="Skip re-running the full spread eval stack (analyst+strategy+advocate LLM) on the same ticker within N secs for BACKGROUND scans only; catalyst/urgent/normal scans bypass. 0 disables. Cuts the ~11x/session redundant LLM spend.")
+    # ── Expectancy meter + legacy-data cutoff (S0.4) ──────────────────────────
+    # Trades closed before the day-0/1 churn fix landed are mechanically-broken and would condemn
+    # now-repaired cells. The post-fix expectancy view + the cell-gate exclude everything before
+    # this date. Set to the date the min-hold/require-kill guards went live.
+    expectancy_legacy_cutoff_date: str = Field(default="2026-06-12", description="Exclude trades closed before this date from the post-fix expectancy view + cell gate (pre-churn-fix legacy).")
+    expectancy_target_per_trade: float = Field(default=25.0, description="Target expectancy ($/trade) the whole system thrives toward — shown on the dashboard meter.")
+    expectancy_target_date: str = Field(default="2026-09-30", description="Date the expectancy target is 'locked' for — drives the meter countdown/ETA.")
     profit_target_pct: float = Field(default=0.50, description="Close at 50% of max profit for 45-DTE vol-premium trades (tastytrade-validated for 30-60 DTE)")
     profit_target_pct_short_dte: float = Field(default=0.75, description="Close at 75% of max profit for short-DTE trades (sector_momentum, event plays ≤14 DTE) — backtested: 75% saves $1,230 vs 50% over 2.4yr")
     short_delta_target: float = Field(default=0.20, description="20-delta short strike for credit spreads")

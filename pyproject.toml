@@ -67,6 +67,9 @@ warn_unused_ignores = false
 files = [
     "agora/ops/skew_analyzer.py",
     "agora/ops/valuation.py",
+    "agora/ops/expectancy_meter.py",
+    "agora/ops/post_close_watch.py",
+    "agora/ops/performance_metrics.py",
     "agora/ops/position_reconciler.py",
     "agora/ops/live_readiness.py",
     "agora/ops/outcome_attributor.py",
