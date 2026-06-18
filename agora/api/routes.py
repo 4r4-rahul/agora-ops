@@ -157,13 +157,11 @@ async def get_positions() -> JSONResponse:
         except Exception:
             pass
 
-    # IBKR data is considered fresh when < 10 min old
-    IBKR_MAX_AGE = 600.0
-    ibkr_fresh = (
-        ibkr_portfolio_age is not None
-        and ibkr_portfolio_age < IBKR_MAX_AGE
-        and bool(ibkr_by_symbol)
-    )
+    # TWS-ONLY P&L policy (no fabricated numbers): unrealized P&L is sourced EXCLUSIVELY from IBKR's
+    # own per-leg unrealizedPNL. We do NOT substitute a yfinance estimate when TWS is stale/absent —
+    # a delayed-but-real TWS number (shown with its age) is acceptable; a fresh-but-fake yfinance
+    # number is not. When TWS has no value for a position, P&L is reported null ("awaiting TWS").
+    ibkr_have_tws = bool(ibkr_by_symbol)
 
     # Batch-fetch precise entry timestamps (seconds-granularity UTC) keyed by position_id — the
     # OpenPosition object doesn't carry them, so read straight from the DB once for all open rows.
@@ -194,14 +192,15 @@ async def get_positions() -> JSONResponse:
             for leg in pos.legs
         ]
 
-        yf_pnl    = getattr(pos, "unrealized_pnl", None)
+        # TWS-only: use IBKR's exact unrealizedPNL if present (even if stale — age is reported);
+        # otherwise report null, NEVER a yfinance estimate.
         ibkr_entry = ibkr_by_symbol.get(pos.ticker)
-        if ibkr_fresh and ibkr_entry is not None:
+        if ibkr_entry is not None:
             unrealized_pnl = round(ibkr_entry["unrealized_pnl"], 2)
             pnl_source     = "ibkr"
         else:
-            unrealized_pnl = yf_pnl
-            pnl_source     = "yfinance"
+            unrealized_pnl = None
+            pnl_source     = "awaiting_tws"
 
         row: dict = {
             "position_id":         pos.position_id,
@@ -218,7 +217,6 @@ async def get_positions() -> JSONResponse:
             "max_loss_dollars":    pos.max_loss_dollars,
             "max_gain_dollars":    pos.max_gain_dollars,
             "unrealized_pnl":      unrealized_pnl,
-            "yfinance_pnl":        yf_pnl,
             "pnl_source":          pnl_source,
             "ibkr_pnl_age_seconds": round(ibkr_portfolio_age, 0) if ibkr_portfolio_age is not None else None,
             "status":              pos.status.value,
@@ -235,7 +233,7 @@ async def get_positions() -> JSONResponse:
         "positions":      data,
         "count":          len(data),
         "portfolio_greeks": greeks,
-        "ibkr_pnl_fresh": ibkr_fresh,
+        "ibkr_pnl_source": "ibkr" if ibkr_have_tws else "awaiting_tws",
         "ibkr_pnl_age_seconds": round(ibkr_portfolio_age, 0) if ibkr_portfolio_age is not None else None,
         "timestamp":      datetime.now(_ET).isoformat(),
     })
@@ -1176,27 +1174,25 @@ async def get_today_summary() -> JSONResponse:
         logger.warning("today: DB query failed — %s", exc)
 
     open_positions = session._position_mgr.get_open_positions()
-    yf_unrealized = sum(
-        float(getattr(p, "unrealized_pnl", 0) or 0) for p in open_positions
-    )
 
-    # Use IBKR portfolio P&L when available and fresh (< 10 min)
-    unrealized_pnl_today = yf_unrealized
-    unrealized_pnl_source = "yfinance"
+    # TWS-ONLY unrealized P&L (no yfinance substitution). Null when TWS has no data — never faked.
+    unrealized_pnl_today: float | None = None
+    unrealized_pnl_source = "awaiting_tws"
+    unrealized_pnl_age_seconds: float | None = None
     ibkr_agent = getattr(session, "_ibkr_agent", None)
     if ibkr_agent is not None:
         try:
             items, age = ibkr_agent.get_cached_portfolio()
-            if age is not None and age < 600.0 and items:
+            unrealized_pnl_age_seconds = round(age, 0) if age is not None else None
+            if items:   # use IBKR's exact value even if stale (age reported) — not a yfinance guess
                 pnl_by_sym: dict[str, float] = {}
                 for item in items:
                     sym = item["symbol"]
                     pnl_by_sym[sym] = pnl_by_sym.get(sym, 0.0) + item["unrealized_pnl"]
                 open_syms = {p.ticker for p in open_positions}
-                total = sum(v for k, v in pnl_by_sym.items() if k in open_syms)
-                if total != 0.0:
-                    unrealized_pnl_today = round(total, 2)
-                    unrealized_pnl_source = "ibkr"
+                unrealized_pnl_today = round(
+                    sum(v for k, v in pnl_by_sym.items() if k in open_syms), 2)
+                unrealized_pnl_source = "ibkr"
         except Exception:
             pass
 
@@ -1235,9 +1231,12 @@ async def get_today_summary() -> JSONResponse:
         "closed_count":             len(closed_today),
         "realized_pnl_today":       round(realized_pnl_today, 2),
         "open_count":               len(open_positions),
-        "unrealized_pnl_today":     round(unrealized_pnl_today, 2),
+        "unrealized_pnl_today":     (round(unrealized_pnl_today, 2)
+                                     if unrealized_pnl_today is not None else None),
         "unrealized_pnl_source":    unrealized_pnl_source,
-        "total_pnl_today":          round(realized_pnl_today + unrealized_pnl_today, 2),
+        "unrealized_pnl_age_seconds": unrealized_pnl_age_seconds,
+        # total = realized + unrealized; null unrealized (no TWS) → total reflects realized only
+        "total_pnl_today":          round(realized_pnl_today + (unrealized_pnl_today or 0.0), 2),
         "kill_switch":              kill,
         "events":                   events,
         "timestamp":                datetime.now(_ET).isoformat(),

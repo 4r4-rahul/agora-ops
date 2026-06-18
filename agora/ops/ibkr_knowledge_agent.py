@@ -1029,8 +1029,17 @@ class IBKRKnowledgeAgent:
             if accounts:
                 try:
                     await ib.reqAccountUpdatesAsync(subscribe=True, account=accounts[0])
-                    await asyncio.sleep(0.5)
-                    portfolio_items = ib.portfolio()
+                    # Poll until IBKR's account push actually populates ib.portfolio(). The old fixed
+                    # 0.5s sleep often fired BEFORE the push landed → empty cache → the API fell back
+                    # to yfinance (a non-TWS estimate). Wait up to ~4s for the real per-leg
+                    # unrealizedPNL; break as soon as we have live (non-zero) positions.
+                    portfolio_items: list = []
+                    for _ in range(20):
+                        portfolio_items = [it for it in ib.portfolio() if it.position]
+                        if portfolio_items:
+                            break
+                        await asyncio.sleep(0.2)
+                    result["ibkr_portfolio_fetched_at"] = datetime.now(tz=ET).isoformat()
                     result["ibkr_portfolio_items"] = [
                         {
                             "symbol":         item.contract.symbol,

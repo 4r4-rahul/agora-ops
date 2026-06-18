@@ -1523,11 +1523,13 @@ async function fetchPositions() {
       const pnlStr = pnl != null ? fmt$(pnl) : '—';
       const pnlCls = pnl == null ? '' : pnl >= 0 ? 'pnl-pos' : 'pnl-neg';
       // P&L source badge — green "IBKR" when live, yellow "YF" when using yfinance
-      const src    = pos.pnl_source || 'yfinance';
-      const ageMin = pos.ibkr_pnl_age_seconds != null ? Math.round(pos.ibkr_pnl_age_seconds / 60) : null;
+      // TWS-only P&L: show "TWS" with age when present; "awaiting TWS" when none. Never yfinance.
+      const src    = pos.pnl_source || 'awaiting_tws';
+      const ageS   = pos.ibkr_pnl_age_seconds;
+      const ageTxt = ageS == null ? '' : (ageS < 90 ? `${Math.round(ageS)}s` : `${Math.round(ageS/60)}m`);
       const srcBadge = src === 'ibkr'
-        ? `<span title="Unrealized P&L from IBKR portfolio data (${ageMin}m ago)" style="font-size:9px;font-weight:700;color:var(--green);margin-left:3px;opacity:.8">IBKR</span>`
-        : `<span title="Unrealized P&L estimated from yfinance mid-price — may differ from IBKR" style="font-size:9px;font-weight:700;color:var(--yellow);margin-left:3px;opacity:.8">YF</span>`;
+        ? `<span title="Exact unrealized P&L from TWS/IBKR portfolio (as of ${ageTxt} ago)" style="font-size:9px;font-weight:700;color:var(--green);margin-left:3px;opacity:.85">TWS${ageTxt?' '+ageTxt:''}</span>`
+        : `<span title="No live TWS portfolio value yet for this position — not substituting an estimate" style="font-size:9px;font-weight:700;color:var(--text2);margin-left:3px;opacity:.8">awaiting TWS</span>`;
       const dteCol = dte <= 7 ? 'var(--red)' : dte <= 14 ? 'var(--yellow)' : 'var(--text2)';
       const pCol   = PILLAR_COLORS[pos.pillar] || 'var(--text2)';
       const pid    = pos.position_id || pos.ticker;
@@ -1679,8 +1681,7 @@ async function fetchPositions() {
             <div class="detail-kv"><span class="dk">Breakeven</span><span class="dv">${breakeven}</span></div>
             <div class="detail-kv"><span class="dk">Pillar</span><span class="dv" style="color:${pCol};font-size:10px">${(pos.pillar||'').replace(/_/g,' ')}</span></div>
             <div class="detail-kv"><span class="dk">Unrealized P&L</span><span class="dv ${pnlCls}">${pnlStr} ${srcBadge}</span></div>
-            ${pos.pnl_source === 'ibkr' && pos.yfinance_pnl != null ? `<div class="detail-kv"><span class="dk" style="opacity:.6">YF estimate</span><span class="dv" style="opacity:.6;font-size:10px">${fmt$(pos.yfinance_pnl)}</span></div>` : ''}
-            ${pos.ibkr_market_value != null ? `<div class="detail-kv"><span class="dk">Market Value</span><span class="dv">${fmt$(pos.ibkr_market_value)}</span></div>` : ''}
+            ${pos.ibkr_market_value != null ? `<div class="detail-kv"><span class="dk">Market Value (TWS)</span><span class="dv">${fmt$(pos.ibkr_market_value)}</span></div>` : ''}
           </div>
           <div class="detail-section">
             <h4>Timeline</h4>
@@ -2962,12 +2963,14 @@ async function fetchToday() {
     }
     const unrealEl = document.getElementById('tb-unrealized');
     if (unrealEl) {
-      const srcLabel = d.unrealized_pnl_source === 'ibkr' ? ' ·IBKR' : ' ·YF';
-      unrealEl.textContent = fmt$(d.unrealized_pnl_today) + srcLabel;
-      unrealEl.className = 'tc-val ' + pnlCls(d.unrealized_pnl_today);
-      unrealEl.title = d.unrealized_pnl_source === 'ibkr'
-        ? 'Unrealized P&L from IBKR portfolio data'
-        : 'Unrealized P&L estimated from yfinance — may differ from IBKR';
+      const tws = d.unrealized_pnl_source === 'ibkr' && d.unrealized_pnl_today != null;
+      const ageS = d.unrealized_pnl_age_seconds;
+      const ageTxt = ageS == null ? '' : (ageS < 90 ? `${Math.round(ageS)}s` : `${Math.round(ageS/60)}m`);
+      unrealEl.textContent = tws ? `${fmt$(d.unrealized_pnl_today)} ·TWS${ageTxt?' '+ageTxt:''}` : '— ·awaiting TWS';
+      unrealEl.className = 'tc-val ' + (tws ? pnlCls(d.unrealized_pnl_today) : '');
+      unrealEl.title = tws
+        ? `Exact unrealized P&L from TWS/IBKR portfolio (as of ${ageTxt} ago)`
+        : 'No live TWS portfolio value yet — not substituting a yfinance estimate';
     }
     _setText('tb-closed', d.closed_count ?? '0');
     _setText('tb-open',   d.open_count   ?? '0');
