@@ -459,6 +459,11 @@ class StrategyRulesEngine:
         calls = chain.get("calls")
         puts = chain.get("puts")
         sd = short_delta if short_delta is not None else self._settings.short_delta_target
+        # W1: credit verticals sell at a FLOOR of ~30Δ (credit_spread_short_delta) so credit/width
+        # clears the EV gate. This deliberately overrides the dynamic_params instinct to go further
+        # OTM (0.15Δ) in high IV — that thins credit/width *below* the gate exactly when we want to
+        # sell premium. A floor (not a passthrough): a higher dynamic delta would still win.
+        csd = max(sd, getattr(self._settings, "credit_spread_short_delta", sd))
 
         try:
             if strategy == StrategyType.BULL_CALL_SPREAD:
@@ -466,9 +471,9 @@ class StrategyRulesEngine:
             elif strategy == StrategyType.BEAR_PUT_SPREAD:
                 return self._bear_put_spread(puts, spot, expiry)
             elif strategy == StrategyType.BULL_PUT_SPREAD:
-                return self._bull_put_spread(puts, spot, expiry, short_delta=sd)
+                return self._bull_put_spread(puts, spot, expiry, short_delta=csd)
             elif strategy == StrategyType.BEAR_CALL_SPREAD:
-                return self._bear_call_spread(calls, spot, expiry, short_delta=sd)
+                return self._bear_call_spread(calls, spot, expiry, short_delta=csd)
             elif strategy == StrategyType.IRON_CONDOR:
                 return self._iron_condor(calls, puts, spot, expiry, short_delta=sd)
             else:

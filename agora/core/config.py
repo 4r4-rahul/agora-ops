@@ -159,7 +159,8 @@ class AgoraSettings(BaseSettings):
     # win≥55%" caveat was about UP-sizing, which it never does, and exits are now fixed).
     profit_target_pct: float = Field(default=0.50, description="Close at 50% of max profit for 45-DTE vol-premium trades (tastytrade-validated for 30-60 DTE)")
     profit_target_pct_short_dte: float = Field(default=0.75, description="Close at 75% of max profit for short-DTE trades (sector_momentum, event plays ≤14 DTE) — backtested: 75% saves $1,230 vs 50% over 2.4yr")
-    short_delta_target: float = Field(default=0.20, description="20-delta short strike for credit spreads")
+    short_delta_target: float = Field(default=0.20, description="20-delta short — used by the debit verticals' short leg (bull_call/bear_put) and the iron-condor wings. Credit verticals use credit_spread_short_delta instead (see W1).")
+    credit_spread_short_delta: float = Field(default=0.30, description="W1 (2026-06-18): ~30-delta short for the CREDIT verticals only (bull_put/bear_call). At the old 20Δ the credit/width came in 0.08-0.13 — below the 0.30 min_credit_to_width_ratio EV gate (17/17 historical losers were 0.13-0.23 credit/width), so credit spreads almost NEVER traded. Selling ~30Δ lifts credit/width above the gate → they trade as positive-EV, ~70% POP structures (the high-win-rate engine). The cr/w gate still guards EV, so this cannot admit a negative-EV spread — it only unlocks the good ones. Scoped OFF the debit verticals (raising their short leg compresses the spread → empty) and the iron condor (cr/w-exempt, classic 16-20Δ wings). Measured forward on the meter.")
     long_delta_target: float = Field(default=0.35, description="35-delta long strike for debit spreads")
 
     # ── Signal thresholds ──────────────────────────────────────────
