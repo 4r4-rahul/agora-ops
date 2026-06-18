@@ -782,7 +782,7 @@ tr.pos-detail-row td { padding: 0; background: var(--bg1); }
           <table>
             <thead><tr>
               <th>Ticker</th><th>Strategy</th><th>Dir</th>
-              <th>Cts</th><th>Credit/Debit</th><th>Unrealized</th><th>DTE</th>
+              <th>Cts</th><th>Credit/Debit</th><th>Unrealized</th><th>Opened</th><th>DTE</th>
             </tr></thead>
             <tbody id="pos-tbody"></tbody>
           </table>
@@ -799,10 +799,10 @@ tr.pos-detail-row td { padding: 0; background: var(--bg1); }
         <div class="tbl-wrap" style="max-height:160px">
           <table>
             <thead><tr>
-              <th>Ticker</th><th>Strategy</th><th>Dir</th><th>Entry $</th><th>Close $</th><th>P&amp;L</th><th>How Closed</th>
+              <th>Ticker</th><th>Strategy</th><th>Dir</th><th>Entry $</th><th>Close $</th><th>P&amp;L</th><th>Opened</th><th>Closed</th><th>How Closed</th>
             </tr></thead>
             <tbody id="closed-today-tbody">
-              <tr><td colspan="7" style="color:var(--text2);text-align:center;padding:8px;font-size:10px">No closes today</td></tr>
+              <tr><td colspan="9" style="color:var(--text2);text-align:center;padding:8px;font-size:10px">No closes today</td></tr>
             </tbody>
           </table>
         </div>
@@ -1509,7 +1509,7 @@ async function fetchPositions() {
 
     const tb = document.getElementById('pos-tbody');
     if (!rows.length) {
-      tb.innerHTML = '<tr><td colspan="7" style="color:var(--text2);text-align:center;padding:14px">No open positions</td></tr>';
+      tb.innerHTML = '<tr><td colspan="8" style="color:var(--text2);text-align:center;padding:14px">No open positions</td></tr>';
       return;
     }
     tb.innerHTML = rows.map(pos => {
@@ -1565,6 +1565,7 @@ async function fetchPositions() {
       const entryD   = fmt_date(pos.entry_date);
       const expiryD  = fmt_date(pos.expiry_date);
       const closeD   = fmt_date(pos.target_close_date);
+      const heldDays = pos.entry_date ? Math.max(0, Math.round((today - new Date(pos.entry_date)) / 86_400_000)) : null;
 
       // Breakeven — for credit spread: entry side ± net credit
       // Just show the short strike as proxy if we can't compute precisely
@@ -1715,10 +1716,11 @@ async function fetchPositions() {
         <td>${pos.contracts || 1}</td>
         <td>${entryLabel}</td>
         <td class="${pnlCls}">${pnlStr}${srcBadge}</td>
+        <td style="font-size:10px;color:var(--text2)" title="Opened ${entryD}">${entryD}${heldDays!=null?` <span style="color:var(--text3,#667)">(${heldDays}d held)</span>`:''}</td>
         <td style="color:${dteCol}">${dte}d</td>
       </tr>
       <tr class="pos-detail-row" id="detail-${pid}">
-        <td colspan="7">${detailHtml}</td>
+        <td colspan="8">${detailHtml}</td>
       </tr>`;
     }).join('');
   } catch {}
@@ -2986,7 +2988,7 @@ async function fetchToday() {
     if (ctTbody) {
       const rows = d.closed_today || [];
       if (!rows.length) {
-        ctTbody.innerHTML = `<tr><td colspan="7" style="color:var(--text2);text-align:center;padding:8px;font-size:10px">No closes today</td></tr>`;
+        ctTbody.innerHTML = `<tr><td colspan="9" style="color:var(--text2);text-align:center;padding:8px;font-size:10px">No closes today</td></tr>`;
       } else {
         const _sourceLabel = src => ({
           'tws_startup_sync':     '🔄 Startup Sync',
@@ -3006,6 +3008,10 @@ async function fetchToday() {
           const strat   = (r.strategy || '').replace(/_/g,' ');
           const src     = _sourceLabel(r.close_source || '');
           const dir     = `<span style="color:${r.direction==='bullish'?'var(--green)':'var(--red)'}">${_dirArrow(r.direction)}</span>`;
+          const oD      = (r.entry_date||'').slice(0,10) || '—';
+          const cD      = (r.close_date||'').slice(0,10) || '—';
+          const held    = (r.entry_date && r.close_date)
+            ? Math.max(0, Math.round((new Date(r.close_date) - new Date(r.entry_date)) / 86_400_000)) : null;
           return `<tr>
             <td><strong>${r.ticker}</strong></td>
             <td style="font-size:10px">${strat}</td>
@@ -3013,6 +3019,8 @@ async function fetchToday() {
             <td>$${(r.entry_price||0).toFixed(2)}</td>
             <td>$${(r.close_price||0).toFixed(2)}</td>
             <td class="${pnlCls2}">${pnlStr}</td>
+            <td style="font-size:10px;color:var(--text2)">${oD}${held!=null?` <span style="color:var(--text3,#667)">(${held}d)</span>`:''}</td>
+            <td style="font-size:10px;color:var(--text2)">${cD}</td>
             <td style="font-size:10px;color:var(--text2)">${src}</td>
           </tr>`;
         }).join('');
