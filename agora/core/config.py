@@ -100,6 +100,12 @@ class AgoraSettings(BaseSettings):
         default=4,
         description="clientId for IBKRNewsAgent (must differ from ibkr_client_id and startup_tws_sync_client_id).",
     )
+    ibkr_knowledge_client_id: int = Field(
+        default=17,
+        description="Dedicated clientId for IBKRKnowledgeAgent scans incl. the portfolio-P&L fetch. "
+        "MUST differ from fundamental_data's clientId 13 — sharing 13 caused Error 326 collisions "
+        "that left ib.portfolio() unread (TWS P&L never populated). 17 is clear of the 10-16 cluster.",
+    )
 
     # ── IBKR GTC / order lifecycle ─────────────────────────────────
     gtc_max_concurrent: int = Field(

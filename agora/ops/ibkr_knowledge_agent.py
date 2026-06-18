@@ -91,7 +91,8 @@ Client ID Allocation (NEVER reuse concurrently):
   client_id=10 → ibkr_bridge order submission (settings.ibkr_client_id)
   client_id=11 → ibkr_bridge close_position (settings.ibkr_client_id + 1)
   client_id=12 → startup_tws_sync (settings.startup_tws_sync_client_id)
-  client_id=13 → IBKRKnowledgeAgent health scans
+  client_id=13 → fundamental_data short-lived fetches
+  client_id=17 → IBKRKnowledgeAgent health scans + portfolio P&L (dedicated, was 13 → Error 326)
 
 Live trading uses port 7496; these same client IDs shift to the live account.
 
@@ -966,7 +967,7 @@ class IBKRKnowledgeAgent:
             await ib.connectAsync(
                 self._settings.ibkr_host,
                 self._settings.ibkr_port,
-                clientId=13,
+                clientId=getattr(self._settings, "ibkr_knowledge_client_id", 17),
                 timeout=8,
             )
             result["connected"] = True
@@ -1108,7 +1109,7 @@ class IBKRKnowledgeAgent:
             await ib.connectAsync(
                 self._settings.ibkr_host,
                 self._settings.ibkr_port,
-                clientId=13,
+                clientId=getattr(self._settings, "ibkr_knowledge_client_id", 17),
                 timeout=6,
             )
             accounts = ib.managedAccounts()
