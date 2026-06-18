@@ -42,6 +42,9 @@ ET = ZoneInfo("America/New_York")
 
 _SCAN_INTERVAL_SEC = 1800  # 30 min
 _IBKR_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ibkr-ka")
+# Separate single-thread pool for the live P&L poller so a slow/stuck 30-min scan can never queue
+# behind it (they share no thread). Distinct clientId too — fully decoupled.
+_PORTFOLIO_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ibkr-pnl")
 
 
 def _run_in_new_loop(coro):
@@ -601,7 +604,7 @@ class IBKRKnowledgeAgent:
             try:
                 items = await asyncio.wait_for(
                     asyncio.get_event_loop().run_in_executor(
-                        _IBKR_EXECUTOR, lambda: _run_in_new_loop(self._fetch_portfolio_only())),
+                        _PORTFOLIO_EXECUTOR, lambda: _run_in_new_loop(self._fetch_portfolio_only())),
                     timeout=20,
                 )
                 if items is not None:
@@ -625,7 +628,14 @@ class IBKRKnowledgeAgent:
             accounts = ib.managedAccounts()
             if not accounts:
                 return None
-            await ib.reqAccountUpdatesAsync(accounts[0])
+            # CRITICAL: reqAccountUpdatesAsync HANGS on this TWS — it awaits an account-download-end
+            # signal that never arrives (verified). But the SUBSCRIBE request still fires, and TWS
+            # streams updatePortfolio events that populate ib.portfolio() regardless. So fire it with
+            # a short timeout, ignore the (never-coming) completion, then poll portfolio().
+            try:
+                await asyncio.wait_for(ib.reqAccountUpdatesAsync(accounts[0]), timeout=2)
+            except (TimeoutError, asyncio.TimeoutError):
+                pass
             items: list = []
             for _ in range(25):  # up to ~5s for IBKR's account push to land
                 items = [it for it in ib.portfolio() if it.position]
@@ -1095,15 +1105,16 @@ class IBKRKnowledgeAgent:
             accounts = result.get("managed_accounts") or ib.managedAccounts()
             if accounts:
                 try:
-                    # NOTE: this ib_insync build's reqAccountUpdatesAsync takes the account
-                    # POSITIONALLY — the old subscribe=/account= kwargs raised TypeError, which the
-                    # except below swallowed, so ibkr_portfolio_items was ALWAYS empty and the UI
-                    # silently fell back to yfinance. Correct signature below.
-                    await ib.reqAccountUpdatesAsync(accounts[0])
-                    # Poll until IBKR's account push actually populates ib.portfolio(). The old fixed
-                    # 0.5s sleep often fired BEFORE the push landed → empty cache → the API fell back
-                    # to yfinance (a non-TWS estimate). Wait up to ~4s for the real per-leg
-                    # unrealizedPNL; break as soon as we have live (non-zero) positions.
+                    # reqAccountUpdatesAsync HANGS on this TWS (awaits an account-download-end that
+                    # never arrives) — fire it with a short timeout and ignore completion; the
+                    # subscribe still streams updatePortfolio events that populate ib.portfolio().
+                    # (The old subscribe=/account= kwargs ALSO raised TypeError, swallowed here, which
+                    # is why ibkr_portfolio_items was always empty → yfinance fallback.)
+                    try:
+                        await asyncio.wait_for(ib.reqAccountUpdatesAsync(accounts[0]), timeout=2)
+                    except (TimeoutError, asyncio.TimeoutError):
+                        pass
+                    # Poll until the push populates ib.portfolio() — break on first live position.
                     portfolio_items: list = []
                     for _ in range(20):
                         portfolio_items = [it for it in ib.portfolio() if it.position]
