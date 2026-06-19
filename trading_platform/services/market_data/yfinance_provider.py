@@ -47,9 +47,14 @@ def _ibkr_atm_iv(ticker: str, expiry_yyyymmdd: str, atm_strike: float) -> float 
         cid  = int(os.environ.get("IBKR_IV_CLIENT_ID", "19") or 19)
         mdt  = int(os.environ.get("IBKR_MARKET_DATA_TYPE", "1") or 1)
         with _IBKR_IV_LOCK:
-            # ib_insync binds its IB() to the current event loop via get_event_loop(), so we must
-            # set_event_loop on the fresh loop (mirrors the codebase's _run_in_new_loop) and clear it
-            # after — else "Future attached to a different loop".
+            # ib_insync binds its IB() to the current event loop via get_event_loop(), so we set a
+            # fresh loop for the call. RESTORE the prior loop afterward (not None) — in production
+            # this runs in a worker thread with no loop (restores None, fine), but if ever called on
+            # a thread that already has a loop, nulling it would break that thread's async work.
+            try:
+                _prev_loop = asyncio.get_event_loop()
+            except RuntimeError:
+                _prev_loop = None
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
@@ -61,7 +66,10 @@ def _ibkr_atm_iv(ticker: str, expiry_yyyymmdd: str, atm_strike: float) -> float 
                     timeout=8.0))
             finally:
                 loop.close()
-                asyncio.set_event_loop(None)
+                try:
+                    asyncio.set_event_loop(_prev_loop)
+                except Exception:
+                    pass
         for key in ((float(atm_strike), "C"), (float(atm_strike), "P")):
             q = (quotes or {}).get(key)
             if q and float(q.get("iv", 0) or 0) > 0:
