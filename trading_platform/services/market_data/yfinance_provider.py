@@ -26,6 +26,51 @@ logger = logging.getLogger(__name__)
 # Serialise all calls that touch tk.options / tk.option_chain() behind this lock.
 _YF_OPTIONS_LOCK = threading.Lock()
 
+# Serialise the IBKR ATM-IV fetches (industry-standard upgrade #1): snapshots run concurrently
+# across tickers, but the dedicated IBKR clientId can serve only one connect at a time → without
+# this lock concurrent fetches collide (Error 326). Once/ticker is cheap, so serialising is fine.
+_IBKR_IV_LOCK = threading.Lock()
+
+
+def _ibkr_atm_iv(ticker: str, expiry_yyyymmdd: str, atm_strike: float) -> float | None:
+    """REAL IBKR/OPRA ATM implied vol for the IV-rank input (industry-standard #1). OFF unless
+    IV_RANK_USE_IBKR is truthy in the environment. Reuses trading_platform.fetch_chain_quotes on a
+    dedicated, serialised clientId with a hard timeout. Returns decimal IV (e.g. 0.25) or None — the
+    caller falls back to the yfinance ATM IV, so this can NEVER break the snapshot."""
+    import os
+    if os.environ.get("IV_RANK_USE_IBKR", "").strip().lower() not in ("1", "true", "yes", "on"):
+        return None
+    try:
+        from trading_platform.services.ibkr_client import fetch_chain_quotes
+        host = os.environ.get("IBKR_HOST", "127.0.0.1")
+        port = int(os.environ.get("IBKR_PORT", "7497") or 7497)
+        cid  = int(os.environ.get("IBKR_IV_CLIENT_ID", "19") or 19)
+        mdt  = int(os.environ.get("IBKR_MARKET_DATA_TYPE", "1") or 1)
+        with _IBKR_IV_LOCK:
+            # ib_insync binds its IB() to the current event loop via get_event_loop(), so we must
+            # set_event_loop on the fresh loop (mirrors the codebase's _run_in_new_loop) and clear it
+            # after — else "Future attached to a different loop".
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                quotes = loop.run_until_complete(asyncio.wait_for(
+                    fetch_chain_quotes(
+                        ticker=ticker, expiry=expiry_yyyymmdd,
+                        call_strikes=[float(atm_strike)], put_strikes=[float(atm_strike)],
+                        market_data_type=mdt, host=host, port=port, client_id=cid),
+                    timeout=8.0))
+            finally:
+                loop.close()
+                asyncio.set_event_loop(None)
+        for key in ((float(atm_strike), "C"), (float(atm_strike), "P")):
+            q = (quotes or {}).get(key)
+            if q and float(q.get("iv", 0) or 0) > 0:
+                return float(q["iv"])
+        return None
+    except Exception as exc:
+        logger.debug("IBKR ATM IV fetch failed for %s: %s", ticker, exc)
+        return None
+
 
 class YFinanceProvider:
     """
@@ -161,6 +206,8 @@ class YFinanceProvider:
         """
         try:
             atm_iv = None
+            _atm_strike: float | None = None   # captured for the optional IBKR ATM-IV override
+            _yf_expiry: str | None = None
             today = date.today()
             # Retry once on 401/stale crumb — yfinance global session can expire mid-session
             for _attempt in range(2):
@@ -198,7 +245,18 @@ class YFinanceProvider:
                     if not atm_iv or atm_iv <= 0:
                         atm_row_p = puts.iloc[(puts["strike"] - spot).abs().argsort()[:1]]
                         atm_iv = float(atm_row_p["impliedVolatility"].iloc[0]) if not atm_row_p.empty else None
+                    if not atm_row.empty:
+                        _atm_strike = float(atm_row["strike"].iloc[0])
+                        _yf_expiry = expiry
                 break  # success
+
+            # Industry-standard #1: PREFER the real IBKR/OPRA ATM IV over yfinance's (flag-gated;
+            # no-op + instant return when IV_RANK_USE_IBKR is off). The 252-day cache + percentile
+            # machinery below is unchanged — only the current-IV INPUT becomes broker-grade.
+            if atm_iv and _atm_strike and _yf_expiry:
+                _ib_iv = _ibkr_atm_iv(ticker, _yf_expiry.replace("-", ""), _atm_strike)
+                if _ib_iv and 0.005 <= _ib_iv <= 5.0:
+                    atm_iv = _ib_iv
 
             # Load IV cache — needed whether we got live data or not
             self._IV_CACHE_DIR.mkdir(parents=True, exist_ok=True)
