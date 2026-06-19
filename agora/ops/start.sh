@@ -36,19 +36,35 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
 fi
 trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
 
-# ── Kill any stale instance ────────────────────────────────────────────────────
-if [[ -f "$PID_FILE" ]]; then
-  OLD_PID=$(cat "$PID_FILE")
-  if kill -0 "$OLD_PID" 2>/dev/null; then
-    echo "[start.sh] Stopping stale PID $OLD_PID" >> "$LOG"
-    kill "$OLD_PID" && sleep 2
-  fi
-  rm -f "$PID_FILE"
+# ── Kill any stale instance — ORPHAN-PROOF, wait for port 8001 to actually free ────────────────
+# uvicorn ignores SIGTERM during shutdown, so a TERM + 2s sleep used to start a new process OVER a
+# still-running one → port-8001 collision → the old engine kept running its IBKR/lifecycle tasks
+# (two engines on one account). Now: kill the port owner + every uvicorn-agora pid (TERM, then KILL
+# survivors) and BLOCK until 8001 is free before starting. Never start over a live engine.
+# NOTE: `set -euo pipefail` is on — every conditional below uses `if; then` (NOT `cond && action`,
+# which exits the script under set -e when cond is false) and `|| true` on pipes that may find nothing.
+engine_pids() {
+  { lsof -nP -iTCP:8001 -sTCP:LISTEN -t 2>/dev/null || true
+    pgrep -f "uvicorn agora.api.app" 2>/dev/null || true
+    { [[ -f "$PID_FILE" ]] && cat "$PID_FILE" 2>/dev/null; } || true
+  } | grep -E '^[0-9]+$' | sort -u || true
+}
+PIDS=$(engine_pids || true)
+if [[ -n "$PIDS" ]]; then
+  echo "[start.sh] stopping existing engine: $(echo "$PIDS" | tr '\n' ' ')" >> "$LOG"
+  for p in $PIDS; do kill -TERM "$p" 2>/dev/null || true; done
+  for _ in $(seq 1 8); do
+    if [[ -z "$(engine_pids || true)" ]]; then break; fi
+    sleep 1
+  done
+  for p in $(engine_pids || true); do kill -KILL "$p" 2>/dev/null || true; done
 fi
-
-# Belt-and-suspenders: kill any other uvicorn for this app
-pkill -f "uvicorn agora.api.app" 2>/dev/null || true
-sleep 1
+rm -f "$PID_FILE"
+# Block until port 8001 is free (max ~10s) so the new uvicorn binds cleanly instead of orphaning.
+for _ in $(seq 1 10); do
+  if [[ -z "$(lsof -nP -iTCP:8001 -sTCP:LISTEN -t 2>/dev/null || true)" ]]; then break; fi
+  sleep 1
+done
 
 # ── Log rotation: keep last 7 days ────────────────────────────────────────────
 find "$LOG_DIR" -name "agora-*.log" -mtime +7 -delete 2>/dev/null || true
@@ -83,7 +99,9 @@ export IBKR_NEWS_CLIENT_ID=$(( 4 + _OFF ))
 export STARTUP_TWS_SYNC_CLIENT_ID=$(( 12 + _OFF ))
 echo "[start.sh] IBKR clientId block offset=$_OFF (main=$IBKR_CLIENT_ID news=$IBKR_NEWS_CLIENT_ID sync=$STARTUP_TWS_SYNC_CLIENT_ID) $(date)" >> "$LOG_DIR/launchd-start.log"
 
-"$VENV/uvicorn" agora.api.app:app \
+# nohup → uvicorn ignores SIGHUP so it survives the parent (launchd OR a manual/ssh shell) exiting.
+# (macOS has no `setsid`; nohup is the portable equivalent here.)
+nohup "$VENV/uvicorn" agora.api.app:app \
   --host 0.0.0.0 --port 8001 \
   --workers 1 \
   >> "$DATED_LOG" 2>&1 &
