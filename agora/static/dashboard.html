@@ -1592,6 +1592,15 @@ async function fetchPositions() {
           const be = shortLeg.strike - netCredit;
           breakeven = `$${be.toFixed(2)}`;
         }
+      } else if (longLeg && longLeg.strike != null) {
+        // Single-leg long option (no short leg): breakeven = strike ± premium paid.
+        // entry_price is the per-share debit (positive); use its magnitude.
+        const prem = Math.abs(netCredit || 0);
+        if ((pos.strategy||'').includes('call')) {
+          breakeven = `$${(longLeg.strike + prem).toFixed(2)}`;   // long call: strike + premium
+        } else if ((pos.strategy||'').includes('put')) {
+          breakeven = `$${(longLeg.strike - prem).toFixed(2)}`;   // long put: strike − premium
+        }
       }
 
       // ── Profit engine widget ──
@@ -1680,7 +1689,7 @@ async function fetchPositions() {
           </div>
           <div class="detail-section">
             <h4>Risk</h4>
-            <div class="detail-kv"><span class="dk">Max Gain</span><span class="dv pnl-pos">${maxGain}</span></div>
+            <div class="detail-kv"><span class="dk">${(pos.strategy||'').startsWith('long') ? 'Target Gain' : 'Max Gain'}</span><span class="dv pnl-pos">${maxGain}</span></div>
             <div class="detail-kv"><span class="dk">Max Loss</span><span class="dv pnl-neg">${maxLoss}</span></div>
             <div class="detail-kv"><span class="dk">R/R Ratio</span><span class="dv">${rr}</span></div>
             <div class="detail-kv"><span class="dk">Breakeven</span><span class="dv">${breakeven}</span></div>
