@@ -59,7 +59,7 @@ class AgoraSettings(BaseSettings):
         description="Max fraction of account_size deployed (Σ max_loss across all open "
                     "positions, both pipelines) before any new entry is blocked. 1.0 = off.",
     )
-    daily_loss_limit_pct: float = Field(default=0.02, ge=0.005, le=0.25)
+    daily_loss_limit_pct: float = Field(default=0.02, ge=0.005, le=0.50)  # le raised 0.25→0.50 (2026-06-22) to allow the $4k/40% daily-loss breaker requested for free-paper data collection
     weekly_loss_limit_pct: float = Field(default=0.06, ge=0.01, le=0.20)
     paper_disable_loss_breakers: bool = Field(
         default=False,
