@@ -750,6 +750,41 @@ async def get_feature_store_summary() -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+@router.get("/models/summary")
+async def get_models_summary() -> JSONResponse:
+    """Phase 0c — the model fleet: latest run per model (status, readiness, n, summary) + score
+    counts. Read-only (model_runs / model_scores)."""
+    import json as _json
+    import sqlite3
+    session = get_session()
+    db = str(session._settings.db_path)
+    try:
+        conn = sqlite3.connect(db, timeout=8); conn.row_factory = sqlite3.Row
+        has = conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='model_runs'").fetchone()[0]
+        if not has:
+            return JSONResponse({"models": [], "note": "model-runner has not run yet"})
+        models = []
+        for r in conn.execute(
+            """SELECT m.model_name, m.run_ts_utc, m.status, m.n_samples, m.readiness, m.summary, m.metrics_json
+               FROM model_runs m
+               JOIN (SELECT model_name, MAX(id) mx FROM model_runs GROUP BY model_name) l
+                 ON l.mx = m.id ORDER BY m.model_name"""):
+            try:
+                metrics = _json.loads(r["metrics_json"]) if r["metrics_json"] else {}
+            except Exception:
+                metrics = {}
+            models.append({"model": r["model_name"], "last_run": r["run_ts_utc"], "status": r["status"],
+                           "n_samples": r["n_samples"], "readiness": r["readiness"],
+                           "summary": r["summary"], "metrics": metrics})
+        scored = {r["model_name"]: r["n"] for r in conn.execute(
+            "SELECT model_name, COUNT(*) n FROM model_scores GROUP BY model_name")} \
+            if conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='model_scores'").fetchone()[0] else {}
+        conn.close()
+        return JSONResponse({"models": models, "score_counts": scored, "n_models": len(models)})
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 @router.get("/health")
 async def get_health() -> JSONResponse:
     """

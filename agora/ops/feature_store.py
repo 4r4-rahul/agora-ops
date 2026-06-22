@@ -17,19 +17,16 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Any
 
-logger = logging.getLogger(__name__)
+# SINGLE SOURCE OF TRUTH for the label provenance — the canonical predicate from edge_dashboard, so
+# the ML label can never drift from the rest of the system (expert review 2026-06-22: three
+# hand-maintained copies is exactly how the fabricated-label bug re-emerges). The LABEL is set only on
+# trustworthy, agent-driven, post-cutoff closes.
+from agora.ops.edge_dashboard import _REAL_CLOSE
 
-# Mirror edge_dashboard._REAL_CLOSE so the LABEL is only set on trustworthy, agent-driven closes.
-_REAL_CLOSE = (
-    "status='closed' AND close_date IS NOT NULL AND close_date<>'' "
-    "AND (close_source IN ('lifecycle','thesis_exit','trailing_stop','stop_loss','pre_earnings') "
-    "     OR close_source LIKE 'session:%') "
-    "AND close_source NOT LIKE '%fabricated%' AND close_source NOT LIKE '%reconcile%' "
-    "AND close_source NOT LIKE '%tws_startup_sync%' AND close_source NOT LIKE '%duplicate%'"
-)
+logger = logging.getLogger(__name__)
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS trade_features (
@@ -150,7 +147,8 @@ def build_feature_store(db_path: str, legacy_cutoff: str = "2026-06-12") -> dict
                      _dte(p["entry_date"], p["expiry_date"]),
                      round(mg / ml, 3) if ml > 0 else None, ml, mg, p["entry_price"],
                      dc["triggered_by"] if dc else None, gates_n, nf, dh, mae, mfe, fnd, fnt,
-                     p["status"], 1 if is_real else 0, rpnl, ror, win, date.today().isoformat()),
+                     p["status"], 1 if is_real else 0, rpnl, ror, win,
+                     datetime.now(UTC).date().isoformat()),
                 )
             except Exception as _exc:
                 logger.debug("feature row failed for %s: %s", p["position_id"], _exc)

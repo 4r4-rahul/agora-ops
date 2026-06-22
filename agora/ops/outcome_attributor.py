@@ -967,15 +967,23 @@ class ScheduledAttributor:
                 # Phase 0b feature store — rebuild the unified ML table AFTER capture+attribution so
                 # path features + labels are fresh. Read-only on sources, writes only trade_features.
                 try:
+                    from agora.core.config import get_settings
                     from agora.ops.feature_store import build_feature_store
-                    _fs = build_feature_store(
-                        self._db_path,
-                        legacy_cutoff=getattr(getattr(self, "_settings", None),
-                                              "expectancy_legacy_cutoff_date", "2026-06-12"),
-                    )
+                    _cut = getattr(get_settings(), "expectancy_legacy_cutoff_date", "2026-06-12")
+                    _fs = build_feature_store(self._db_path, legacy_cutoff=_cut)
                     logger.debug("feature store: %s", _fs)
                 except Exception as _fsexc:
                     logger.debug("feature store skipped: %s", _fsexc)
+
+                # Phase 0c model-runner — run any model whose cadence is due (reads the fresh feature
+                # store). Read-only on trading data, writes only model_runs/model_scores, never raises.
+                try:
+                    from agora.ops.model_runner import run_due_models
+                    _mr = run_due_models(self._db_path)
+                    if _mr.get("ran"):
+                        logger.debug("model-runner: %s", _mr)
+                except Exception as _mrexc:
+                    logger.debug("model-runner skipped: %s", _mrexc)
                 if result.get("attributed", 0) > 0 or new_analyst > 0:
                     logger.info("Attribution patrol: %s", result)
                 # Trigger lessons when N new attributions OR weekly timer
