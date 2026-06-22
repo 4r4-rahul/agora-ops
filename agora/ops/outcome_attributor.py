@@ -172,6 +172,7 @@ def _attribute_analyst(conn: sqlite3.Connection) -> int:
            JOIN positions       p  ON p.position_id = dc.position_id
            WHERE a.thesis_played_out IS NULL
              AND a.decision = 'thesis'
+             AND a.decision_id IS NOT NULL AND a.decision_id <> ''
              AND {_REAL_CLOSE}""",
     ).fetchall()
     attributed = 0
@@ -202,6 +203,7 @@ def _attribute_strategy(conn: sqlite3.Connection) -> int:
            JOIN decision_chains dc ON dc.chain_id = s.decision_id
            JOIN positions       p  ON p.position_id = dc.position_id
            WHERE s.structure_used IS NULL
+             AND s.decision_id IS NOT NULL AND s.decision_id <> ''
              AND {_REAL_CLOSE}""",
     ).fetchall()
     attributed = 0
@@ -235,6 +237,7 @@ def _attribute_advocate(conn: sqlite3.Connection) -> int:
            JOIN decision_chains dc ON dc.chain_id = a.decision_id
            JOIN positions       p  ON p.position_id = dc.position_id
            WHERE a.trade_taken IS NULL
+             AND a.decision_id IS NOT NULL AND a.decision_id <> ''
              AND a.verdict IN ('PASS', 'CAUTION', 'BLOCK')
              AND {_REAL_CLOSE}""",
     ).fetchall()
@@ -258,8 +261,9 @@ def _attribute_advocate(conn: sqlite3.Connection) -> int:
         shadow = conn.execute(
             """SELECT a.journal_id, sb.hypothetical_win, sb.hypothetical_pnl, a.ticker
                FROM advocate_journal a
-               JOIN shadow_book sb ON sb.decision_id = a.decision_id
+               JOIN shadow_book sb ON sb.decision_id = a.decision_id AND sb.decision_id <> ''
                WHERE a.trade_taken IS NULL AND a.verdict='BLOCK'
+                 AND a.decision_id IS NOT NULL AND a.decision_id <> ''
                  AND sb.evaluated=1 AND sb.hypothetical_win IS NOT NULL""",
         ).fetchall()
         for journal_id, hyp_win, hyp_pnl, ticker in shadow:
