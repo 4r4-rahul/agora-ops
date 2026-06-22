@@ -407,6 +407,7 @@ async def place_bracket_order(
     use_adaptive_algo: bool = False,
     adaptive_algo_priority: str = "Normal",
     max_slippage_pct_of_width: float = 0.10,
+    max_walk_steps: int = 12,
     market_data_type: int = 3,
     max_combo_spread_pct: float = 0.50,
     pricing_sanity_max_ratio: float = 2.0,
@@ -636,8 +637,8 @@ async def place_bracket_order(
         # Bound the walk to a fixed number of reprices so a wide spread can't hog the
         # single-threaded IBKR executor; faster cadence so the market doesn't drift off the
         # target mid-walk (20s/4min was too slow — orders reached the natural after it moved).
-        _MAX_WALK_STEPS = 12
-        _PRICE_STEP_SEC = 12  # ~2.4 min max walk
+        _MAX_WALK_STEPS = max_walk_steps  # mode-dependent: paper=20 (~4min patience), live=4 (~48s)
+        _PRICE_STEP_SEC = 12  # 12s/step; paper waits out the 2-4min sim lag, live aborts fast
         max_steps = max(1, min(_MAX_WALK_STEPS, int(round(walk_room / max(price_step_size, _TICK)))))
         eff_step = (max(price_step_size, round(walk_room / max_steps, 2))
                     if walk_room > 0 else price_step_size)
@@ -796,6 +797,7 @@ async def place_legs_individually(
     max_combo_spread_pct: float = 0.50,
     pricing_sanity_max_ratio: float = 2.0,
     entry_marketable_start: bool = True,
+    max_walk_steps: int = 8,
 ) -> dict[str, Any]:
     """
     Submit each leg of a spread as a standalone option order.
@@ -819,7 +821,7 @@ async def place_legs_individually(
         raise RuntimeError("ib_insync not installed")
 
     _PRICE_STEP_SEC  = 12   # faster cadence so the per-leg marketable price doesn't drift off
-    _MAX_PRICE_STEPS = 8
+    _MAX_PRICE_STEPS = max_walk_steps  # BOARD: mode-dependent — paper=20 (~4min, outlast the slow paper sim), live=4 (~48s, abort don't chase)
     _TICK = 0.01
 
     ib = IB()

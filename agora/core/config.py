@@ -387,6 +387,21 @@ class AgoraSettings(BaseSettings):
                     "ALL legs (credit + paper-debit spreads). Live multi-leg still uses the atomic "
                     "BAG path (unchanged). Set False to revert to mid-start + walk.",
     )
+    entry_walk_steps_paper: int = Field(
+        default=20,
+        description="BOARD RULING (2026-06-22): entry fill-window walk steps in PAPER mode. IBKR's "
+        "paper simulator fills marketable orders on a 2-4 min LAG, so the old ~8 steps (~96s) "
+        "cancelled orders that would have filled a minute later (~29% fill rate). 20 steps × 12s = "
+        "~4 min of patience lets the slow paper fills land — the goal in paper is to FILL every "
+        "validated setup so the edge can be measured (worse paper fill prices = a conservative test).",
+    )
+    entry_walk_steps_live: int = Field(
+        default=4,
+        description="BOARD RULING (2026-06-22): entry fill-window walk steps in LIVE mode. Real "
+        "exchanges fill marketable orders in milliseconds — if it hasn't filled in ~45s (4×12s) the "
+        "market moved, so ABORT rather than chase (chasing = silent slippage that erodes the edge). "
+        "Speed + discipline live; patience only in paper.",
+    )
     max_slippage_pct_of_width: float = Field(
         default=0.10,
         description="Repricing-walk slippage budget as a fraction of the spread's strike WIDTH. "

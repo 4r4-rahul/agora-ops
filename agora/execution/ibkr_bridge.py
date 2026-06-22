@@ -166,6 +166,12 @@ async def submit_trade(rec: Any, settings: Any, session_id: str) -> dict:
     kwargs["market_data_type"] = getattr(settings, "ibkr_market_data_type", 3)
     kwargs["max_combo_spread_pct"] = getattr(settings, "max_combo_spread_pct", 0.50)
     kwargs["pricing_sanity_max_ratio"] = getattr(settings, "pricing_sanity_max_ratio", 2.0)
+    # BOARD RULING: mode-dependent fill window. PAPER = patience (the simulator fills on a 2-4 min
+    # lag, so wait ~4 min to land the slow fills + measure every validated setup). LIVE = speed (real
+    # fills are instant; if not filled in ~45s the market moved → abort, don't chase slippage).
+    kwargs["max_walk_steps"] = (getattr(settings, "entry_walk_steps_paper", 20)
+                                if settings.trading_mode == "paper"
+                                else getattr(settings, "entry_walk_steps_live", 4))
 
     # Spread-type-aware routing (verified 2026-06-08):
     #   • CREDIT spreads (entry credit < 0) on the PAPER account → leg-by-leg. IBKR
