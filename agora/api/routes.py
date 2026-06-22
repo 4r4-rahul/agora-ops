@@ -817,6 +817,35 @@ async def get_model_recommendations() -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+@router.get("/models/shadow")
+async def get_shadow_validation() -> JSONResponse:
+    """Rung 2 — shadow-mode validation: what each model WOULD advise on real trades + the would-be
+    impact verdict (offline, never affects live trades). Read-only (shadow_model_decisions)."""
+    import sqlite3
+    session = get_session()
+    db = str(session._settings.db_path)
+    try:
+        conn = sqlite3.connect(db, timeout=8); conn.row_factory = sqlite3.Row
+        if not conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='shadow_model_decisions'").fetchone()[0]:
+            return JSONResponse({"recorded": 0, "note": "shadow advisor has not run yet"})
+        latest = conn.execute("SELECT MAX(decision_date) FROM shadow_model_decisions").fetchone()[0]
+        total = conn.execute("SELECT COUNT(*) FROM shadow_model_decisions WHERE decision_date=?", (latest,)).fetchone()[0]
+        # M2 would-be impact
+        m2 = conn.execute(
+            """SELECT would_advise, COUNT(*) n, ROUND(AVG(trade_pnl),2) avg_pnl
+               FROM shadow_model_decisions WHERE decision_date=? AND model='regime_model'
+               GROUP BY would_advise""", (latest,)).fetchall()
+        m2_breakdown = {r["would_advise"]: {"n": r["n"], "avg_pnl": r["avg_pnl"]} for r in m2}
+        flagged = m2_breakdown.get("downweight_debit_rich_iv")
+        verdict = ("m2_neutral_regime" if not flagged else "see avg_pnl comparison")
+        conn.close()
+        return JSONResponse({"as_of": latest, "shadow_decisions": total,
+                             "m2_regime": m2_breakdown, "m2_verdict": verdict,
+                             "note": "Rung 2 — advisory/validation only; models do NOT affect live trades until board-promoted to Rung 3."})
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 @router.get("/health")
 async def get_health() -> JSONResponse:
     """

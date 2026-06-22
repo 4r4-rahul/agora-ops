@@ -626,6 +626,9 @@ tr.pos-detail-row td { padding: 0; background: var(--bg1); }
     <div id="model-analyst" style="margin:10px 0;padding:14px 18px;border:1px solid #2a3550;border-radius:10px;background:linear-gradient(90deg,#10141f,#161c2c)">
       <div style="font-size:11px;letter-spacing:.08em;color:#8aa;text-transform:uppercase">🧠 Model Analyst <span style="color:#789;text-transform:none;margin-left:8px">data-driven system-improvement recommendations</span></div>
       <div id="ma-list" style="margin-top:8px;font-size:11px;color:#9ab"></div>
+      <div id="shadow-val" style="margin-top:8px;padding-top:8px;border-top:1px solid #222b40;font-size:11px;color:#9ab">
+        🔬 <span style="color:#789">Shadow validation (Rung 2 — advisory only, no live effect):</span> <span id="sv-text">—</span>
+      </div>
     </div>
 
     <!-- Kill switch banner (shown prominently when active) -->
@@ -2203,6 +2206,18 @@ function _fmtTs(iso, dateFallback){
   const p = n => String(n).padStart(2,'0');
   return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
+async function fetchShadow() {
+  try {
+    const r = await fetch('/agora/models/shadow');
+    const d = await r.json();
+    const el = document.getElementById('sv-text'); if (!el) return;
+    if (d.note && !d.shadow_decisions) { el.textContent = 'not run yet'; return; }
+    const m2 = d.m2_regime || {};
+    const parts = Object.entries(m2).map(([k,v])=>`${k}: n=${v.n} avg $${v.avg_pnl}`);
+    el.textContent = `${d.shadow_decisions||0} decisions · M2 ${d.m2_verdict||''} · ` + (parts.join(' | ') || '—');
+  } catch(e) {}
+}
+
 async function fetchRecs() {
   try {
     const r = await fetch('/agora/models/recommendations');
@@ -3212,7 +3227,7 @@ async function fetchToday() {
   await Promise.all([
     fetchHealth(), fetchOrders(), fetchPositions(), fetchAttribution(), fetchSignals(),
     fetchMarket(), fetchReadiness(), fetchCsuite(), fetchToday(), fetchLong(), fetchExits(), fetchCosts(), fetchFactCheck(),
-    fetchPerformance(), fetchExpectancy(), fetchLifecycle(), fetchModels(), fetchRecs(),
+    fetchPerformance(), fetchExpectancy(), fetchLifecycle(), fetchModels(), fetchRecs(), fetchShadow(),
   ]);
 
   // TWS live data — fetch once on load then every 30s (makes a real IBKR connection)
@@ -3222,6 +3237,7 @@ async function fetchToday() {
   setInterval(fetchLifecycle,   60_000);  // M8 lifecycle film
   setInterval(fetchModels,      60_000);  // ML model fleet
   setInterval(fetchRecs,        60_000);  // model analyst recommendations
+  setInterval(fetchShadow,      60_000);  // shadow validation (Rung 2)
   setInterval(fetchHealth,      10_000);
   setInterval(fetchOrders,       8_000);  // orders refresh every 8s — catches fills fast
   setInterval(fetchPositions,   15_000);

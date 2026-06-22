@@ -997,6 +997,14 @@ class ScheduledAttributor:
                             logger.debug("model-analyst: %s", _ma)
                         except Exception as _maexc:
                             logger.debug("model-analyst skipped: %s", _maexc)
+                        # Rung 2 — shadow advisor: record what each model WOULD advise on real trades
+                        # (offline, read-only, no hot-path) to validate before any live wiring.
+                        try:
+                            from agora.ops.shadow_advisor import run_shadow_advisor
+                            _sa = run_shadow_advisor(self._db_path)
+                            logger.debug("shadow-advisor: %s", _sa)
+                        except Exception as _saexc:
+                            logger.debug("shadow-advisor skipped: %s", _saexc)
                 except Exception as _mrexc:
                     logger.debug("model-runner skipped: %s", _mrexc)
                 if result.get("attributed", 0) > 0 or new_analyst > 0:
