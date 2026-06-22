@@ -612,6 +612,12 @@ tr.pos-detail-row td { padding: 0; background: var(--bg1); }
       </div>
     </div>
 
+    <div id="lifecycle-film" style="margin:10px 0;padding:14px 18px;border:1px solid #2a3550;border-radius:10px;background:linear-gradient(90deg,#10141f,#161c2c)">
+      <div style="font-size:11px;letter-spacing:.08em;color:#8aa;text-transform:uppercase">🎬 Trade Lifecycle Film <span style="color:#789;text-transform:none;margin-left:8px">M8 — every trade snapshotted daily until close</span></div>
+      <div style="margin-top:6px;font-size:11px;color:#9ab"><b id="lc-snapshots">—</b> snapshots · <b id="lc-trades">—</b> trades filmed · latest <b id="lc-latest">—</b></div>
+      <div id="lc-frames" style="margin-top:8px;font-size:11px;color:#9ab;max-height:200px;overflow:auto"></div>
+    </div>
+
     <!-- Kill switch banner (shown prominently when active) -->
     <div id="ks-banner">
       🚨 KILL SWITCH ACTIVE — <span id="ks-reason">—</span>
@@ -2187,6 +2193,30 @@ function _fmtTs(iso, dateFallback){
   const p = n => String(n).padStart(2,'0');
   return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
+async function fetchLifecycle() {
+  try {
+    const r = await fetch('/agora/lifecycle/summary');
+    const d = await r.json();
+    if (d.error) return;
+    const setT=(id,t)=>{const e=document.getElementById(id);if(e)e.textContent=t;};
+    setT('lc-snapshots', d.snapshots ?? '—');
+    setT('lc-trades', d.trades_filmed ?? '—');
+    setT('lc-latest', d.latest_capture || '—');
+    const el = document.getElementById('lc-frames');
+    const frames = d.open_frames || [];
+    if (el) {
+      el.innerHTML = frames.length ? ('<table style="width:100%;border-collapse:collapse">' +
+        frames.slice(0,15).map(f => {
+          const u=f.unrealized_pnl, col=(u==null)?'#cdd':(u>=0?'#5d9':'#e76');
+          return `<tr><td style="padding:2px 6px"><b>${f.ticker}</b></td>`
+            + `<td style="padding:2px 6px;color:#789">${f.strategy}</td>`
+            + `<td style="padding:2px 6px;color:#789">${f.days_held??'—'}d · ${f.dte_remaining??'—'}DTE</td>`
+            + `<td style="padding:2px 6px;text-align:right;color:${col}">${u==null?'—':'$'+u.toFixed(0)}</td></tr>`;
+        }).join('') + '</table>') : '<span style="color:#789">no open frames yet — first daily capture pending</span>';
+    }
+  } catch(e) {}
+}
+
 async function fetchExpectancy() {
   try {
     const r = await fetch('/agora/expectancy');
@@ -3135,13 +3165,14 @@ async function fetchToday() {
   await Promise.all([
     fetchHealth(), fetchOrders(), fetchPositions(), fetchAttribution(), fetchSignals(),
     fetchMarket(), fetchReadiness(), fetchCsuite(), fetchToday(), fetchLong(), fetchExits(), fetchCosts(), fetchFactCheck(),
-    fetchPerformance(), fetchExpectancy(),
+    fetchPerformance(), fetchExpectancy(), fetchLifecycle(),
   ]);
 
   // TWS live data — fetch once on load then every 30s (makes a real IBKR connection)
   fetchTwsLive();
 
   setInterval(fetchExpectancy,  60_000);  // North-Star meter
+  setInterval(fetchLifecycle,   60_000);  // M8 lifecycle film
   setInterval(fetchHealth,      10_000);
   setInterval(fetchOrders,       8_000);  // orders refresh every 8s — catches fills fast
   setInterval(fetchPositions,   15_000);

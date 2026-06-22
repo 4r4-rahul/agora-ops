@@ -672,6 +672,54 @@ async def get_exit_regret() -> JSONResponse:
     return JSONResponse(exit_regret_report(str(session._settings.db_path)))
 
 
+@router.get("/lifecycle/summary")
+async def get_lifecycle_summary() -> JSONResponse:
+    """M8 lifecycle film — overview: total snapshots, distinct trades filmed, latest capture date,
+    and the most recent daily frame per still-open trade. Read-only (lifecycle_snapshots only)."""
+    import sqlite3
+    session = get_session()
+    db = str(session._settings.db_path)
+    try:
+        conn = sqlite3.connect(db, timeout=8); conn.row_factory = sqlite3.Row
+        has = conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='lifecycle_snapshots'").fetchone()[0]
+        if not has:
+            return JSONResponse({"snapshots": 0, "trades_filmed": 0, "note": "no lifecycle data yet"})
+        total = conn.execute("SELECT COUNT(*) FROM lifecycle_snapshots").fetchone()[0]
+        trades = conn.execute("SELECT COUNT(DISTINCT position_id) FROM lifecycle_snapshots").fetchone()[0]
+        latest = conn.execute("SELECT MAX(snapshot_date) FROM lifecycle_snapshots").fetchone()[0]
+        # latest frame per open trade
+        frames = [dict(r) for r in conn.execute(
+            """SELECT position_id, ticker, strategy, days_held, dte_remaining, unrealized_pnl,
+                      unrealized_pct_risk, net_delta, net_theta, status, snapshot_date
+               FROM lifecycle_snapshots s
+               WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM lifecycle_snapshots
+                                      WHERE position_id = s.position_id)
+                 AND status='open' AND is_adopted=0
+               ORDER BY unrealized_pnl ASC LIMIT 50""").fetchall()]
+        conn.close()
+        return JSONResponse({"snapshots": total, "trades_filmed": trades, "latest_capture": latest,
+                             "open_frames": frames})
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@router.get("/lifecycle/{position_id}")
+async def get_lifecycle_trade(position_id: str) -> JSONResponse:
+    """M8 lifecycle film for ONE trade — the full daily time series entry→close. Read-only."""
+    import sqlite3
+    session = get_session()
+    db = str(session._settings.db_path)
+    try:
+        conn = sqlite3.connect(db, timeout=8); conn.row_factory = sqlite3.Row
+        rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM lifecycle_snapshots WHERE position_id=? ORDER BY snapshot_date",
+            (position_id,)).fetchall()]
+        conn.close()
+        return JSONResponse({"position_id": position_id, "frames": rows, "n_frames": len(rows)})
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 @router.get("/health")
 async def get_health() -> JSONResponse:
     """

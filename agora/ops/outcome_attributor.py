@@ -951,6 +951,16 @@ class ScheduledAttributor:
         self._last_lesson_time = asyncio.get_event_loop().time()
         while self._running:
             try:
+                # Daily lifecycle "film" — snapshot every open (+ just-closed) position once/day.
+                # Idempotent (UNIQUE position_id+date), read-only on positions, additive-only → cannot
+                # affect execution. Foundation for the lifecycle-attribution / win-prob / mgmt models.
+                try:
+                    from agora.ops.lifecycle_capture import capture_lifecycle_snapshots
+                    _lc = capture_lifecycle_snapshots(self._db_path)
+                    logger.debug("lifecycle capture: %s", _lc)
+                except Exception as _lcexc:
+                    logger.debug("lifecycle capture skipped: %s", _lcexc)
+
                 result = attribute_closed_trades(self._db_path)
                 new_analyst = result.get("attributed_by_agent", {}).get("analyst", 0)
                 if result.get("attributed", 0) > 0 or new_analyst > 0:
