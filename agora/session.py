@@ -2557,6 +2557,15 @@ class AgoraSession:
         """Full signal stack for one ticker → trade recommendation → risk gate → order."""
         _sector_direction_override: str | None = None   # set by sector momentum bypass
         try:
+            # Reject malformed tickers (company NAMES like "SAMSUNG" / "SK HYNIX" that leak in from
+            # entity extraction in discovery) before any data fetch — they only generate yfinance
+            # 404 noise. Valid US symbols are 1-6 letters with an optional single-letter .CLASS suffix.
+            _base, _, _cls = (ticker or "").partition(".")
+            if not (1 <= len(_base) <= 6 and _base.isalpha()
+                    and (not _cls or (len(_cls) == 1 and _cls.isalpha()))):
+                logger.debug("Skip %r: not a valid ticker symbol — dropping", ticker)
+                return
+
             # Error 201 session block: paper account can't do combo orders for this ticker.
             if ticker in self._error_201_blocked:
                 logger.debug("Skip %s: Error 201 blocked for this session", ticker)

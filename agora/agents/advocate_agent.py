@@ -216,6 +216,10 @@ context says the event is NFP, or is days away). If event_risk says the structur
 cushioned, and size-reduced, the event risk is ALREADY ADDRESSED — do NOT raise a HIGH-severity
 event failure mode on proximity alone. Only flag event risk as HIGH if the structure is genuinely
 fragile to the stated expected move (e.g. short strike inside it) AND that isn't already mitigated.
+When event_risk is "none", there is NO scheduled macro event (FOMC / CPI / NFP / earnings) within
+range — do NOT claim, imply, or hedge that one is "imminent" or "tomorrow". Inventing an event that
+the deterministic calendar does not report is a hard factual error (it gets stripped by the
+fact-grounding gate) — never base a failure mode on an event not present in event_risk.
 
 IMPORTANT: Do NOT let your role as adversary produce BLOCK verdicts that contradict C4 logic. If all three failure modes are MEDIUM, the verdict MUST be PASS even if you dislike the trade personally."""
 
