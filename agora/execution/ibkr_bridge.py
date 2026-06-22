@@ -314,6 +314,11 @@ async def enrich_chain(ticker: str, chain_dict: dict, spot: float, settings: Any
                     df.loc[mask, "ask"] = q["ask"]
                     if q["iv"] > 0 and "impliedVolatility" in df.columns:
                         df.loc[mask, "impliedVolatility"] = q["iv"]
+                    # #3: overlay real IBKR greeks (delta drives strike selection; all four feed the
+                    # portfolio risk limits). Only override when IBKR returned a value.
+                    for _col in ("delta", "gamma", "theta", "vega"):
+                        if _col in df.columns and q.get(_col):
+                            df.loc[mask, _col] = q[_col]
                     overridden += 1
         if overridden:
             logger.info("IBKR chain enrich: %s %s — overrode %d strike-quotes (Phase B)",

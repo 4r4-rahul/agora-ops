@@ -1583,9 +1583,17 @@ async def fetch_chain_quotes(
             if _valid_quote(tk.bid) and _valid_quote(tk.ask):
                 g = getattr(tk, "modelGreeks", None)
                 iv = getattr(g, "impliedVol", None) if g else None
+                # #3: the SAME modelGreeks object carries the greeks — return them so enrich can
+                # overlay real IBKR delta/gamma/theta/vega onto the chain (used for strike-delta
+                # targeting + portfolio risk limits), not just IV.
+                def _gk(_name: str, _g: Any = g) -> float:
+                    _v = getattr(_g, _name, None) if _g else None
+                    return float(_v) if _v is not None else 0.0
                 out[(k, right)] = {
                     "bid": float(tk.bid), "ask": float(tk.ask),
                     "iv": float(iv) if iv and iv > 0 else 0.0,
+                    "delta": _gk("delta"), "gamma": _gk("gamma"),
+                    "theta": _gk("theta"), "vega": _gk("vega"),
                 }
             try:
                 ib.cancelMktData(tk.contract)
