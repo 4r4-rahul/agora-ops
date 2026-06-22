@@ -785,6 +785,38 @@ async def get_models_summary() -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+@router.get("/models/recommendations")
+async def get_model_recommendations() -> JSONResponse:
+    """The Model Analyst's latest system-improvement recommendations (deterministic, evidence-backed).
+    Read-only (model_recommendations)."""
+    import json as _json
+    import sqlite3
+    session = get_session()
+    db = str(session._settings.db_path)
+    try:
+        conn = sqlite3.connect(db, timeout=8); conn.row_factory = sqlite3.Row
+        if not conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='model_recommendations'").fetchone()[0]:
+            return JSONResponse({"recommendations": [], "note": "analyst has not run yet"})
+        latest = conn.execute("SELECT MAX(created_date) FROM model_recommendations").fetchone()[0]
+        recs = []
+        for r in conn.execute(
+            """SELECT severity, category, source_model, finding, recommendation, evidence_json, status
+               FROM model_recommendations WHERE created_date=?
+               ORDER BY CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ELSE 3 END""",
+            (latest,)):
+            try:
+                ev = _json.loads(r["evidence_json"]) if r["evidence_json"] else {}
+            except Exception:
+                ev = {}
+            recs.append({"severity": r["severity"], "category": r["category"], "source_model": r["source_model"],
+                         "finding": r["finding"], "recommendation": r["recommendation"],
+                         "evidence": ev, "status": r["status"]})
+        conn.close()
+        return JSONResponse({"as_of": latest, "recommendations": recs, "n": len(recs)})
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 @router.get("/health")
 async def get_health() -> JSONResponse:
     """

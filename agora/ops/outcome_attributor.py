@@ -982,6 +982,13 @@ class ScheduledAttributor:
                     _mr = run_due_models(self._db_path)
                     if _mr.get("ran"):
                         logger.debug("model-runner: %s", _mr)
+                        # Model Analyst — turn the fresh scores into improvement recommendations.
+                        try:
+                            from agora.ops.model_analyst import analyze_models
+                            _ma = analyze_models(self._db_path)
+                            logger.debug("model-analyst: %s", _ma)
+                        except Exception as _maexc:
+                            logger.debug("model-analyst skipped: %s", _maexc)
                 except Exception as _mrexc:
                     logger.debug("model-runner skipped: %s", _mrexc)
                 if result.get("attributed", 0) > 0 or new_analyst > 0:

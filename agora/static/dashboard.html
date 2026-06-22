@@ -623,6 +623,11 @@ tr.pos-detail-row td { padding: 0; background: var(--bg1); }
       <div id="mf-list" style="margin-top:8px;font-size:11px;color:#9ab"></div>
     </div>
 
+    <div id="model-analyst" style="margin:10px 0;padding:14px 18px;border:1px solid #2a3550;border-radius:10px;background:linear-gradient(90deg,#10141f,#161c2c)">
+      <div style="font-size:11px;letter-spacing:.08em;color:#8aa;text-transform:uppercase">🧠 Model Analyst <span style="color:#789;text-transform:none;margin-left:8px">data-driven system-improvement recommendations</span></div>
+      <div id="ma-list" style="margin-top:8px;font-size:11px;color:#9ab"></div>
+    </div>
+
     <!-- Kill switch banner (shown prominently when active) -->
     <div id="ks-banner">
       🚨 KILL SWITCH ACTIVE — <span id="ks-reason">—</span>
@@ -2198,6 +2203,23 @@ function _fmtTs(iso, dateFallback){
   const p = n => String(n).padStart(2,'0');
   return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
+async function fetchRecs() {
+  try {
+    const r = await fetch('/agora/models/recommendations');
+    const d = await r.json();
+    const el = document.getElementById('ma-list'); if (!el) return;
+    const recs = d.recommendations || [];
+    const sevcol = (s)=> s==='high'?'#e76':(s==='medium'?'#d9a':(s==='low'?'#89a':'#6a8'));
+    el.innerHTML = recs.length ? recs.map(x =>
+      `<div style="margin:5px 0;padding:5px 8px;border-left:3px solid ${sevcol(x.severity)};background:#0d1119">`
+      + `<span style="color:${sevcol(x.severity)};text-transform:uppercase;font-size:10px">${x.severity}</span> `
+      + `<span style="color:#789;font-size:10px">${x.category} · ${x.source_model}</span><br>`
+      + `<span style="color:#cdd">${x.finding}</span><br>`
+      + `<span style="color:#8ad">→ ${x.recommendation}</span></div>`
+    ).join('') : '<span style="color:#789">no recommendations — analyst pending</span>';
+  } catch(e) {}
+}
+
 async function fetchModels() {
   try {
     const r = await fetch('/agora/models/summary');
@@ -3190,7 +3212,7 @@ async function fetchToday() {
   await Promise.all([
     fetchHealth(), fetchOrders(), fetchPositions(), fetchAttribution(), fetchSignals(),
     fetchMarket(), fetchReadiness(), fetchCsuite(), fetchToday(), fetchLong(), fetchExits(), fetchCosts(), fetchFactCheck(),
-    fetchPerformance(), fetchExpectancy(), fetchLifecycle(), fetchModels(),
+    fetchPerformance(), fetchExpectancy(), fetchLifecycle(), fetchModels(), fetchRecs(),
   ]);
 
   // TWS live data — fetch once on load then every 30s (makes a real IBKR connection)
@@ -3199,6 +3221,7 @@ async function fetchToday() {
   setInterval(fetchExpectancy,  60_000);  // North-Star meter
   setInterval(fetchLifecycle,   60_000);  // M8 lifecycle film
   setInterval(fetchModels,      60_000);  // ML model fleet
+  setInterval(fetchRecs,        60_000);  // model analyst recommendations
   setInterval(fetchHealth,      10_000);
   setInterval(fetchOrders,       8_000);  // orders refresh every 8s — catches fills fast
   setInterval(fetchPositions,   15_000);
