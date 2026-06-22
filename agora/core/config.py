@@ -158,6 +158,7 @@ class AgoraSettings(BaseSettings):
     # now-repaired cells. The post-fix expectancy view + the cell-gate exclude everything before
     # this date. Set to the date the min-hold/require-kill guards went live.
     expectancy_legacy_cutoff_date: str = Field(default="2026-06-12", description="Exclude trades closed before this date from the post-fix expectancy view + cell gate (pre-churn-fix legacy).")
+    expectancy_upgrade_milestone_date: str = Field(default="2026-06-22", description="The date the IBKR decision-data layer (real IV/prices/greeks) + W1 33-delta credit spreads went live. Trades closed on/after this date are the clean 'upgraded system' window — the expectancy that decides go-live, isolated from the older yfinance-era trades.")
     expectancy_target_per_trade: float = Field(default=25.0, description="Target expectancy ($/trade) the whole system thrives toward — shown on the dashboard meter.")
     expectancy_target_date: str = Field(default="2026-09-30", description="Date the expectancy target is 'locked' for — drives the meter countdown/ETA.")
     # ── Tier 1 — stop the bleed (reversible, paper-gated) ─────────────────────

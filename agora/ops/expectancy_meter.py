@@ -66,10 +66,16 @@ def credit_spread_stats(db_path: str, since: str = "2026-06-18") -> dict[str, An
 
 
 def build_meter(db_path: str, *, target_per_trade: float = 25.0,
-                target_date: str = "2026-09-30", legacy_cutoff: str = "2026-06-12") -> dict[str, Any]:
-    """Compute the full expectancy meter payload. Read-only; never raises."""
+                target_date: str = "2026-09-30", legacy_cutoff: str = "2026-06-12",
+                upgrade_milestone: str = "2026-06-22") -> dict[str, Any]:
+    """Compute the full expectancy meter payload. Read-only; never raises.
+
+    `upgrade_milestone` isolates the UPGRADED system (IBKR decision-data + W1 credit spreads): trades
+    closed on/after it are the clean window whose expectancy decides go-live, separate from the older
+    yfinance-era trades that drag the headline number."""
     today = date.today()
     cut = str(legacy_cutoff)[:10]
+    upg = str(upgrade_milestone)[:10]
     try:
         metrics = compute_metrics(db_path, legacy_cutoff=cut)
         baseline = (metrics.get("overall") or {}).get("expectancy")      # all-time = the start line
@@ -80,14 +86,25 @@ def build_meter(db_path: str, *, target_per_trade: float = 25.0,
         week_start = (today - timedelta(days=today.weekday())).isoformat()
         month_start = today.replace(day=1).isoformat()
         with sqlite3.connect(db_path, timeout=10) as conn:
+            _upg = _window_metrics(conn, upg)   # the clean upgraded-system window
             periods = {
                 "today":        _window_metrics(conn, today.isoformat()),
                 "this_week":    _window_metrics(conn, week_start),
                 "this_month":   _window_metrics(conn, month_start),
                 "all_post_fix": {"expectancy": current, "n": n_post, "net": post.get("net_realized"),
                                  "win_rate": post.get("win_rate")},
+                "since_upgrade": _upg,
             }
             tpd = _trades_per_day(conn, cut)
+        _upg_n = _upg.get("n", 0) or 0
+        # Go-live readiness on the UPGRADED system: positive expectancy AND a real sample (n>=30).
+        since_upgrade = {
+            "date": upg, "expectancy": _upg.get("expectancy"), "n": _upg_n,
+            "win_rate": _upg.get("win_rate"), "net": _upg.get("net"),
+            "validated": _upg_n >= 30,
+            "tradable_live": bool(_upg.get("expectancy") is not None
+                                  and _upg.get("expectancy", 0) > 0 and _upg_n >= 30),
+        }
 
         # progress: from baseline (where we started) toward target (the goal). 0% = no better than
         # the all-time average; 100% = at target. Can go negative if we regress below baseline.
@@ -126,6 +143,7 @@ def build_meter(db_path: str, *, target_per_trade: float = 25.0,
             "progress_pct": progress,
             "status": status,
             "credit_spreads": credit_spread_stats(db_path),
+            "since_upgrade": since_upgrade,
             "validated": validated,
             "periods": periods,
             "projection": {"trades_per_day": tpd,

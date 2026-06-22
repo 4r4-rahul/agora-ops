@@ -605,6 +605,11 @@ tr.pos-detail-row td { padding: 0; background: var(--bg1); }
         <b id="cs-entered">—</b> entered · <b id="cs-open">—</b> open · <b id="cs-closed">—</b> closed · win <b id="cs-win">—</b>
         <span id="cs-note" style="color:#789;margin-left:6px"></span>
       </div>
+      <div style="margin-top:6px;font-size:11px;color:#9ab">
+        🎯 Upgraded system <span style="color:#789" id="su-date">(since —)</span> — the go-live number:
+        <b id="su-exp">—</b>/trade · n=<b id="su-n">—</b> · WR <b id="su-wr">—</b> ·
+        <b id="su-verdict" style="color:#789">—</b>
+      </div>
     </div>
 
     <!-- Kill switch banner (shown prominently when active) -->
@@ -2196,6 +2201,19 @@ async function fetchExpectancy() {
     setT('exp-today', pe(per.today)); setT('exp-week', pe(per.this_week)); setT('exp-month', pe(per.this_month));
     setT('exp-proj-day', _exp$((proj.current||{}).per_day));
     setT('exp-proj-day-tgt', _exp$((proj.target||{}).per_day));
+    // Upgraded-system window — the clean go-live number (isolated from old yfinance-era trades)
+    const su = m.since_upgrade || {};
+    setT('su-date', `(since ${su.date || '—'})`);
+    const sue = document.getElementById('su-exp');
+    if (sue){ sue.textContent = _exp$(su.expectancy); sue.style.color = col(su.expectancy); }
+    setT('su-n', su.n ?? '—');
+    setT('su-wr', su.win_rate!=null ? (su.win_rate*100).toFixed(0)+'%' : '—');
+    const sv = document.getElementById('su-verdict');
+    if (sv){
+      const ok = su.tradable_live;
+      sv.textContent = ok ? '✅ TRADABLE LIVE' : `need n≥30 + positive (n=${su.n??0})`;
+      sv.style.color = ok ? 'var(--green)' : '#c93';
+    }
     // W1/W1b/W1c — did credit spreads start trading, and are they winning?
     const cs = m.credit_spreads || {};
     setT('cs-entered', cs.entered ?? '—');

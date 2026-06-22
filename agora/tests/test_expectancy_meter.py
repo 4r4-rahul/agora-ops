@@ -107,6 +107,24 @@ class TestMeter:
         assert m["current"]["expectancy"] is None or "error" in m
 
 
+class TestUpgradeWindow:
+    def test_isolates_post_milestone_trades(self):
+        db = _db([("2026-06-15", -50.0), ("2026-06-16", -30.0),   # pre-upgrade (excluded)
+                  ("2026-06-23", 100.0), ("2026-06-24", 60.0)])   # post-upgrade window
+        m = build_meter(db, legacy_cutoff="2026-06-12", upgrade_milestone="2026-06-22")
+        su = m["since_upgrade"]
+        assert su["date"] == "2026-06-22"
+        assert su["n"] == 2                      # only the 2 on/after the milestone
+        assert su["expectancy"] == 80.0          # (100 + 60) / 2
+        assert su["validated"] is False          # n < 30
+        assert su["tradable_live"] is False       # positive but not yet n>=30
+
+    def test_not_tradable_when_negative(self):
+        db = _db([("2026-06-23", -40.0), ("2026-06-24", -20.0)])
+        su = build_meter(db, upgrade_milestone="2026-06-22")["since_upgrade"]
+        assert su["expectancy"] == -30.0 and su["tradable_live"] is False
+
+
 # ── W1/W1b/W1c credit-spread follow-through tracking ──────────────────────────
 def _cs_db(rows):
     """rows: (strategy, entry_date, status, close_date, realized_pnl)."""

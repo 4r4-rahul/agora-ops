@@ -48,6 +48,7 @@ def build_snapshot() -> tuple[dict, str]:
             target_per_trade=getattr(s, "expectancy_target_per_trade", 25.0),
             target_date=getattr(s, "expectancy_target_date", "2026-09-30"),
             legacy_cutoff=cutoff,
+            upgrade_milestone=getattr(s, "expectancy_upgrade_milestone_date", "2026-06-22"),
         )
         regret = exit_regret_report(db)
         cells = blocked_cells(
@@ -73,6 +74,7 @@ def build_snapshot() -> tuple[dict, str]:
             "exit_regret": regret.get("by_exit_reason", {}),
             "regret_evaluated": regret.get("total_evaluated", 0),
             "credit_spreads": credit_spread_stats(db),
+            "since_upgrade": meter.get("since_upgrade", {}),
         }
 
         wr = f"{cur.get('win_rate', 0) * 100:.0f}%" if cur.get("win_rate") is not None else "—"
@@ -92,6 +94,15 @@ def build_snapshot() -> tuple[dict, str]:
                          + ", ".join(f"{r} {d['early_exit_rate']:.0%} (n={d['n']})" for r, d in worst))
         else:
             lines.append("_Exit-regret: no closed-trade counterfactuals scored yet — accumulating._")
+        su = snap["since_upgrade"] or {}
+        if su:
+            _se = su.get("expectancy")
+            _gl = ("✅ TRADABLE LIVE" if su.get("tradable_live")
+                   else f"need n≥30 + positive (n={su.get('n')}, "
+                        f"{'positive' if (_se or 0) > 0 else 'negative'})")
+            _wr = f"{su.get('win_rate', 0) * 100:.0f}%" if su.get("win_rate") is not None else "—"
+            lines.append(f"🎯 **Upgraded system** (since {su.get('date')}): "
+                         f"**{_fmt_money(_se)}/trade** · n={su.get('n')} · WR {_wr} · {_gl}")
         cs = snap["credit_spreads"]
         if cs["entered"]:
             wr = f"{cs['win_rate'] * 100:.0f}%" if cs["win_rate"] is not None else "—"

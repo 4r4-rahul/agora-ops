@@ -658,6 +658,7 @@ async def get_expectancy() -> JSONResponse:
         target_per_trade=getattr(s, "expectancy_target_per_trade", 25.0),
         target_date=getattr(s, "expectancy_target_date", "2026-09-30"),
         legacy_cutoff=getattr(s, "expectancy_legacy_cutoff_date", "2026-06-12"),
+        upgrade_milestone=getattr(s, "expectancy_upgrade_milestone_date", "2026-06-22"),
     )
     return JSONResponse(meter)
 
