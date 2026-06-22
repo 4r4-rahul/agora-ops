@@ -100,6 +100,13 @@ class AgoraSettings(BaseSettings):
         default=4,
         description="clientId for IBKRNewsAgent (must differ from ibkr_client_id and startup_tws_sync_client_id).",
     )
+    news_max_tickers: int = Field(
+        default=40,
+        description="Cap on real-time IBKR news subscriptions. Each consumes one of the account's "
+        "~100 simultaneous market-data lines (Error 101 'Max number of tickers'); subscribing the "
+        "whole universe (112) blew the cap AND starved the option-data feed (enrich/IV). 40 keeps "
+        "news on the most-liquid names while leaving ~60 lines for transient option-data requests.",
+    )
     ibkr_knowledge_client_id: int = Field(
         default=17,
         description="Dedicated clientId for IBKRKnowledgeAgent scans incl. the portfolio-P&L fetch. "

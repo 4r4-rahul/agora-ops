@@ -221,8 +221,12 @@ class IBKRNewsAgent:
 
         ib.errorEvent += _on_ib_error
 
-        # Subscribe to universe tickers
-        universe  = self._settings.etf_universe or []
+        # Subscribe to universe tickers — but CAP the count: each news subscription consumes one of
+        # the account's ~100 simultaneous market-data lines, so the full universe (112) blows the cap
+        # (Error 101) AND starves the option-data feed (enrich/IV). Keep the most-liquid head of the
+        # universe and leave headroom for transient option-data requests.
+        _cap = int(getattr(self._settings, "news_max_tickers", 40) or 40)
+        universe  = (self._settings.etf_universe or [])[:_cap]
         contracts = [Stock(sym, "SMART", "USD") for sym in universe if sym]
         try:
             await ib.qualifyContractsAsync(*contracts)
