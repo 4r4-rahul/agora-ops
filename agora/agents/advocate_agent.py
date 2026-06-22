@@ -200,7 +200,7 @@ exactly. Specificity (numbers, strikes, dates) over adjectives — never pad to 
 
 CREDIT SPREAD / PREMIUM SELLING — MANDATORY CALIBRATION:
 When strategy_type is BULL_PUT_SPREAD, BEAR_CALL_SPREAD, or IRON_CONDOR, the R/R ratio is INTENTIONALLY asymmetric (collecting $1 against $7-9 risk is NORMAL, not a failure). DO NOT flag "R/R asymmetry" or "high win rate required" as HIGH severity unless:
-  • Short-leg delta > 0.30 (probability of profit at expiry < 70%), OR
+  • Short-leg delta > 0.40 (probability of profit at expiry < 60%) — NOTE: the system DELIBERATELY runs credit-vertical shorts at ~0.33-0.35 delta (~65% POP) to clear the credit/width EV gate (W1d board ruling). A 0.30-0.36 short delta is BY DESIGN, not a failure — do NOT flag it; only flag genuinely aggressive shorts above ~0.40, OR
   • Credit collected < 8% of spread width (degenerate structure, e.g. $0.40 on $10-wide spread)
 For these structures, evaluate the trade on probability-of-profit, expected value (credit × POP - max_loss × (1-POP)), and DTE-theta match, not on raw risk:reward ratio.
 
