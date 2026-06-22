@@ -201,72 +201,36 @@ class YFinanceProvider:
     # IV cache directory — shared across all provider instances
     _IV_CACHE_DIR = Path(".agora/iv_cache")
 
+    @staticmethod
+    def _iv_rank_from_cache(cache: dict) -> dict[str, float | None]:
+        """IV rank/percentile from the cached daily ATM-IV series. Latest entry = the current IV."""
+        ivs = cache.get("atm_ivs") or []
+        if not ivs:
+            return {"rank": None, "percentile": None, "atm_iv": None}
+        atm_iv = ivs[-1]
+        if len(ivs) < 3:   # need ≥3 days for a min/max range (rank improves past ~20 days)
+            return {"rank": None, "percentile": None, "atm_iv": round(atm_iv * 100, 1)}
+        min_iv, max_iv = min(ivs), max(ivs)
+        iv_rank = (atm_iv - min_iv) / (max_iv - min_iv) * 100 if max_iv > min_iv else 50.0
+        iv_rank = max(0.0, min(100.0, iv_rank))   # clamp — live IV can exceed cached max
+        below = sum(1 for v in ivs if v <= atm_iv)
+        return {"rank": round(iv_rank, 1), "percentile": round(below / len(ivs) * 100, 1),
+                "atm_iv": round(atm_iv * 100, 1)}
+
     def _get_real_iv_rank(self, ticker: str) -> dict[str, float | None]:
         """
-        Compute IV rank from REAL ATM implied volatility from the options chain.
+        Compute IV rank from REAL ATM implied volatility, cached daily in .agora/iv_cache/{ticker}.json.
+        IV rank = (current_atm_iv - 252d_min) / (252d_max - 252d_min) * 100.
 
-        Strategy:
-          1. Pull ATM IV from the nearest ≥7 DTE expiry (real market-implied vol).
-          2. Cache each day's ATM IV in .agora/iv_cache/{ticker}.json.
-          3. IV rank = (current_atm_iv - 52w_min) / (52w_max - 52w_min) * 100.
-          4. If live fetch fails (401/stale crumb), falls back to most recent cached IV.
-          5. Requires ≥5 cached data points; rank is approximate until ≥20 days.
+        ONCE PER TICKER PER DAY: the cache stores one ATM-IV reading per day, so once today's reading
+        is captured we compute the rank straight from the cache with NO market-data fetch. This is
+        what bounds the per-scan IBKR fetch (industry-standard #1) to a single connect per ticker per
+        day — the IBKR call happens only on the first scan of the day; every later scan reads cache.
+        Source preference on that first fetch: real IBKR/OPRA ATM IV, else yfinance (fail-safe).
         """
         try:
-            atm_iv = None
-            _atm_strike: float | None = None   # captured for the optional IBKR ATM-IV override
-            _yf_expiry: str | None = None
             today = date.today()
-            # Retry once on 401/stale crumb — yfinance global session can expire mid-session
-            for _attempt in range(2):
-                with _YF_OPTIONS_LOCK:
-                    tk = yf.Ticker(ticker)
-                    exps = tk.options
-                    if not exps:
-                        if _attempt == 0:
-                            import time as _t; _t.sleep(1.0)
-                            continue
-                        break  # fall through to cached fallback
-
-                    # Pick nearest expiry with ≥7 DTE so we get meaningful IV
-                    expiry = None
-                    for exp in exps:
-                        if (date.fromisoformat(exp) - today).days >= 7:
-                            expiry = exp
-                            break
-                    if not expiry:
-                        expiry = exps[0]
-
-                    chain = tk.option_chain(expiry)
-                    calls, puts = chain.calls, chain.puts
-                    if calls.empty or puts.empty:
-                        break  # fall through to cached fallback
-
-                    # Current underlying price (use fast_info to avoid extra API hit)
-                    spot = float(tk.fast_info.get("lastPrice") or calls["strike"].median())
-
-                    # ATM call IV — strike closest to spot
-                    atm_row = calls.iloc[(calls["strike"] - spot).abs().argsort()[:1]]
-                    atm_iv = float(atm_row["impliedVolatility"].iloc[0]) if not atm_row.empty else None
-
-                    # Fall back to put ATM if call IV missing/zero
-                    if not atm_iv or atm_iv <= 0:
-                        atm_row_p = puts.iloc[(puts["strike"] - spot).abs().argsort()[:1]]
-                        atm_iv = float(atm_row_p["impliedVolatility"].iloc[0]) if not atm_row_p.empty else None
-                    if not atm_row.empty:
-                        _atm_strike = float(atm_row["strike"].iloc[0])
-                        _yf_expiry = expiry
-                break  # success
-
-            # Industry-standard #1: PREFER the real IBKR/OPRA ATM IV over yfinance's (flag-gated;
-            # no-op + instant return when IV_RANK_USE_IBKR is off). The 252-day cache + percentile
-            # machinery below is unchanged — only the current-IV INPUT becomes broker-grade.
-            if atm_iv and _atm_strike and _yf_expiry:
-                _ib_iv = _ibkr_atm_iv(ticker, _yf_expiry.replace("-", ""), _atm_strike)
-                if _ib_iv and 0.005 <= _ib_iv <= 5.0:
-                    atm_iv = _ib_iv
-
-            # Load IV cache — needed whether we got live data or not
+            today_str = today.isoformat()
             self._IV_CACHE_DIR.mkdir(parents=True, exist_ok=True)
             cache_path = self._IV_CACHE_DIR / f"{ticker.upper()}.json"
             cache: dict = {"dates": [], "atm_ivs": []}
@@ -276,48 +240,66 @@ class YFinanceProvider:
                 except Exception:
                     cache = {"dates": [], "atm_ivs": []}
 
+            # Today already captured → rank from cache, NO fetch (the once/day gate).
+            if cache.get("dates") and cache["dates"][-1] == today_str and cache.get("atm_ivs"):
+                return self._iv_rank_from_cache(cache)
+
+            # ── First reading of the day: fetch the ATM IV (yfinance baseline → prefer IBKR) ──
+            atm_iv = None
+            _atm_strike: float | None = None
+            _yf_expiry: str | None = None
+            for _attempt in range(2):   # retry once on 401/stale yfinance crumb
+                with _YF_OPTIONS_LOCK:
+                    tk = yf.Ticker(ticker)
+                    exps = tk.options
+                    if not exps:
+                        if _attempt == 0:
+                            import time as _t; _t.sleep(1.0)
+                            continue
+                        break
+                    expiry = None
+                    for exp in exps:   # nearest ≥7 DTE for meaningful IV
+                        if (date.fromisoformat(exp) - today).days >= 7:
+                            expiry = exp
+                            break
+                    if not expiry:
+                        expiry = exps[0]
+                    chain = tk.option_chain(expiry)
+                    calls, puts = chain.calls, chain.puts
+                    if calls.empty or puts.empty:
+                        break
+                    spot = float(tk.fast_info.get("lastPrice") or calls["strike"].median())
+                    atm_row = calls.iloc[(calls["strike"] - spot).abs().argsort()[:1]]
+                    atm_iv = float(atm_row["impliedVolatility"].iloc[0]) if not atm_row.empty else None
+                    if not atm_iv or atm_iv <= 0:   # fall back to put ATM
+                        atm_row_p = puts.iloc[(puts["strike"] - spot).abs().argsort()[:1]]
+                        atm_iv = float(atm_row_p["impliedVolatility"].iloc[0]) if not atm_row_p.empty else None
+                    if not atm_row.empty:
+                        _atm_strike = float(atm_row["strike"].iloc[0])
+                        _yf_expiry = expiry
+                break
+
+            # Industry-standard #1: PREFER real IBKR/OPRA ATM IV (flag-gated; instant no-op when off).
+            if atm_iv and _atm_strike and _yf_expiry:
+                _ib_iv = _ibkr_atm_iv(ticker, _yf_expiry.replace("-", ""), _atm_strike)
+                if _ib_iv and 0.005 <= _ib_iv <= 5.0:
+                    atm_iv = _ib_iv
+
             if atm_iv and 0.005 <= atm_iv <= 5.0:
-                # Fresh fetch succeeded — update cache with today's reading.
-                # Guard: reject implausible IV (< 0.5% or > 500%) — yfinance glitch protection.
-                today_str = today.isoformat()
-                if not cache["dates"] or cache["dates"][-1] != today_str:
-                    cache["dates"].append(today_str)
-                    cache["atm_ivs"].append(round(atm_iv, 6))
-                cache["dates"]  = cache["dates"][-252:]
-                cache["atm_ivs"] = cache["atm_ivs"][-252:]
-                # Also drop any existing bad entries (retroactive cleanup)
-                pairs = [(d, v) for d, v in zip(cache["dates"], cache["atm_ivs"]) if 0.005 <= v <= 5.0]
-                cache["dates"]  = [p[0] for p in pairs]
+                # Append today's reading; trim to 252 days; drop any implausible entries.
+                cache["dates"].append(today_str)
+                cache["atm_ivs"].append(round(atm_iv, 6))
+                pairs = [(d, v) for d, v in zip(cache["dates"][-252:], cache["atm_ivs"][-252:])
+                         if 0.005 <= v <= 5.0]
+                cache["dates"] = [p[0] for p in pairs]
                 cache["atm_ivs"] = [p[1] for p in pairs]
                 cache_path.write_text(json.dumps(cache))
-                atm_iv = cache["atm_ivs"][-1]  # use stored (possibly rounded) value
-            elif cache.get("atm_ivs"):
-                # Live fetch failed — use most recent cached IV (stale by at most 1 day)
-                atm_iv = cache["atm_ivs"][-1]
-                logger.debug("IV rank for %s: live fetch failed, using cached IV=%.3f", ticker, atm_iv)
-            else:
+            elif not cache.get("atm_ivs"):
                 return {"rank": None, "percentile": None, "atm_iv": None}
+            else:
+                logger.debug("IV rank for %s: fetch failed, ranking off last cached IV", ticker)
 
-            ivs = cache["atm_ivs"]
-            if len(ivs) < 3:
-                # Need at least 3 data points for a min/max range (rank improves past 20 days)
-                logger.debug("IV cache for %s has only %d days — rank unavailable", ticker, len(ivs))
-                return {"rank": None, "percentile": None, "atm_iv": round(atm_iv * 100, 1)}
-
-            min_iv, max_iv = min(ivs), max(ivs)
-            iv_rank = (
-                (atm_iv - min_iv) / (max_iv - min_iv) * 100
-                if max_iv > min_iv else 50.0
-            )
-            iv_rank = max(0.0, min(100.0, iv_rank))   # clamp — live IV can exceed cached max
-            below = sum(1 for v in ivs if v <= atm_iv)
-            iv_percentile = below / len(ivs) * 100
-
-            return {
-                "rank":       round(iv_rank, 1),
-                "percentile": round(iv_percentile, 1),
-                "atm_iv":     round(atm_iv * 100, 1),  # in % terms
-            }
+            return self._iv_rank_from_cache(cache)
 
         except Exception as exc:
             logger.debug("Real IV rank failed for %s: %s", ticker, exc)

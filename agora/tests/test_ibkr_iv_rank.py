@@ -7,7 +7,11 @@ error (caller keeps the yfinance ATM IV). The 252-day cache + percentile rank ma
 """
 from __future__ import annotations
 
+import json
+from datetime import date
+
 from trading_platform.services.market_data import yfinance_provider as yp
+from trading_platform.services.market_data.yfinance_provider import YFinanceProvider
 
 
 def test_off_by_default(monkeypatch):
@@ -56,3 +60,34 @@ def test_fails_closed_on_error(monkeypatch):
         raise RuntimeError("no IBKR connection")
     monkeypatch.setattr("trading_platform.services.ibkr_client.fetch_chain_quotes", _boom)
     assert yp._ibkr_atm_iv("SPY", "20260717", 500.0) is None
+
+
+# ── IV-rank math + the once/ticker/day fetch gate ─────────────────────────────
+def test_iv_rank_from_cache_math():
+    cache = {"dates": ["a", "b", "c", "d", "e"], "atm_ivs": [0.10, 0.20, 0.30, 0.40, 0.25]}
+    r = YFinanceProvider._iv_rank_from_cache(cache)
+    assert r["rank"] == 50.0          # (0.25-0.10)/(0.40-0.10)*100
+    assert r["percentile"] == 60.0    # 0.10,0.20,0.25 <= 0.25 → 3/5
+    assert r["atm_iv"] == 25.0
+
+
+def test_iv_rank_from_cache_thin_and_empty():
+    assert YFinanceProvider._iv_rank_from_cache({"dates": ["a"], "atm_ivs": [0.2]})["rank"] is None
+    assert YFinanceProvider._iv_rank_from_cache({"atm_ivs": []})["atm_iv"] is None
+
+
+def test_once_per_day_skips_fetch_when_today_cached(monkeypatch, tmp_path):
+    # Today already in cache → _get_real_iv_rank must NOT touch yfinance or IBKR (the load gate).
+    monkeypatch.setattr(YFinanceProvider, "_IV_CACHE_DIR", tmp_path)
+    today = date.today().isoformat()
+    (tmp_path / "SPY.json").write_text(
+        json.dumps({"dates": ["2026-01-01", "2026-01-02", today], "atm_ivs": [0.10, 0.20, 0.13]}))
+
+    def _boom(*a, **k):
+        raise AssertionError("must not fetch when today is already cached")
+    monkeypatch.setattr(yp.yf, "Ticker", _boom)
+    monkeypatch.setattr(yp, "_ibkr_atm_iv", _boom)
+
+    r = YFinanceProvider()._get_real_iv_rank("SPY")
+    assert r["atm_iv"] == 13.0                      # last cached reading
+    assert r["rank"] == 30.0                        # (0.13-0.10)/(0.20-0.10)*100
