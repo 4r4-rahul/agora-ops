@@ -106,6 +106,22 @@ def analyze_models(db_path: str) -> dict[str, Any]:
                          "recommendation": "Keep accumulating outcomes; do NOT enable any ML-based GATE until EMERGING (20+ labeled). Predictive models stay shadow-only.",
                          "evidence": {"labeled": dh["n_samples"]}})
 
+        # ── edge: current vol regime → credit-vs-debit bias (M2) ──
+        cf = next((s for s in _latest_scores(conn, "regime_model")
+                   if s["entity_id"] == "credit_favorability"), None)
+        if cf and cf["score"] is not None:
+            m = cf["meta"]
+            if cf["score"] >= 0.6:
+                recs.append({"category": "edge", "severity": "medium", "source_model": "regime_model",
+                             "finding": f"Vol regime is {m.get('vol_regime')} (VIX {m.get('vix')}, {m.get('term_state')}) — premium is rich.",
+                             "recommendation": "Favor CREDIT spreads; down-weight new directional DEBITS (IV-crush risk).",
+                             "evidence": m})
+            elif cf["score"] <= 0.35:
+                recs.append({"category": "edge", "severity": "low", "source_model": "regime_model",
+                             "finding": f"Vol regime is {m.get('vol_regime')} (VIX {m.get('vix')}) — premium is cheap.",
+                             "recommendation": "Directional DEBITS are acceptable here; credit spreads collect little premium.",
+                             "evidence": m})
+
         # persist (idempotent per day) + rank
         for r in recs:
             conn.execute(

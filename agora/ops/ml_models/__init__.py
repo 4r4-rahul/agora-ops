@@ -11,6 +11,7 @@ from __future__ import annotations
 # Importing each module triggers its register_model() call.
 from agora.ops.ml_models import (
     m1_fill,  # noqa: F401
+    m2_regime,  # noqa: F401
     m3_liquidity,  # noqa: F401
     m4_winrate,  # noqa: F401
     m5_conviction,  # noqa: F401

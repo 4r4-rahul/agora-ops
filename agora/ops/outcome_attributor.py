@@ -975,6 +975,14 @@ class ScheduledAttributor:
                 except Exception as _fsexc:
                     logger.debug("feature store skipped: %s", _fsexc)
 
+                # Phase 0d market capture — daily VIX/term-structure snapshot for the regime model.
+                # Network-fetch (yfinance), idempotent/day, writes only market_snapshots, never raises.
+                try:
+                    from agora.ops.market_capture import capture_market_snapshot
+                    capture_market_snapshot(self._db_path)
+                except Exception as _mcexc:
+                    logger.debug("market capture skipped: %s", _mcexc)
+
                 # Phase 0c model-runner — run any model whose cadence is due (reads the fresh feature
                 # store). Read-only on trading data, writes only model_runs/model_scores, never raises.
                 try:
