@@ -12,4 +12,7 @@ from __future__ import annotations
 from agora.ops.ml_models import (
     m1_fill,  # noqa: F401
     m3_liquidity,  # noqa: F401
+    m4_winrate,  # noqa: F401
+    m5_conviction,  # noqa: F401
+    m8_lifecycle,  # noqa: F401
 )
