@@ -34,6 +34,30 @@ CREATE TABLE IF NOT EXISTS market_snapshots (
 
 _SYMBOLS = {"VIX": "^VIX", "VIX9D": "^VIX9D", "VIX3M": "^VIX3M", "SPY": "SPY", "QQQ": "QQQ"}
 
+_IV_CACHE_DIR = ".agora/iv_cache"
+
+
+def iv_rank_for_ticker(ticker: str, cache_dir: str = _IV_CACHE_DIR) -> float | None:
+    """Per-ticker IV-rank (0-100) from the daily ATM-IV cache the live scans populate
+    (.agora/iv_cache/{ticker}.json). Mirrors yfinance_provider._iv_rank_from_cache. None if no/too-few
+    data. Pure file read — no network. This is the per-ticker signal M2 needs (market VIX is too coarse)."""
+    import json
+    import os
+    try:
+        path = os.path.join(cache_dir, f"{ticker}.json")
+        if not os.path.exists(path):
+            return None
+        with open(path) as f:
+            ivs = json.load(f).get("atm_ivs") or []
+        if len(ivs) < 3:
+            return None
+        mn, mx = min(ivs), max(ivs)
+        if mx <= mn:
+            return 50.0
+        return round(max(0.0, min(100.0, (ivs[-1] - mn) / (mx - mn) * 100)), 1)
+    except Exception:
+        return None
+
 
 def _yf_fetch() -> dict[str, dict[str, float | None]]:
     """Default fetcher — yfinance fast_info. Returns {label: {price, change_pct}}. Best-effort."""

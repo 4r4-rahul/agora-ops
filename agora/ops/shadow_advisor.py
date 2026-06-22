@@ -40,7 +40,8 @@ CREATE TABLE IF NOT EXISTS shadow_model_decisions (
 CREATE INDEX IF NOT EXISTS idx_shadow_date ON shadow_model_decisions(decision_date);
 """
 
-_MIN_VALIDATE_N = 20   # below this, the would-be-impact verdict is 'insufficient_n'
+_MIN_VALIDATE_N = 20    # below this total, the would-be-impact verdict is 'insufficient_n'
+_MIN_PER_GROUP = 10     # AND need this many in BOTH arms (flagged + other) before asserting
 
 
 def _latest_score(conn: sqlite3.Connection, model: str, entity_id: str) -> tuple[float | None, dict]:
@@ -85,18 +86,22 @@ def run_shadow_advisor(db_path: str) -> dict[str, Any]:
         for t in trades:
             pnl = t["realized_pnl"] if t["status"] == "closed" and t["realized_pnl"] is not None else (t["upnl"] or 0.0)
             is_credit = bool(t["is_credit"])
-            # M2 advice mirrors the regime model's OWN bias thresholds (>=0.6 favor credit / avoid
-            # debit, <=0.35 debit-ok, else neutral) — so the shadow advice never overstates M2.
-            if cf >= 0.6 and not is_credit:
-                m2_adv = "downweight_debit_rich_iv"
+            # M2 advice now uses the PER-TICKER IVR favorability (the upgrade), falling back to the
+            # market-level score only if the ticker has no per-ticker score. So a high-IVR name's debit
+            # gets flagged for IV-crush risk even when market VIX is mid-range — the blind spot shadow
+            # mode exposed. Thresholds mirror M2's own bias (>=0.6 favor credit / avoid debit).
+            tk_favor, _tkm = _latest_score(conn, "regime_model", t["ticker"] or "")
+            favor = tk_favor if tk_favor is not None else cf
+            if favor >= 0.6 and not is_credit:
+                m2_adv = "downweight_debit_high_ivr"
                 m2_flagged_pnls.append(pnl)
-            elif cf >= 0.6 and is_credit:
+            elif favor >= 0.6 and is_credit:
                 m2_adv = "favor_credit"
                 m2_other_pnls.append(pnl)
             else:
-                m2_adv = "neutral"   # mid/low vol — M2 does not oppose debits here
+                m2_adv = "neutral"   # low per-ticker IVR — M2 does not oppose this debit
                 m2_other_pnls.append(pnl)
-            _rows = [("regime_model", m2_adv, cf)]
+            _rows = [("regime_model", m2_adv, favor)]
             # M1 fill flag for the structure
             fscore, _ = _latest_score(conn, "fill_model", t["structure_class"] or "")
             if fscore is not None:
@@ -121,9 +126,9 @@ def run_shadow_advisor(db_path: str) -> dict[str, Any]:
         avg_flag = round(sum(m2_flagged_pnls) / n_flag, 2) if n_flag else None
         avg_other = round(sum(m2_other_pnls) / n_other, 2) if n_other else None
         if n_flag == 0:
-            verdict = "m2_neutral_regime"   # current vol regime doesn't trigger M2's avoid-debit advice
-        elif (n_flag + n_other) < _MIN_VALIDATE_N:
-            verdict = "insufficient_n"
+            verdict = "m2_neutral"          # nothing flagged (no high-IVR debits held)
+        elif (n_flag + n_other) < _MIN_VALIDATE_N or n_flag < _MIN_PER_GROUP or n_other < _MIN_PER_GROUP:
+            verdict = "insufficient_n"      # need a BALANCED sample in both arms before asserting
         elif avg_flag is not None and avg_other is not None:
             verdict = "supports_m2" if avg_flag < avg_other else "contradicts_m2"
         else:

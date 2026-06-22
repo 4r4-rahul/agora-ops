@@ -47,10 +47,34 @@ def regime_model(db_path: str) -> dict[str, Any]:
             {"entity_type": "global", "entity_id": "debit_iv_crush_caution", "score": debit_caution,
              "meta": {"vix": vix, "vol_regime": vr}},
         ]
+
+        # PER-TICKER IV rank — the upgrade the shadow advisor demanded (market VIX is too coarse).
+        # For tickers we hold or recently traded, emit a per-ticker credit favorability from real IVR
+        # so high-IVR names are flagged for IV-crush risk even when market VIX is mid-range. Guarded so
+        # M2 still returns the market-level score if the trade tables / IV cache aren't present.
+        high_ivr = 0
+        try:
+            from agora.ops.market_capture import iv_rank_for_ticker
+            tickers = [r[0] for r in conn.execute(
+                "SELECT DISTINCT ticker FROM trade_features WHERE ticker IS NOT NULL "
+                "UNION SELECT DISTINCT ticker FROM positions WHERE status='open'").fetchall()]
+            for tk in tickers:
+                ivr = iv_rank_for_ticker(tk)
+                if ivr is None:
+                    continue
+                tk_favor = (0.8 if ivr >= 70 else 0.6 if ivr >= 50 else 0.4 if ivr >= 30 else 0.2)
+                if tk_favor >= 0.6:
+                    high_ivr += 1
+                scores.append({"entity_type": "ticker", "entity_id": tk, "score": tk_favor,
+                               "meta": {"ivr": ivr, "favor": "credit" if tk_favor >= 0.6 else "debit_ok" if tk_favor <= 0.35 else "mixed"}})
+        except Exception:
+            pass
+
         return {"status": "ok", "n_samples": n_days, "readiness": "TRAINABLE" if n_days >= 1 else "BOOTSTRAP",
                 "metrics": {"as_of": snap["snapshot_date"], "vix": vix, "vol_regime": vr,
-                            "term_state": ts, "credit_favorability": credit_favor, "bias": bias},
-                "summary": f"VIX {vix} · {vr} vol · {ts} → {bias}",
+                            "term_state": ts, "credit_favorability": credit_favor, "bias": bias,
+                            "tickers_scored": len(scores) - 2, "high_ivr_tickers": high_ivr},
+                "summary": f"VIX {vix} · {vr} vol · {ts} → {bias} · per-ticker: {high_ivr} high-IVR names flagged",
                 "scores": scores}
     finally:
         conn.close()
