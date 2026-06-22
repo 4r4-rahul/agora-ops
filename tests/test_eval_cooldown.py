@@ -13,10 +13,13 @@ from agora.session import AgoraSession
 from agora.scan import ScanPriority
 
 
-def _fake(cooldown_secs: int):
+def _fake(cooldown_secs: int, urgent_secs: int = 180):
     """A minimal stand-in carrying just the attributes _eval_cooldown_skip touches."""
     obj = types.SimpleNamespace()
-    obj._settings = types.SimpleNamespace(evaluate_ticker_cooldown_secs=cooldown_secs)
+    obj._settings = types.SimpleNamespace(
+        evaluate_ticker_cooldown_secs=cooldown_secs,
+        urgent_eval_cooldown_secs=urgent_secs,
+    )
     obj._eval_cooldowns = {}
     return obj
 
@@ -42,18 +45,35 @@ def test_second_background_eval_within_window_is_skipped():
 def test_expired_cooldown_proceeds_again():
     obj = _fake(900)
     _skip(obj, "NVDA", ScanPriority.BACKGROUND)
-    # force the cooldown into the past
-    obj._eval_cooldowns["NVDA"] = datetime.now(tz=timezone.utc) - timedelta(seconds=1)
+    # force the last-eval timestamp past the BACKGROUND gap
+    obj._eval_cooldowns["NVDA"] = datetime.now(tz=timezone.utc) - timedelta(seconds=901)
     assert _skip(obj, "NVDA", ScanPriority.BACKGROUND) is False
 
 
-def test_urgent_scan_bypasses_cooldown():
+def test_immediate_scan_always_bypasses():
     obj = _fake(900)
     _skip(obj, "NVDA", ScanPriority.BACKGROUND)        # arm it
-    # An URGENT (catalyst/price-move/sweep) scan must NEVER be throttled.
-    assert _skip(obj, "NVDA", ScanPriority.URGENT) is False
+    # IMMEDIATE (discrete catalyst / position-under-stress) must NEVER be throttled.
     assert _skip(obj, "NVDA", ScanPriority.IMMEDIATE) is False
-    assert _skip(obj, "NVDA", ScanPriority.NORMAL) is False
+    assert _skip(obj, "NVDA", ScanPriority.IMMEDIATE) is False  # even back-to-back
+
+
+def test_urgent_and_normal_get_lighter_cooldown():
+    # LLM-spend audit: URGENT/NORMAL are now throttled by the LIGHTER cooldown, not fully bypassed.
+    obj = _fake(900, urgent_secs=180)
+    assert _skip(obj, "NVDA", ScanPriority.URGENT) is False   # first one proceeds + records
+    assert _skip(obj, "NVDA", ScanPriority.URGENT) is True    # immediate re-fire → throttled
+    assert _skip(obj, "NVDA", ScanPriority.NORMAL) is True    # NORMAL shares the lighter gap
+    # past the urgent gap → proceeds again
+    obj._eval_cooldowns["NVDA"] = datetime.now(tz=timezone.utc) - timedelta(seconds=181)
+    assert _skip(obj, "NVDA", ScanPriority.URGENT) is False
+
+
+def test_urgent_zero_reverts_to_full_bypass():
+    obj = _fake(900, urgent_secs=0)
+    _skip(obj, "NVDA", ScanPriority.BACKGROUND)               # arm it
+    assert _skip(obj, "NVDA", ScanPriority.URGENT) is False   # 0 → URGENT never throttled
+    assert _skip(obj, "NVDA", ScanPriority.URGENT) is False
 
 
 def test_cooldown_zero_disables_gate():

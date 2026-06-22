@@ -402,15 +402,22 @@ class AdvocateAgent:
                         ticker, getattr(response, "stop_reason", "?"),
                         [b.type for b in response.content], len(raw_text), raw_text[:300],
                     )
+                    # Cheap regen: append a terse JSON-only nudge and drop the token/turn ceilings
+                    # rather than resending a full 4000-token generation — the verdict object is
+                    # small and the only failure mode is trailing prose. LLM-spend audit 2026-06-22.
                     response = await _with_retry(lambda: run_with_tools(
                         client=self._client,
                         model=_MODEL,
                         system=_cached_system,
-                        messages=[{"role": "user", "content": _compress(payload)}],
+                        messages=[
+                            {"role": "user", "content": _compress(payload)},
+                            {"role": "user", "content": "Return ONLY the advocate_verdict JSON "
+                                                        "object — no prose, no analysis."},
+                        ],
                         tools=_tools,
                         handlers=_handlers,
-                        max_turns=3,
-                        max_tokens=4000,
+                        max_turns=2,
+                        max_tokens=1500,
                         thinking={"type": "disabled"},
                         output_config={"effort": "medium"},
                         timeout=anthropic.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0),
@@ -621,7 +628,20 @@ class AdvocateAgent:
         macro_context:  Any | None,
         lessons:        list[str] | None = None,
     ) -> dict:
-        # Summarize open positions for correlation check
+        # Summarize open positions for correlation check. CAP to the most correlation-relevant
+        # positions (same ticker / same direction first), then bound the rest — this was an UNCAPPED
+        # dump of every open position on every Advocate call (the heaviest agent), scaling input
+        # tokens with book size. The model still sees concentration risk + the total count.
+        # LLM-spend audit 2026-06-22.
+        _POS_CAP = 12
+        _rec_dir = getattr(recommendation, "direction", None) if recommendation else None
+        _all_positions = list(positions or [])
+        _ranked = sorted(
+            _all_positions,
+            key=lambda p: (p.ticker == ticker,
+                           getattr(p, "direction", "neutral") == _rec_dir),
+            reverse=True,
+        )
         pos_summary = [
             {
                 "ticker":    p.ticker,
@@ -629,8 +649,11 @@ class AdvocateAgent:
                 "strategy":  str(p.strategy),
                 "pillar":    str(p.pillar),
             }
-            for p in (positions or [])
+            for p in _ranked[:_POS_CAP]
         ]
+        if len(_all_positions) > _POS_CAP:
+            pos_summary.append({"_note": f"+{len(_all_positions) - _POS_CAP} more open positions "
+                                         f"omitted ({len(_all_positions)} total open)"})
 
         # Summarize the recommendation
         from datetime import date as _date

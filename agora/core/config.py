@@ -152,7 +152,8 @@ class AgoraSettings(BaseSettings):
     target_dte_entry_min: int = Field(default=30, description="Minimum acceptable DTE at entry")
     target_dte_close: int = Field(default=21, description="Close position at this DTE")
     earnings_blackout_days: int = Field(default=3, description="Block new vol-premium entries within N days of earnings")
-    evaluate_ticker_cooldown_secs: int = Field(default=900, ge=0, description="Skip re-running the full spread eval stack (analyst+strategy+advocate LLM) on the same ticker within N secs for BACKGROUND scans only; catalyst/urgent/normal scans bypass. 0 disables. Cuts the ~11x/session redundant LLM spend.")
+    evaluate_ticker_cooldown_secs: int = Field(default=900, ge=0, description="Skip re-running the full spread eval stack (analyst+strategy+advocate LLM) on the same ticker within N secs for BACKGROUND scans. 0 disables. Cuts the ~11x/session redundant LLM spend.")
+    urgent_eval_cooldown_secs: int = Field(default=180, ge=0, description="LLM-spend audit (2026-06-22): LIGHTER eval cooldown for URGENT/NORMAL scans (price-move + aging promotions) — was a FULL bypass, so on a broad volatile day dozens of names crossing the move threshold each re-fired the full analyst+selector+advocate LLM stack every sweep with no throttle (the primary LLM-storm vector that drained the budget). IMMEDIATE (discrete catalyst / position-under-stress) still bypasses. 0 = revert URGENT/NORMAL to full bypass.")
     # ── Expectancy meter + legacy-data cutoff (S0.4) ──────────────────────────
     # Trades closed before the day-0/1 churn fix landed are mechanically-broken and would condemn
     # now-repaired cells. The post-fix expectancy view + the cell-gate exclude everything before

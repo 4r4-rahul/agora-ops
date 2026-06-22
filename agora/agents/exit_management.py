@@ -150,6 +150,11 @@ OUTPUT — return exactly this JSON, no markdown, no prose:
   "key_risks_to_watch": ["string", "string"]
 }"""
 
+# Prompt-cache the ~4.4KB static system prompt (ephemeral): the exit agent runs on the top tier
+# per open position every cycle, so the same large system text was re-billed at full input rate on
+# every call. Mirrors the decision agents (strategy_selector/advocate). LLM-spend audit 2026-06-22.
+_CACHED_SYSTEM = [{"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}]
+
 
 # ── Output dataclass ──────────────────────────────────────────────────────────
 
@@ -269,7 +274,7 @@ class ExitIntelligenceAgent:
             response = await self._client.messages.create(
                 model=self._model,
                 max_tokens=2000,
-                system=_SYSTEM,
+                system=_CACHED_SYSTEM,
                 messages=[{"role": "user", "content": _compress(payload)}],
                 tools=[_EXIT_DECISION_TOOL],
                 tool_choice={"type": "tool", "name": "exit_decision"},

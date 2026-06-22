@@ -2515,24 +2515,37 @@ class AgoraSession:
         return ScanPriority.BACKGROUND
 
     def _eval_cooldown_skip(self, ticker: str, scan_priority: int) -> bool:
-        """Return True if a routine (BACKGROUND) re-evaluation of `ticker` should be skipped
-        because the full eval stack ran within evaluate_ticker_cooldown_secs. Records the
-        timestamp when it decides to PROCEED. Catalyst/urgent/normal scans (priority <
-        BACKGROUND) always proceed and never set the cooldown. Pure except for the dict +
-        clock — unit-tested directly. Cooldown of 0 disables the gate."""
-        _cd_secs = int(getattr(self._settings, "evaluate_ticker_cooldown_secs", 0) or 0)
-        if _cd_secs <= 0 or scan_priority < ScanPriority.BACKGROUND:
+        """Return True if re-evaluating `ticker` should be skipped because the full eval stack
+        (analyst+selector+advocate LLM) ran too recently. Stores the LAST-EVAL timestamp and
+        applies a PRIORITY-TIERED minimum gap:
+          • IMMEDIATE (discrete catalyst / position-under-stress) — never throttled (always proceed),
+            but still records the eval time so a following lower-priority sweep is deduped against it.
+          • URGENT / NORMAL (price-move + aging promotions) — LIGHTER cooldown
+            (urgent_eval_cooldown_secs). Previously a FULL bypass, which let a broad volatile day
+            re-fire the whole LLM stack on dozens of names every sweep (the LLM-storm vector).
+          • BACKGROUND (routine sweep) — full evaluate_ticker_cooldown_secs.
+        Pure except for the dict + clock — unit-tested directly. BG cooldown of 0 disables the gate."""
+        _bg_cd = int(getattr(self._settings, "evaluate_ticker_cooldown_secs", 0) or 0)
+        if _bg_cd <= 0:
             return False
         now = datetime.now(tz=UTC)
-        _until = self._eval_cooldowns.get(ticker)
-        if _until and now < _until:
+        if scan_priority <= ScanPriority.IMMEDIATE:
+            self._eval_cooldowns[ticker] = now    # proceed, but dedupe followers against this eval
+            return False
+        if scan_priority >= ScanPriority.BACKGROUND:
+            _gap = _bg_cd
+        else:
+            _gap = int(getattr(self._settings, "urgent_eval_cooldown_secs", 180) or 0)
+            if _gap <= 0:
+                return False                       # explicit revert to full bypass for URGENT/NORMAL
+        _last = self._eval_cooldowns.get(ticker)
+        if _last and (now - _last).total_seconds() < _gap:
             logger.debug(
-                "Skip %s: evaluated within cooldown (%ds), no new catalyst — saves LLM cost",
-                ticker, _cd_secs,
+                "Skip %s (prio=%d): evaluated %.0fs ago < %ds gap — saves LLM cost",
+                ticker, scan_priority, (now - _last).total_seconds(), _gap,
             )
             return True
-        # About to run the expensive pipeline — arm the cooldown.
-        self._eval_cooldowns[ticker] = now + timedelta(seconds=_cd_secs)
+        self._eval_cooldowns[ticker] = now         # about to run the expensive pipeline — record it
         return False
 
     async def _evaluate_ticker(
@@ -2568,6 +2581,22 @@ class AgoraSession:
             _entry_ok, _entry_why = self._entry_timing.is_entry_permitted()
             if not _entry_ok:
                 logger.debug("Skip %s: entry window closed — %s", ticker, _entry_why)
+                return
+
+            # Cost gate (LLM-spend audit 2026-06-22): two STRUCTURE-INDEPENDENT capacity checks
+            # BEFORE the StockAnalyst + StrategySelector LLMs. A full book or an active post-fill
+            # cooldown blocks ANY structure, so running the LLM stack just burns tokens on a trade
+            # that _submit_recommendation will reject downstream anyway. These are pure pre-filters —
+            # the authoritative checks remain in _submit_recommendation (open-combo limit at the
+            # get_open_positions check, exec cooldown). NOTE: the global exposure ceiling is
+            # structure-DEPENDENT (needs the built rec's max-loss) so it intentionally stays downstream.
+            if len(self._position_mgr.get_open_positions()) >= self._settings.gtc_max_open_combo_orders:
+                logger.debug("Skip %s: book at open-combo limit (%d) — skipping LLM stack",
+                             ticker, self._settings.gtc_max_open_combo_orders)
+                return
+            _exec_cd = self._exec_cooldowns.get(ticker)
+            if _exec_cd and datetime.now(tz=UTC) < _exec_cd:
+                logger.debug("Skip %s: post-fill exec cooldown active — skipping LLM stack", ticker)
                 return
 
             # Earnings blackout gate: block new vol-premium entries within N days of earnings.
