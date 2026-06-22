@@ -323,32 +323,40 @@ class RNDAgent(ExecutiveAgent):
                 pass
 
         # ── Conviction score calibration check via DB ──
+        # Data hygiene (2026-06-22): judge calibration ONLY on real agent-driven fills (_REAL_CLOSE),
+        # post-legacy-cutoff, and genuinely SCORED entries (conviction>0 — excludes adopted-orphan
+        # reconciliation rows that default to conviction 0). Gate behind MIN_SAMPLE + per-band minimums
+        # so we never declare a "hierarchy inversion" on a handful of trades. The prior query ran over
+        # 30-day ANY rows (incl. fabricated $0 closes + legacy-contaminated data), firing this critical
+        # on n=2 — which self_heal then acted on by recommending a lower conviction threshold.
         try:
+            from ..ops.edge_dashboard import _REAL_CLOSE, MIN_SAMPLE
+            _cutoff = getattr(self._settings, "expectancy_legacy_cutoff_date", "2026-06-12")
             conn = _sql.connect(str(self._settings.db_path), check_same_thread=False)
 
-            # High conviction score but poor outcomes → calibration drift
             rows = conn.execute(
-                """SELECT conviction_at_entry, realized_pnl
+                f"""SELECT conviction_at_entry, realized_pnl
                    FROM positions
-                   WHERE close_date >= date('now', '-30 days')
-                   AND conviction_at_entry IS NOT NULL
-                   AND realized_pnl IS NOT NULL"""
+                   WHERE {_REAL_CLOSE}
+                   AND close_date >= ?
+                   AND conviction_at_entry IS NOT NULL AND conviction_at_entry > 0
+                   AND realized_pnl IS NOT NULL""",
+                (_cutoff,),
             ).fetchall()
-            if len(rows) >= 10:
-                high_conv  = [(c, p) for c, p in rows if c and c >= 70]
-                low_conv   = [(c, p) for c, p in rows if c and c < 55]
-                if len(high_conv) >= 5 and len(low_conv) >= 5:
-                    avg_high_pnl = sum(p for _, p in high_conv) / len(high_conv)
-                    avg_low_pnl  = sum(p for _, p in low_conv)  / len(low_conv)
-                    # Gate hierarchy must hold: high > low
-                    if avg_high_pnl <= avg_low_pnl:
-                        findings.append((
-                            "conviction_gate_hierarchy_inverted",
-                            "critical",
-                            f"Conviction gate hierarchy INVERTED: high-gate avg P&L ${avg_high_pnl:.2f} "
-                            f"<= low-gate avg P&L ${avg_low_pnl:.2f}. "
-                            "ConvictionScorer is miscalibrated — high scores are NOT predicting better trades.",
-                        ))
+            high_conv = [(c, p) for c, p in rows if c and c >= 70]
+            low_conv  = [(c, p) for c, p in rows if c and c < 55]
+            # Require a real overall sample AND enough in each band before judging calibration.
+            if len(rows) >= MIN_SAMPLE and len(high_conv) >= 8 and len(low_conv) >= 8:
+                avg_high_pnl = sum(p for _, p in high_conv) / len(high_conv)
+                avg_low_pnl  = sum(p for _, p in low_conv)  / len(low_conv)
+                if avg_high_pnl <= avg_low_pnl:
+                    findings.append((
+                        "conviction_gate_hierarchy_inverted",
+                        "critical",
+                        f"Conviction gate hierarchy INVERTED: high-gate avg P&L ${avg_high_pnl:.2f} "
+                        f"<= low-gate avg P&L ${avg_low_pnl:.2f} (n={len(rows)} real post-cutoff fills). "
+                        "ConvictionScorer is miscalibrated — high scores are NOT predicting better trades.",
+                    ))
 
             # Signal-to-trade conversion gap: many tickers scored, very few traded
             scored_30d = conn.execute(

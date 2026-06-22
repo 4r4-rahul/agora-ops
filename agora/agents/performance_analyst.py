@@ -42,6 +42,13 @@ Focus on:
 
 1. DEBATE QUALITY — When advocate BLOCKed but defender overrode (CAUTION path):
    did those trades outperform or underperform straight PASSes?
+   CRITICAL — defender_verdicts are JOURNALED OPINIONS; MOST NEVER EXECUTE A TRADE (an override
+   requires thesis_strength='strong' AND confidence>=0.65 AND passing every downstream gate). For the
+   ACTUAL count and P&L impact of defender overrides, use ONLY the "defender_override_outcomes"
+   object (overrides / entered / closed_real / wins / net_pnl). NEVER attribute realized losses to
+   defender_verdicts rows, and NEVER invent per-trade dollar figures (e.g. "-$1,270 each",
+   "-$30,480 total") that do not appear verbatim in the data. If entered=0, the defender has cost
+   nothing — say so.
 
 2. FEATURE VALUE — Do trades with chart_b64/flow_signals/similar_trades inputs
    show higher prediction accuracy than trades without? (method="claude" vs "fallback")
@@ -163,6 +170,15 @@ class PerformanceAnalystAgent:
         swing    = self._fetch_swing()
         advocate = self._fetch_advocate()
         defender = self._fetch_defender()
+        # GROUND TRUTH on defender OVERRIDES (executed outcomes) so the LLM cannot fabricate realized
+        # losses from journaled OPINIONS. Most defender_verdicts NEVER execute — an override requires
+        # thesis_strength='strong' AND confidence>=0.65 AND passing every downstream gate. 2026-06-22
+        # audit fix (the weekly report was inventing "-$1,270 each / -$30,480" from non-acting rows).
+        from ..ops.defender_metrics import defender_override_precision
+        try:
+            defender_outcomes = defender_override_precision(self._db_path)
+        except Exception:
+            defender_outcomes = {}
         analyst  = self._fetch_analyst()
         strategy = self._fetch_strategy()
         long_sig = self._fetch_long_signal_stats()
@@ -179,6 +195,7 @@ class PerformanceAnalystAgent:
             "swing_decisions": swing,
             "advocate_verdicts": advocate,
             "defender_verdicts": defender,
+            "defender_override_outcomes": defender_outcomes,
             "analyst_theses": analyst,
             "strategy_selections": strategy,
             "long_options_signal_stats": long_sig,

@@ -295,6 +295,10 @@ def _adopt_group(position_mgr, sym, expiry, legs, detailed, OpenPosition, Spread
         entry_date=_date.today(), expiry_date=exp_d,
         target_close_date=min(exp_d, _date.today() + _td(days=21)),
         max_loss_dollars=entry_debit, max_gain_dollars=entry_debit * 3,
+        # Explicit provenance marker: these were never scored by the entry gates, so audits/alerts/UI
+        # must NOT read their conviction_at_entry=0 / blank regime as a "zero-conviction gate failure"
+        # (the mid-morning check + the R&D calibration audit were doing exactly that). 2026-06-22 fix.
+        regime_at_entry="adopted",
         notes="ADOPTED by position reconciler (broker leg untracked in DB)")
     position_mgr.add_position(pos)
     import logging

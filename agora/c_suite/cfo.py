@@ -266,6 +266,12 @@ class CFOAgent(ExecutiveAgent):
         # ── Pull realized P&L data from DB ──
         try:
             conn = _sql.connect(str(self._settings.db_path), check_same_thread=False)
+            # Data hygiene (2026-06-22): the P&L-health metrics below must read ONLY real agent-driven
+            # fills (_REAL_CLOSE) post-legacy-cutoff — otherwise fabricated/sync/legacy rows produced
+            # false "profit factor 0.43 / win-rate 12% / suspend entries" criticals on contaminated data.
+            from ..ops.edge_dashboard import _REAL_CLOSE
+            from ..ops.edge_dashboard import MIN_SAMPLE as _MIN_SAMPLE
+            _cutoff = getattr(self._settings, "expectancy_legacy_cutoff_date", "2026-06-12")
 
             # Today's realized P&L vs daily loss limit
             today_rows = conn.execute(
@@ -291,14 +297,16 @@ class CFOAgent(ExecutiveAgent):
                         "Reduce new position sizing — approaching daily loss threshold.",
                     ))
 
-            # 30-day win rate and profit factor
+            # Win rate and profit factor — real fills, post-cutoff only
             rows_30d = conn.execute(
-                """SELECT realized_pnl FROM positions
-                   WHERE close_date >= date('now', '-30 days')
-                   AND realized_pnl IS NOT NULL"""
+                f"""SELECT realized_pnl FROM positions
+                   WHERE {_REAL_CLOSE}
+                   AND close_date >= ?
+                   AND realized_pnl IS NOT NULL""",
+                (_cutoff,),
             ).fetchall()
             pnl_list = [r[0] for r in rows_30d if r[0] is not None]
-            if len(pnl_list) >= 10:
+            if len(pnl_list) >= _MIN_SAMPLE:
                 wins   = [p for p in pnl_list if p > 0]
                 losses = [p for p in pnl_list if p < 0]
                 win_rate = len(wins) / len(pnl_list)
@@ -329,14 +337,16 @@ class CFOAgent(ExecutiveAgent):
                         f"Gross profit ${gross_profit:.2f}, gross loss ${gross_loss:.2f}. Review immediately.",
                     ))
 
-            # Consecutive losing days
+            # Consecutive losing days — real fills, post-cutoff only
             daily_pnl_rows = conn.execute(
-                """SELECT close_date, SUM(realized_pnl) as day_pnl
+                f"""SELECT close_date, SUM(realized_pnl) as day_pnl
                    FROM positions
-                   WHERE close_date >= date('now', '-14 days')
+                   WHERE {_REAL_CLOSE}
+                   AND close_date >= ?
                    AND realized_pnl IS NOT NULL
                    GROUP BY close_date
-                   ORDER BY close_date DESC"""
+                   ORDER BY close_date DESC""",
+                (_cutoff,),
             ).fetchall()
             consecutive_losses = 0
             for _, day_pnl in daily_pnl_rows:
@@ -359,9 +369,12 @@ class CFOAgent(ExecutiveAgent):
                     "Pattern suggests regime mismatch or signal calibration issue.",
                 ))
 
-            # Drawdown check from all realized P&L
+            # Drawdown check — real fills, post-cutoff only (was ALL-TIME incl. legacy/fabricated rows)
             all_pnl = conn.execute(
-                "SELECT realized_pnl FROM positions WHERE realized_pnl IS NOT NULL ORDER BY close_date, id"
+                f"""SELECT realized_pnl FROM positions
+                   WHERE {_REAL_CLOSE} AND close_date >= ?
+                   ORDER BY close_date, id""",
+                (_cutoff,),
             ).fetchall()
             if all_pnl:
                 equity = 0.0
