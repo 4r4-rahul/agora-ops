@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from agora.ops.model_analyst import analyze_models
 
 
-def _db():
+def _db(overall_fill=0.5):
     p = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
     c = sqlite3.connect(p)
     c.execute("""CREATE TABLE model_scores (id INTEGER PRIMARY KEY, model_name TEXT, entity_type TEXT,
@@ -35,6 +35,10 @@ def _db():
     # dataset_health BOOTSTRAP
     c.execute("INSERT INTO model_runs (model_name,run_ts_utc,status,n_samples,readiness) VALUES (?,?,?,?,?)",
               ("dataset_health", datetime.now(UTC).isoformat(), "ok", 13, "BOOTSTRAP"))
+    # fill_model run carrying the overall system fill rate (gates the dead-ticker rec)
+    c.execute("INSERT INTO model_runs (model_name,run_ts_utc,status,metrics_json) VALUES (?,?,?,?)",
+              ("fill_model", datetime.now(UTC).isoformat(), "ok",
+               json.dumps({"overall_fill_rate": overall_fill})))
     c.commit(); c.close()
     return p
 
@@ -56,6 +60,19 @@ def test_generates_grounded_recs():
     assert da["severity"] == "info" and "BOOTSTRAP" in da["finding"]
     # long_call (10% fill, fine) does NOT generate a poor-fill rec
     assert not any("long_call fills" in x["finding"] for x in recs.values())
+
+
+def test_dead_ticker_suppressed_when_system_fill_low():
+    # overall fill 3% (paper-sim) → 0% per-ticker is the base-rate norm, NOT illiquidity.
+    # The universe 'pause' rec must NOT fire; instead an info rec explaining the false positive.
+    db = _db(overall_fill=0.03)
+    analyze_models(db)
+    c = sqlite3.connect(db); c.row_factory = sqlite3.Row
+    recs = {(x["category"], x["source_model"]): x for x in c.execute("SELECT * FROM model_recommendations")}
+    assert ("universe", "liquidity_model") not in recs        # no false 'pause these names'
+    info = recs[("execution", "liquidity_model")]
+    assert info["severity"] == "info" and "NOT actionable" in info["finding"]
+    assert "Do NOT pause" in info["recommendation"]
 
 
 def test_idempotent_per_day():

@@ -87,14 +87,32 @@ def analyze_models(db_path: str) -> dict[str, Any]:
                              "recommendation": action, "evidence": m})
 
         # ── universe: tickers that never fill (M3) ──
+        # GUARD: a 0% per-ticker fill is only meaningful when the SYSTEM can actually fill. When the
+        # overall fill rate is pathologically low (paper-sim latency, ~3%), 0 fills on 15-60 attempts
+        # is the statistical NORM (expected fills ≈ base_rate × n < 1), not illiquidity — flagging
+        # liquid names (NFLX/MU/KLAC) here would be a false positive. So only fire when fills are
+        # healthy; otherwise the actionable issue is the SYSTEM fill rate (already flagged by M1).
+        _fr = conn.execute("SELECT metrics_json FROM model_runs WHERE model_name='fill_model' "
+                           "AND status='ok' ORDER BY id DESC LIMIT 1").fetchone()
+        overall_fill = 0.0
+        if _fr and _fr["metrics_json"]:
+            try:
+                overall_fill = float(json.loads(_fr["metrics_json"]).get("overall_fill_rate") or 0.0)
+            except Exception:
+                overall_fill = 0.0
         dead = [s for s in _latest_scores(conn, "liquidity_model")
                 if (s["meta"].get("n") or 0) >= _DEAD_MIN_N and s["score"] is not None and s["score"] == 0.0]
-        if dead:
+        if dead and overall_fill >= 0.30:
             names = ", ".join(sorted(s["entity_id"] for s in dead)[:12])
             recs.append({"category": "universe", "severity": "medium", "source_model": "liquidity_model",
-                         "finding": f"{len(dead)} ticker(s) never filled over their recent attempts: {names}",
-                         "recommendation": "Down-weight or pause these names in the active universe until fills improve — spending discovery/LLM on un-fillable names is wasted effort.",
-                         "evidence": {"dead_tickers": [s["entity_id"] for s in dead]}})
+                         "finding": f"{len(dead)} ticker(s) never filled despite a healthy {overall_fill*100:.0f}% system fill rate: {names}",
+                         "recommendation": "Down-weight or pause these names — they are genuinely hard to fill while the rest of the book fills fine.",
+                         "evidence": {"dead_tickers": [s["entity_id"] for s in dead], "overall_fill_rate": overall_fill}})
+        elif dead:
+            recs.append({"category": "execution", "severity": "info", "source_model": "liquidity_model",
+                         "finding": f"Per-ticker 'never fills' is NOT actionable: system-wide fill is only {overall_fill*100:.0f}% (paper-sim latency), so 0% per-ticker is the base-rate norm, not illiquidity.",
+                         "recommendation": "Do NOT pause those names — they include liquid mega-caps. Fix the SYSTEM fill rate first (see fill_model); per-ticker liquidity becomes meaningful once system fills are healthy.",
+                         "evidence": {"overall_fill_rate": overall_fill, "n_flagged": len(dead)}})
 
         # ── data: training-set readiness (dataset_health) ──
         dh = conn.execute(
