@@ -902,10 +902,49 @@ class ScheduledAttributor:
     def set_webhook(self, url: str | None) -> None:
         self._webhook = url
 
+    def _weekly_marker_path(self) -> str:
+        import os
+        return os.path.join(os.path.dirname(self._db_path) or ".", "weekly_markers.json")
+
+    def _weekly_due(self, key: str, interval_days: int = 7) -> bool:
+        """True if `key` last ran >= interval_days ago, via a PERSISTED wall-clock marker that
+        survives restarts. Replaces the prior monotonic-clock check (asyncio loop time ≈
+        time.monotonic() — seconds since boot — compared against an init of 0.0), which was
+        true on the FIRST loop iteration after EVERY startup and so re-fired the 'weekly' report
+        once per restart (the Discord spam). 2026-06-22 fix."""
+        import json
+        try:
+            with open(self._weekly_marker_path()) as f:
+                last = json.load(f).get(key)
+            if not last:
+                return True
+            return (datetime.now(UTC) - datetime.fromisoformat(last)).days >= interval_days
+        except Exception:
+            return True
+
+    def _weekly_mark(self, key: str) -> None:
+        import json
+        try:
+            p = self._weekly_marker_path()
+            try:
+                with open(p) as f:
+                    data = json.load(f)
+            except Exception:
+                data = {}
+            data[key] = datetime.now(UTC).isoformat()
+            with open(p, "w") as f:
+                json.dump(data, f)
+        except Exception:
+            pass
+
     async def start(self) -> None:
         self._running = True
         logger.info("ScheduledAttributor started (every %dh)", PATROL_INTERVAL_SEC // 3600)
         await asyncio.sleep(30)
+        # Anchor the lesson timer to NOW so it doesn't fire on startup (loop time ≈ seconds-since-boot,
+        # which is >> any interval when compared against the 0.0 init — same monotonic bug the weekly
+        # markers fix). The weekly calibrator/perf-analysis use persisted wall-clock markers instead.
+        self._last_lesson_time = asyncio.get_event_loop().time()
         while self._running:
             try:
                 result = attribute_closed_trades(self._db_path)
@@ -923,14 +962,14 @@ class ScheduledAttributor:
                     self._last_lesson_time = now
                 # Promotion threshold check
                 await self._check_promotion_alerts()
-                # Weekly conviction calibrator
-                if (now - self._last_calibration_time) >= CALIBRATION_INTERVAL_SEC:
+                # Weekly conviction calibrator — persisted wall-clock cadence (survives restarts)
+                if self._weekly_due("calibration"):
                     await self._run_calibrator()
-                    self._last_calibration_time = now
-                # Weekly cross-agent performance analysis
-                if (now - self._last_perf_analysis_time) >= CALIBRATION_INTERVAL_SEC:
+                    self._weekly_mark("calibration")
+                # Weekly cross-agent performance analysis — persisted wall-clock cadence
+                if self._weekly_due("perf_analysis"):
                     await self._run_performance_analysis()
-                    self._last_perf_analysis_time = now
+                    self._weekly_mark("perf_analysis")
             except Exception as exc:
                 logger.error("ScheduledAttributor error: %s", exc)
             await asyncio.sleep(PATROL_INTERVAL_SEC)
