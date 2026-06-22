@@ -460,6 +460,27 @@ class RNDAgent(ExecutiveAgent):
             except Exception:
                 pass
 
+        # ── ML Model Analyst — surface today's data-driven recommendations to the C-suite ──
+        # The R&D office monitors the model fleet: it reads the (advisory) model_recommendations and
+        # bubbles the actionable ones up the chain. Read-only; never gates or acts automatically.
+        try:
+            import sqlite3 as _sql2
+            _c = _sql2.connect(str(self._settings.db_path), check_same_thread=False)
+            if _c.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='model_recommendations'").fetchone()[0]:
+                _latest = _c.execute("SELECT MAX(created_date) FROM model_recommendations").fetchone()[0]
+                for _sev, _src, _find, _rec in _c.execute(
+                    "SELECT severity, source_model, finding, recommendation FROM model_recommendations "
+                    "WHERE created_date=? AND severity IN ('high','medium') "
+                    "ORDER BY CASE severity WHEN 'high' THEN 0 ELSE 1 END", (_latest,)).fetchall():
+                    findings.append((
+                        f"model_rec_{_src}",
+                        "warning" if _sev == "high" else "info",
+                        f"[ML/{_src}] {_find} → {_rec}",
+                    ))
+            _c.close()
+        except Exception:
+            pass
+
         return findings
 
     async def self_heal(self, findings: list[tuple[str, str, str]]) -> None:
