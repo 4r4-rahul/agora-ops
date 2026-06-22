@@ -963,6 +963,19 @@ class ScheduledAttributor:
 
                 result = attribute_closed_trades(self._db_path)
                 new_analyst = result.get("attributed_by_agent", {}).get("analyst", 0)
+
+                # Phase 0b feature store — rebuild the unified ML table AFTER capture+attribution so
+                # path features + labels are fresh. Read-only on sources, writes only trade_features.
+                try:
+                    from agora.ops.feature_store import build_feature_store
+                    _fs = build_feature_store(
+                        self._db_path,
+                        legacy_cutoff=getattr(getattr(self, "_settings", None),
+                                              "expectancy_legacy_cutoff_date", "2026-06-12"),
+                    )
+                    logger.debug("feature store: %s", _fs)
+                except Exception as _fsexc:
+                    logger.debug("feature store skipped: %s", _fsexc)
                 if result.get("attributed", 0) > 0 or new_analyst > 0:
                     logger.info("Attribution patrol: %s", result)
                 # Trigger lessons when N new attributions OR weekly timer

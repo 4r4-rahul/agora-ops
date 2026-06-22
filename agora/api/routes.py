@@ -720,6 +720,36 @@ async def get_lifecycle_trade(position_id: str) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+@router.get("/feature-store/summary")
+async def get_feature_store_summary() -> JSONResponse:
+    """Phase 0b — the unified ML training table: row/label counts, label balance, and feature
+    coverage. Read-only (trade_features only)."""
+    import sqlite3
+    session = get_session()
+    db = str(session._settings.db_path)
+    try:
+        conn = sqlite3.connect(db, timeout=8); conn.row_factory = sqlite3.Row
+        has = conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='trade_features'").fetchone()[0]
+        if not has:
+            return JSONResponse({"rows": 0, "note": "feature store not built yet"})
+        rows = conn.execute("SELECT COUNT(*) FROM trade_features").fetchone()[0]
+        labeled = conn.execute("SELECT COUNT(*) FROM trade_features WHERE win IS NOT NULL").fetchone()[0]
+        wins = conn.execute("SELECT COUNT(*) FROM trade_features WHERE win=1").fetchone()[0]
+        by_class = {r["structure_class"]: {"n": r["n"], "labeled": r["lab"]} for r in conn.execute(
+            "SELECT structure_class, COUNT(*) n, SUM(win IS NOT NULL) lab FROM trade_features "
+            "GROUP BY structure_class")}
+        path_cov = conn.execute("SELECT COUNT(*) FROM trade_features WHERE n_frames IS NOT NULL").fetchone()[0]
+        conn.close()
+        return JSONResponse({
+            "rows": rows, "labeled": labeled, "wins": wins, "losses": labeled - wins,
+            "win_rate": round(wins / labeled, 3) if labeled else None,
+            "path_feature_coverage": path_cov, "by_structure_class": by_class,
+            "ml_readiness": "BOOTSTRAP" if labeled < 20 else ("EMERGING" if labeled < 50 else "TRAINABLE"),
+        })
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 @router.get("/health")
 async def get_health() -> JSONResponse:
     """
