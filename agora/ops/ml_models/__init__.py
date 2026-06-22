@@ -9,4 +9,7 @@ they cannot affect execution.
 from __future__ import annotations
 
 # Importing each module triggers its register_model() call.
-from agora.ops.ml_models import m1_fill  # noqa: F401
+from agora.ops.ml_models import (
+    m1_fill,  # noqa: F401
+    m3_liquidity,  # noqa: F401
+)
