@@ -836,8 +836,17 @@ async def get_shadow_validation() -> JSONResponse:
                FROM shadow_model_decisions WHERE decision_date=? AND model='regime_model'
                GROUP BY would_advise""", (latest,)).fetchall()
         m2_breakdown = {r["would_advise"]: {"n": r["n"], "avg_pnl": r["avg_pnl"]} for r in m2}
-        flagged = m2_breakdown.get("downweight_debit_rich_iv")
-        verdict = ("m2_neutral_regime" if not flagged else "see avg_pnl comparison")
+        flagged = m2_breakdown.get("downweight_debit_high_ivr")
+        other_n = sum(v["n"] for k, v in m2_breakdown.items() if k != "downweight_debit_high_ivr")
+        if not flagged:
+            verdict = "no high-IVR debits held"
+        elif flagged["n"] < 10 or other_n < 10:
+            verdict = f"insufficient_n ({flagged['n']} flagged vs {other_n} other — need ≥10 each)"
+        else:
+            avg_other = (sum(v["n"] * (v["avg_pnl"] or 0) for k, v in m2_breakdown.items()
+                             if k != "downweight_debit_high_ivr") / other_n) if other_n else None
+            verdict = ("supports_m2" if avg_other is not None and (flagged["avg_pnl"] or 0) < avg_other
+                       else "contradicts_m2")
         conn.close()
         return JSONResponse({"as_of": latest, "shadow_decisions": total,
                              "m2_regime": m2_breakdown, "m2_verdict": verdict,
