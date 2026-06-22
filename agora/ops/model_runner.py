@@ -148,6 +148,11 @@ def run_due_models(db_path: str) -> dict[str, Any]:
     """Run every model whose cadence is due; log each to model_runs. Never raises."""
     ran: list[str] = []
     try:
+        # Load the fleet (M1..M8 self-register on import; idempotent via register_model dedupe).
+        try:
+            import agora.ops.ml_models  # noqa: F401
+        except Exception as _impexc:
+            logger.debug("ml_models import skipped: %s", _impexc)
         conn = sqlite3.connect(db_path, timeout=10)
         conn.execute("PRAGMA journal_mode=WAL")
         _ensure(conn)
