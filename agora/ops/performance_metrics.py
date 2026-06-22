@@ -104,24 +104,50 @@ def reconcile_books(db_path: str) -> dict[str, Any]:
         return {"error": str(exc)}
 
 
-def performance_context_line(db_path: str) -> str:
+def performance_context_line(db_path: str, legacy_cutoff: str | None = None) -> str:
     """The one-liner injected into EVERY agent's LLM payload — so the whole system reasons toward
-    positive expectancy. Honest and sizing-safe when the edge is unproven or negative."""
-    m = compute_metrics(db_path).get("overall", {})
+    positive expectancy. Honest and sizing-safe when the edge is unproven or negative.
+
+    BOARD RULING (2026-06-22), two corrections that broke a self-reinforcing death spiral:
+      1. Use the REPAIRED-system (``post_fix``) view, NOT the legacy-polluted all-time ``overall``.
+         The selector was being fed -$71/n=45 (pre-06-12 churn included) and vetoing ~everything,
+         while the honest repaired number is materially better — and consistent with what the
+         expectancy meter + cell-gate already use.
+      2. Frame system-level expectancy as a SIZING signal, not a trade VETO. While the edge is
+         unproven the agenda is to MEASURE the upgraded system: take fundamentally sound setups at
+         FLOOR size. Risk is held by the cell-gate (benches proven-bad cells) + the daily-loss
+         breaker + defined-risk sizing — NOT by refusing to trade. Do not size up until positive.
+    """
+    if legacy_cutoff is None:
+        try:
+            from agora.core.config import get_settings
+            legacy_cutoff = getattr(get_settings(), "expectancy_legacy_cutoff_date", None)
+        except Exception:
+            legacy_cutoff = None
+    metrics = compute_metrics(db_path, legacy_cutoff=legacy_cutoff)
+    m = metrics.get("post_fix") or metrics.get("overall", {})   # repaired-system view first
     n = m.get("n", 0)
     if not n:
-        return ("SYSTEM PERFORMANCE: no real closed trades yet. The agenda is to find "
-                "positive-expectancy setups; do not chase volume.")
+        return ("SYSTEM PERFORMANCE: no real closed trades yet. The agenda is to MEASURE the "
+                "system — take sound setups at FLOOR size to build the sample; do not chase volume.")
     net = m.get("net_realized", 0.0); wr = (m.get("win_rate") or 0) * 100
-    if n < MIN_SAMPLE:
-        return (f"SYSTEM PERFORMANCE (n={n}, UNVALIDATED): net ${net:.0f}, win-rate {wr:.0f}%. "
-                f"Edge UNPROVEN — the agenda is to find positive-expectancy setups, NOT to size up.")
     exp = m.get("expectancy", 0.0); pf = m.get("profit_factor")
+    _guard = ("Risk is bounded by per-cell benching + the daily-loss breaker + defined-risk sizing, "
+              "NOT by refusing trades: do NOT veto a fundamentally sound setup on system-level "
+              "expectancy alone, and do NOT size up until the edge is proven positive.")
+    if n < MIN_SAMPLE:
+        return (f"SYSTEM PERFORMANCE (n={n}, post-repair, UNVALIDATED): expectancy ${exp:.0f}/trade, "
+                f"win-rate {wr:.0f}%, net ${net:.0f}. The repaired system's edge is UNPROVEN — the "
+                f"agenda is to MEASURE it: take fundamentally sound setups at FLOOR size to grow the "
+                f"sample toward n={MIN_SAMPLE}+. {_guard}")
     sign = "POSITIVE" if (exp or 0) > 0 else "NEGATIVE"
-    return (f"SYSTEM PERFORMANCE (n={n}): expectancy ${exp:.0f}/trade ({sign}), win-rate {wr:.0f}%, "
-            f"profit-factor {pf if pf is not None else 'n/a'}, net ${net:.0f}. THE AGENDA IS "
-            f"POSITIVE EXPECTANCY: only act on setups whose edge beats the current bar; do not "
-            f"size up while expectancy is negative.")
+    if (exp or 0) > 0:
+        return (f"SYSTEM PERFORMANCE (n={n}, post-repair): expectancy ${exp:.0f}/trade (POSITIVE), "
+                f"win-rate {wr:.0f}%, profit-factor {pf if pf is not None else 'n/a'}, net ${net:.0f}. "
+                f"Edge is proven positive — keep taking sound setups; scale size with conviction.")
+    return (f"SYSTEM PERFORMANCE (n={n}, post-repair): expectancy ${exp:.0f}/trade ({sign}), "
+            f"win-rate {wr:.0f}%, profit-factor {pf if pf is not None else 'n/a'}, net ${net:.0f}. "
+            f"Edge not yet positive — take sound setups at FLOOR size to keep measuring. {_guard}")
 
 
 def compute_achievements(db_path: str) -> list[dict[str, Any]]:
