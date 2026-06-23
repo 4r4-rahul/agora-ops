@@ -99,3 +99,60 @@ class TestPaperUntrusted:
 def test_shadow_never_applies():
     rec = _rec({"bull_put_spread": {"fills": 1, "timeouts": 99, "rejects": 0}})
     assert rec["applied"] is False and rec["mode"] == "shadow"
+
+
+# ── Promotion: apply_slippage_recommendation writes the budget, trusted+gated ──
+import sqlite3
+from datetime import date
+
+import pytest
+
+from agora.core.config import get_settings
+from agora.ops.execution_quality import ExecutionQualityAgent
+
+
+def _eq_agent(tmp_path, mode, autoapply, budget=0.20):
+    s = get_settings().model_copy(update={
+        "db_path": tmp_path / "t.db",
+        "trading_mode": mode,
+        "max_slippage_pct_of_width": budget,
+        "exec_advisor_autoapply": autoapply,
+    })
+    return ExecutionQualityAgent(settings=s), s
+
+
+def _seed(agent, strategy, fills, timeouts):
+    today = date.today().isoformat()
+    for _ in range(fills):
+        agent._db.execute("INSERT INTO execution_quality (attempt_date,ticker,strategy,mid_price,outcome) "
+                          "VALUES (?,?,?,1.0,'fill')", (today, "X", strategy))
+    for _ in range(timeouts):
+        agent._db.execute("INSERT INTO execution_quality (attempt_date,ticker,strategy,mid_price,outcome) "
+                          "VALUES (?,?,?,1.0,'timeout')", (today, "X", strategy))
+    agent._db.commit()
+
+
+class TestApplyPromotion:
+    def test_applies_trusted_widen(self, tmp_path):
+        # LIVE + combo, low fill timeout-dominated → trusted widen → budget bumps 0.20→0.25.
+        agent, s = _eq_agent(tmp_path, mode="live", autoapply=True)
+        _seed(agent, "bull_put_spread", fills=2, timeouts=50)
+        rec = agent.apply_slippage_recommendation()
+        assert rec["portfolio"]["action"] == "widen"
+        assert "applied" in rec["apply_status"]
+        assert s.max_slippage_pct_of_width == pytest.approx(0.25)
+
+    def test_paper_combo_holds_no_change(self, tmp_path):
+        # PAPER + combo → untrusted → portfolio holds → budget untouched (no chasing the sim).
+        agent, s = _eq_agent(tmp_path, mode="paper", autoapply=True)
+        _seed(agent, "bull_put_spread", fills=2, timeouts=50)
+        rec = agent.apply_slippage_recommendation()
+        assert rec["portfolio"]["action"] == "hold"
+        assert s.max_slippage_pct_of_width == pytest.approx(0.20)
+
+    def test_disabled_flag_is_shadow(self, tmp_path):
+        agent, s = _eq_agent(tmp_path, mode="live", autoapply=False)
+        _seed(agent, "bull_put_spread", fills=2, timeouts=50)
+        rec = agent.apply_slippage_recommendation()
+        assert "shadow" in rec["apply_status"]
+        assert s.max_slippage_pct_of_width == pytest.approx(0.20)   # never written in shadow

@@ -349,6 +349,37 @@ class ExecutionQualityAgent:
             stats, current_budget=current, trading_mode=mode, window_days=days
         )
 
+    def apply_slippage_recommendation(self, days: int = 7) -> dict:
+        """Promotion of recommend_slippage() from shadow to active (gated on
+        settings.exec_advisor_autoapply). Applies the portfolio recommendation to the live
+        max_slippage_pct_of_width ONLY when it is actionable — and the advisor's portfolio
+        roll-up acts solely on TRUSTED signal, so paper-mode combo artifacts never move it.
+        The advisor already bounds [0.10, 0.40] and steps ±0.05. The applied value is
+        in-memory (the order path reads settings live) and resets to config default on
+        restart. Returns the recommendation augmented with an `apply_status`."""
+        rec = self.recommend_slippage(days)
+        port = rec.get("portfolio", {})
+        cur = float(getattr(self._settings, "max_slippage_pct_of_width", 0.20))
+
+        if not bool(getattr(self._settings, "exec_advisor_autoapply", False)):
+            rec["apply_status"] = "shadow (autoapply disabled)"
+            return rec
+        new = float(port.get("recommended_budget", cur))
+        if port.get("action") != "hold" and abs(new - cur) > 1e-9:
+            try:
+                self._settings.max_slippage_pct_of_width = new
+                rec["apply_status"] = f"applied {cur:.2f}→{new:.2f}"
+                logger.info(
+                    "ExecutionAdvisor[ACTIVE]: max_slippage_pct_of_width %.2f→%.2f (%s, trusted signal)",
+                    cur, new, port.get("action"),
+                )
+            except Exception as exc:
+                rec["apply_status"] = f"apply failed: {exc}"
+                logger.warning("ExecutionAdvisor: apply failed: %s", exc)
+        else:
+            rec["apply_status"] = "no change (hold)"
+        return rec
+
     # ── Async loop ───────────────────────────────────────────────────
 
     async def start(self) -> None:
@@ -386,19 +417,22 @@ class ExecutionQualityAgent:
         )
         logger.info(summary)
 
-        # Shadow slippage-budget advisor — log any non-hold recommendation (writes nothing).
+        # Slippage-budget advisor — applies the TRUSTED, bounded recommendation when
+        # exec_advisor_autoapply is on (else shadow); always logs per-strategy detail.
         try:
-            rec = self.recommend_slippage()
+            rec = self.apply_slippage_recommendation()
             for r in rec.get("per_strategy", []):
                 if r["action"] != "hold":
                     logger.info(
-                        "ExecutionAdvisor[shadow]: %s fill=%.0f%% (n=%d) → %s budget %.2f→%.2f (%s)%s",
+                        "ExecutionAdvisor: %s fill=%.0f%% (n=%d) → %s budget %.2f→%.2f (%s)%s",
                         r["strategy"], r["fill_rate"] * 100, r["n"], r["action"],
                         r["current"], r["recommended"], r["reason"],
                         "" if r["trusted"] else " [paper-sim untrusted]",
                     )
+            logger.info("ExecutionAdvisor: portfolio=%s → %s",
+                        rec.get("portfolio", {}).get("action"), rec.get("apply_status"))
         except Exception as exc:
-            logger.debug("ExecutionAdvisor shadow recommendation failed: %s", exc)
+            logger.debug("ExecutionAdvisor recommendation/apply failed: %s", exc)
 
         # Escalate Error 201 storm to CEO (account config issue, not execution)
         if stats.get("error_201_storm") and not self._alert_sent_this_session:

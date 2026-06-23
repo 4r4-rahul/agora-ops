@@ -413,6 +413,16 @@ class AgoraSettings(BaseSettings):
                     "to cross. Owner-chosen 2026-06-05. The execution advisor tunes this from "
                     "observed fill rates.",
     )
+    exec_advisor_autoapply: bool = Field(
+        default=True,
+        description="Promote the ExecutionAdvisor from shadow to active: when True, the 30-min "
+                    "ops cycle applies the advisor's TRUSTED, bounded ([0.10,0.40], ±0.05/step) "
+                    "slippage-budget recommendation to the live max_slippage_pct_of_width. "
+                    "Only acts on trustworthy signal — paper-mode combo recommendations are "
+                    "untrusted (paper-sim can't fill spreads) so it correctly holds. The applied "
+                    "value is in-memory and resets to this config's default each restart. "
+                    "Set False to revert to shadow (recommend-only).",
+    )
     use_ibkr_chain_pricing: bool = Field(
         default=True,
         description="Phase B: before strike selection, OVERRIDE the yfinance chain's bid/ask/IV "
