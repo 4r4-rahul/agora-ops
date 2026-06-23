@@ -16,6 +16,7 @@ from agora.backtester.synthetic_pricing import (
     bs_greeks,
     bs_price,
     build_spread,
+    entry_fill,
     entry_slippage,
     mark_spread,
     skewed_sigma,
@@ -188,3 +189,46 @@ class TestNormHelpers:
 
     def test_norm_inv_median(self):
         assert _norm_inv(0.5) == pytest.approx(0.0, abs=1e-3)
+
+
+# ── entry_fill: realistic spread fill gate + dollar bid-ask slippage ───────────
+# The backtester used to assume 100% fill with %-of-net-mid slippage (understated on
+# credit spreads). entry_fill ties fillability to the live max_slippage_pct_of_width
+# lever and prices slippage off the gross leg premium, so a budget sweep proves the
+# fill-rate → edge tradeoff offline.
+class TestEntryFill:
+    def test_generous_budget_fills(self):
+        # $5-wide spread, leg premium ~$3, SPY half-spread 2% → half_ba ≈ $0.06/sh;
+        # budget 0.20 × 5 = $1.00/sh ≫ cost → fills.
+        filled, half_ba = entry_fill(leg_premium_sum=3.0, width=5.0, ticker="SPY",
+                                     max_slippage_pct_of_width=0.20)
+        assert filled is True
+        assert half_ba == pytest.approx(0.02 * 3.0, abs=1e-9)  # half-spread × gross premium
+
+    def test_tiny_budget_times_out(self):
+        # Same spread, but a near-zero walk budget cannot cross the net bid-ask → no fill.
+        filled, _ = entry_fill(leg_premium_sum=3.0, width=5.0, ticker="SPY",
+                               max_slippage_pct_of_width=0.001)
+        assert filled is False
+
+    def test_fill_boundary_is_budget_vs_half_bid_ask(self):
+        # Budget exactly equals the half bid-ask → fills (>=). Just under → times out.
+        # half_ba = 0.04 (default) × 2.5 = 0.10; width 1.0 → budget = pct × 1.0.
+        at, _ = entry_fill(2.5, 1.0, "ZZZ", max_slippage_pct_of_width=0.10)   # 0.10 >= 0.10
+        below, _ = entry_fill(2.5, 1.0, "ZZZ", max_slippage_pct_of_width=0.099)
+        assert at is True and below is False
+
+    def test_slippage_scales_with_gross_premium_not_net_credit(self):
+        # Two spreads, same width, different gross leg premium → larger premium pays more
+        # slippage (the per-leg bid-ask is what you cross, not the net credit).
+        _, cheap = entry_fill(2.0, 5.0, "SPY", 0.20)
+        _, rich = entry_fill(6.0, 5.0, "SPY", 0.20)
+        assert rich > cheap == pytest.approx(0.02 * 2.0, abs=1e-9)
+
+    def test_build_spread_exposes_leg_premium_sum(self):
+        # Every spread branch must expose leg_premium_sum so entry_fill can price the cross.
+        for strat in ("bull_put_spread", "bear_call_spread", "iron_condor",
+                      "bull_call_spread", "bear_put_spread"):
+            sp = build_spread(S=100.0, T_years=45 / 252, sigma=0.25, strategy=strat,
+                              ticker="SPY")
+            assert sp["leg_premium_sum"] > 0, strat

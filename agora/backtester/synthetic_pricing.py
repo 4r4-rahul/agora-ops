@@ -182,6 +182,34 @@ def entry_slippage(ticker: str) -> float:
     return _BID_ASK_HALF_SPREAD.get(ticker, _DEFAULT_HALF_SPREAD)
 
 
+def entry_fill(
+    leg_premium_sum: float,
+    width: float,
+    ticker: str,
+    max_slippage_pct_of_width: float,
+) -> tuple[bool, float]:
+    """Model whether a spread's limit order crosses the real net bid-ask within the
+    repricing-walk budget, and the per-share slippage paid if it does.
+
+    A vertical's net bid-ask is driven by the two WIDE per-leg spreads, not the small net
+    credit — so the cost to cross is half_spread_frac × (sum of leg mids), NOT a fraction of
+    the net mid (which understated slippage on credit spreads). To fill, the limit must walk
+    from net-mid to the natural price, giving up that half bid-ask; the walk may only spend
+    `max_slippage_pct_of_width × width`. If the half bid-ask exceeds that budget the order
+    times out unfilled (returns filled=False). This ties backtest fillability to the SAME
+    lever as live execution, so a slippage-budget sweep proves the fill-rate → edge tradeoff
+    offline (free of the IBKR paper-sim's spread-fill artifact).
+
+    Returns (filled, half_bid_ask_per_share). Slippage is always adverse — apply it as
+    `entry_credit += half_bid_ask_per_share` (less credit received / more debit paid).
+    """
+    half = entry_slippage(ticker)                       # half bid-ask as frac of leg mid
+    half_ba_per_share = half * abs(leg_premium_sum)     # cost to cross the net spread
+    walk_budget_per_share = max_slippage_pct_of_width * abs(width)
+    filled = walk_budget_per_share >= half_ba_per_share
+    return filled, half_ba_per_share
+
+
 def build_spread(
     S: float,
     T_years: float,
@@ -241,6 +269,8 @@ def build_spread(
                     "max_gain_dollars":  max_gain,
                     "reward_risk_ratio": round(max_gain / max_loss, 3),
                     "option_type":   "put",
+                    # Gross premium across all 4 legs — drives realistic net bid-ask in entry_fill().
+                    "leg_premium_sum": short_price + long_price + short_cp + long_cp,
                 }
 
         else:  # bear_call_spread
@@ -257,6 +287,7 @@ def build_spread(
 
         return {
             "entry_credit_debit": -credit,  # negative = credit received
+            "leg_premium_sum": short_price + long_price,  # gross premium → net bid-ask in entry_fill()
             "short_strike":  short_k,
             "long_strike":   long_k,
             "max_loss_dollars":  max_loss,
@@ -289,6 +320,7 @@ def build_spread(
 
         return {
             "entry_credit_debit": debit,
+            "leg_premium_sum": long_p + short_p,  # gross premium → net bid-ask in entry_fill()
             "short_strike":  short_k,
             "long_strike":   long_k,
             "max_loss_dollars":  max_loss,

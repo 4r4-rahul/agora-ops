@@ -48,7 +48,7 @@ from ..signals.vol_regime import VolRegimeClassifier
 from .models import AgoraBacktestResult, AgoraBacktestTrade, AgoraTradeStatus
 from .synthetic_pricing import (
     build_spread,
-    entry_slippage,
+    entry_fill,
     mark_spread,
     term_structure_sigma,
 )
@@ -120,6 +120,7 @@ class AgoraBacktestEngine:
         iv_premium_min_days: int = 3,
         use_claude_macro: bool = False,
         settings: AgoraSettings | None = None,
+        max_slippage_pct_of_width: float | None = None,
     ) -> None:
         self.tickers = [t.upper() for t in (tickers or ["SPY", "QQQ", "IWM", "GLD", "TLT"])]
         self.start_date = date.fromisoformat(start)
@@ -132,6 +133,16 @@ class AgoraBacktestEngine:
         self.stop_loss_multiplier = stop_loss_multiplier
         self.use_claude_macro = use_claude_macro
         self._settings = settings
+
+        # Entry fill realism: the slippage-walk budget that gates whether a spread's limit
+        # crosses the net bid-ask. Resolved explicit-arg > settings > 0.20, so a backtest
+        # uses the SAME lever as live execution by default and can sweep it to prove the
+        # fill-rate → edge tradeoff. See synthetic_pricing.entry_fill().
+        self.max_slippage_pct_of_width = (
+            max_slippage_pct_of_width
+            if max_slippage_pct_of_width is not None
+            else getattr(settings, "max_slippage_pct_of_width", 0.20)
+        )
 
         # AGORA signal components (deterministic — no Claude needed)
         self._vol_classifier = VolRegimeClassifier()
@@ -646,12 +657,28 @@ class AgoraBacktestEngine:
             position_size = max_loss_1x * contracts
 
         entry_credit = spread["entry_credit_debit"]
-        # Level 2: bid-ask slippage — fill at bid/ask not mid, reducing net credit/adding to debit
-        slip = entry_slippage(ticker)
-        if entry_credit < 0:   # credit spread: receive less
-            entry_credit = entry_credit * (1 - slip)
-        else:                  # debit spread: pay more
-            entry_credit = entry_credit * (1 + slip)
+        # Realistic entry fill: a vertical's limit must walk from net-mid across the WIDE
+        # per-leg bid-ask to the natural price. Model whether that walk crosses within the
+        # slippage budget (same lever as live); if not, the order times out unfilled and the
+        # trade is skipped — so the backtest no longer assumes a 100% fill that masks the
+        # real fill-rate ceiling. Slippage is the half bid-ask in DOLLARS (driven by the legs,
+        # not a fraction of the small net credit, which understated it). See entry_fill().
+        width = abs(spread["short_strike"] - spread["long_strike"])
+        filled, half_ba = entry_fill(
+            leg_premium_sum=spread.get("leg_premium_sum", abs(entry_credit) * 2.0),
+            width=width,
+            ticker=ticker,
+            max_slippage_pct_of_width=self.max_slippage_pct_of_width,
+        )
+        if not filled:
+            logger.debug(
+                "NO FILL: %s %s | half_ba=$%.2f > walk_budget=$%.2f (slip_pct=%.2f, width=%.1f)",
+                ticker, strategy, half_ba, self.max_slippage_pct_of_width * width,
+                self.max_slippage_pct_of_width, width,
+            )
+            return None
+        # Adverse fill: less credit received / more debit paid (entry_credit += positive half_ba).
+        entry_credit += half_ba
 
         # Level 3: portfolio delta limit — block trades that push net delta past budget
         trade_delta = self._spread_delta(strategy, contracts)
