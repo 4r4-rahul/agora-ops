@@ -61,6 +61,12 @@ _READY_MAX_EXPOSURE_RATIO = 1.00    # total max-loss / account_size (>100% can't
 _READY_MIN_FILL_RATE      = 0.50    # 7-day fill rate — can we actually deploy capital?
 _READY_MIN_FILL_ATTEMPTS  = 20
 
+# The sample-gated fitness checks (in finance/execution). A False on any of these is a
+# confirmed performance failure that caps the headline below the go-live threshold.
+_FITNESS_CHECKS = frozenset({
+    "win_rate_fit", "net_pnl_positive", "exposure_within_account", "fill_rate_fit",
+})
+
 
 class LiveReadinessMeter:
     """
@@ -155,9 +161,23 @@ class LiveReadinessMeter:
         )
 
         critical_failures = [p for p, d in pillars.items() if d["score"] < _GO_LIVE_MIN_PILLAR]
+        # Headline honesty: a CONFIRMED performance-fitness failure (a real-sample win-rate /
+        # net-P&L / exposure / fill-rate gate failing) means the book is not live-ready no
+        # matter how green the infrastructure is — so the headline must not read "ready". The
+        # uptime pillars used to mask a losing book at ~94. We cap on the fitness gates (not on
+        # any low pillar) because those are sample-gated: cold-start pillars carry no fitness
+        # checks, so an early-session execution/finance dip never trips this false-negatively.
+        fitness_failed = any(
+            name in _FITNESS_CHECKS and ok is False
+            for p in ("finance", "execution")
+            for name, ok in pillars[p].get("checks", {}).items()
+        )
+        if fitness_failed:
+            overall = min(overall, _GO_LIVE_MIN_OVERALL - 1.0)   # cannot read "ready"
         ready_for_live = (
             overall >= _GO_LIVE_MIN_OVERALL
             and not critical_failures
+            and not fitness_failed
         )
 
         return {
@@ -168,6 +188,7 @@ class LiveReadinessMeter:
             "go_live_approved_at": self._go_live_approved_at,
             "ready_for_live":   ready_for_live,
             "critical_failures": critical_failures,
+            "fitness_failed":   fitness_failed,
             "fireworks":        self._fireworks_triggered,
             "computed_at":      datetime.now(tz=ET).isoformat(),
         }

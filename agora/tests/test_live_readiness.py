@@ -229,3 +229,25 @@ class TestPerformanceFitnessGates:
         m = LiveReadinessMeter()
         m.register_agents(exec_quality=self._eq(5, 0))      # <20 attempts
         assert "fill_rate_fit" not in m._score_execution()["checks"]
+
+
+# ── Headline honesty: a confirmed fitness failure caps the overall (no false green) ──
+def test_fitness_failure_caps_headline_below_ready():
+    from agora.ops.live_readiness import _GO_LIVE_MIN_OVERALL
+    m = LiveReadinessMeter()
+    _set_pillars(m, {})                        # all infra pillars green (100)
+    # finance scores high on uptime but a real-sample win-rate gate has FAILED
+    m._score_finance = lambda: {"score": 90, "status": "good",
+                                "checks": {"performance_monitor": True, "win_rate_fit": False}}
+    s = m.get_score()
+    assert s["fitness_failed"] is True
+    assert s["overall_score"] <= _GO_LIVE_MIN_OVERALL - 1.0   # headline can't read "ready"
+    assert s["ready_for_live"] is False
+
+
+def test_no_fitness_failure_keeps_weighted_average():
+    m = LiveReadinessMeter()
+    _set_pillars(m, {})                        # all 100, no fitness checks present (cold start)
+    s = m.get_score()
+    assert s["fitness_failed"] is False
+    assert s["overall_score"] == 100.0         # cold-start dip never caps falsely
