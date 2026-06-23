@@ -415,13 +415,13 @@ class AgoraSettings(BaseSettings):
     )
     exec_advisor_autoapply: bool = Field(
         default=True,
-        description="Promote the ExecutionAdvisor from shadow to active: when True, the 30-min "
-                    "ops cycle applies the advisor's TRUSTED, bounded ([0.10,0.40], ±0.05/step) "
-                    "slippage-budget recommendation to the live max_slippage_pct_of_width. "
-                    "Only acts on trustworthy signal — paper-mode combo recommendations are "
-                    "untrusted (paper-sim can't fill spreads) so it correctly holds. The applied "
-                    "value is in-memory and resets to this config's default each restart. "
-                    "Set False to revert to shadow (recommend-only).",
+        description="Promote the IBKRKnowledgeAgent execution advisor from shadow to active: when "
+                    "True, its 30-min scan applies a TRUSTED, bounded max_slippage_pct_of_width "
+                    "recommendation to the live setting. Only trustworthy signal is applied — a "
+                    "paper-mode widen is untrusted (IBKR paper-sim can't fill spreads, so a low "
+                    "paper fill rate is an artifact) and stays advisory; a tighten or any live "
+                    "recommendation applies. The value is in-memory and resets to this config's "
+                    "default each restart. Set False to revert to shadow (recommend-only).",
     )
     use_ibkr_chain_pricing: bool = Field(
         default=True,

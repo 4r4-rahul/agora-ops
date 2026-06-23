@@ -401,11 +401,12 @@ class COOAgent(ExecutiveAgent):
                     "total_attempts": w7.get("total", 0),
                 }
 
-                # Shadow slippage-budget advisor — surfaced to the board (writes no config).
-                try:
-                    intel["execution_advisor"] = self._eq.recommend_slippage()
-                except Exception:
-                    pass
+                # Execution-param advisor (IBKRKnowledgeAgent) — surface its latest cached
+                # recommendations to the board. Read-only (no re-evaluation/persist here).
+                if self._ibkr_agent is not None:
+                    recs = getattr(self._ibkr_agent, "_last_recommendations", None)
+                    if recs:
+                        intel["execution_advisor"] = {"recommendations": recs}
 
                 # Self-audit: flag abnormal fill/timeout rates
                 if fill_rate is not None and fill_rate < 0.15:

@@ -788,7 +788,16 @@ class IBKRKnowledgeAgent:
 
         cur_cap      = float(getattr(self._settings, "max_slippage_pct_of_width", 0.10))
         cur_adaptive = bool(getattr(self._settings, "use_adaptive_algo", False))
+        mode         = str(getattr(self._settings, "trading_mode", "paper"))
         recs: list[dict] = []
+
+        # Paper-untrusted guard: IBKR's paper-sim structurally won't fill multi-leg combos
+        # (single legs fill 12-20%, spreads ~1%), and combos dominate the attempt mix — so a low
+        # aggregate fill rate in paper is a SIM ARTIFACT, not a slippage problem. Widening the
+        # budget chasing it would bleed edge for nothing. So a paper widen is advisory-only
+        # (trusted=False, never auto-applied); the real proving ground for spread fills is the
+        # fill-realistic backtester. In live, fills are real, so a widen is trusted.
+        widen_trusted = (mode != "paper")
 
         # 1) Adaptive must be OFF for combos (no-op that masks the repricing walk).
         if cur_adaptive:
@@ -806,9 +815,12 @@ class IBKRKnowledgeAgent:
                 recs.append({
                     "param": "max_slippage_pct_of_width",
                     "current": cur_cap, "suggested": suggested, "severity": "high",
+                    "trusted": widen_trusted,
                     "reason": f"Fill rate {fill_rate:.0%} < target {self._FILL_RATE_TARGET:.0%} "
                               f"on {sample} attempts — widen the walk so the net limit reaches "
-                              f"the natural before the DAY order expires.",
+                              f"the natural before the DAY order expires."
+                              + ("" if widen_trusted
+                                 else " [paper-sim untrusted — combo fills are an artifact; advisory only]"),
                 })
             else:
                 recs.append({
@@ -828,6 +840,7 @@ class IBKRKnowledgeAgent:
             recs.append({
                 "param": "max_slippage_pct_of_width",
                 "current": cur_cap, "suggested": suggested, "severity": "low",
+                "trusted": True,   # tightening to recover edge is always safe (can't fake fills)
                 "reason": f"Fills healthy ({fill_rate:.0%}) but avg slippage {avg_slippage:+.2f}/sh "
                           f"is costly — tighten the cap to recapture entry price.",
             })
@@ -854,15 +867,37 @@ class IBKRKnowledgeAgent:
                           "the walk's start mid + natural. Flip to 1 once OPRA is subscribed.",
             })
 
+        # Trusted-gated auto-apply (promotion). When exec_advisor_autoapply is on, apply the
+        # max_slippage_pct_of_width suggestion to the live setting — but ONLY if the rec is
+        # trusted (paper widens are not). The order path reads settings live; the value is
+        # in-memory and resets to the config default each restart. Bounded already by the
+        # FLOOR/CEILING used to compute `suggested`. Set exec_advisor_autoapply=False for shadow.
+        applied = None
+        if bool(getattr(self._settings, "exec_advisor_autoapply", False)):
+            for rec in recs:
+                if rec["param"] == "max_slippage_pct_of_width" and rec.get("trusted", False):
+                    try:
+                        self._settings.max_slippage_pct_of_width = rec["suggested"]
+                        applied = {"from": rec["current"], "to": rec["suggested"]}
+                        logger.info(
+                            "IBKRKnowledgeAgent[ACTIVE]: max_slippage_pct_of_width %.2f→%.2f (trusted)",
+                            rec["current"], rec["suggested"],
+                        )
+                    except Exception as exc:
+                        logger.warning("IBKRKnowledgeAgent: slippage apply failed: %s", exc)
+                    break
+
         headline = (
             (f"fill={fill_rate:.0%} " if fill_rate is not None else "fill=n/a ")
             + (f"timeout={timeout_rate:.0%} " if timeout_rate is not None else "")
             + f"slip={avg_slippage:+.2f}/sh n={sample} | {len(recs)} rec(s)"
+            + (f" | APPLIED {applied['from']}→{applied['to']}" if applied else "")
         )
         result = {
             "available": True, "fill_rate": fill_rate, "timeout_rate": timeout_rate,
             "avg_slippage": avg_slippage, "sample_size": sample,
-            "recommendations": recs, "headline": headline, "shadow_mode": True,
+            "recommendations": recs, "headline": headline,
+            "shadow_mode": applied is None, "applied": applied,
         }
         self._last_recommendations = recs
         self._persist_recommendations(result)
