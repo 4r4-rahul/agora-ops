@@ -283,3 +283,48 @@ class TestResearchFitness:
         assert "training_set_trainable" not in r["checks"]
         assert "predictive_models_validated" not in r["checks"]
         assert r["score"] == 100   # presence-only, not falsely penalized
+
+
+# ── Risk & Compliance: real state, not vacuous wiring/True ──
+class TestRiskBlowoutHonesty:
+    def _meter(self, alerted):
+        m = LiveReadinessMeter()
+        risk = SimpleNamespace(get_kill_switch_state=lambda: {"active": False},
+                               _settings=SimpleNamespace(daily_loss_limit_dollars=4000.0,
+                                                         weekly_loss_limit_dollars=8000.0))
+        cb = SimpleNamespace(get_state=lambda: {"kill_switch_active": False,
+                                                "alerted_positions": alerted})
+        m.register_agents(risk_council=risk, circuit_breaker=cb)
+        return m
+
+    def test_position_blowout_fails_risk(self):
+        r = self._meter(alerted=2)._score_risk()
+        assert r["checks"]["no_position_blowouts"] is False
+        assert r["score"] < 100
+
+    def test_no_blowout_passes(self):
+        r = self._meter(alerted=0)._score_risk()
+        assert r["checks"]["no_position_blowouts"] is True
+
+
+class TestComplianceHonesty:
+    def _meter(self, n_wash, n_pos=5):
+        m = LiveReadinessMeter()
+        comp = SimpleNamespace(get_wash_sale_watchlist=lambda: [{"ticker": "X"}] * n_wash)
+        pm = SimpleNamespace(get_open_positions=lambda: [object()] * n_pos)
+        m.register_agents(compliance=comp, position_mgr=pm)
+        return m
+
+    def test_wash_sale_cluster_fails(self):
+        r = self._meter(n_wash=15)._score_compliance()
+        assert r["checks"]["wash_sale_no_cluster"] is False    # 15 ≥ 10 cluster
+        assert r["checks"]["position_count_within_max"] is True
+        assert r["score"] < 100
+
+    def test_no_cluster_passes(self):
+        assert self._meter(n_wash=3)._score_compliance()["checks"]["wash_sale_no_cluster"] is True
+
+    def test_vacuous_true_checks_removed(self):
+        r = self._meter(n_wash=3)._score_compliance()
+        assert "wash_sale_tracking" not in r["checks"]            # the old hardcoded True is gone
+        assert "strategy_level_enforcement" not in r["checks"]

@@ -67,6 +67,10 @@ _FITNESS_CHECKS = frozenset({
     "win_rate_fit", "net_pnl_positive", "exposure_within_account", "fill_rate_fit",
 })
 
+# A non-empty 30-day wash-sale loss watchlist is normal in active trading; a CLUSTER this
+# size is the compliance flag (the CRO treated ~15 as a cluster).
+_COMPLIANCE_WASH_CLUSTER = 10
+
 
 class LiveReadinessMeter:
     """
@@ -209,6 +213,9 @@ class LiveReadinessMeter:
             state = cb.get_state()
             checks.append(("circuit_breaker_wired", True))
             checks.append(("kill_switch_not_tripped", not state.get("kill_switch_active", True)))
+            # Real risk state, not just wiring: no open position has blown through 2× its
+            # max-loss budget (the circuit breaker flags those). Fresh session starts at 0.
+            checks.append(("no_position_blowouts", int(state.get("alerted_positions", 0)) == 0))
         return self._pillar_result("risk", checks)
 
     def _score_intelligence(self) -> dict:
@@ -449,10 +456,24 @@ class LiveReadinessMeter:
         comp = self._agents.get("compliance")
         checks.append(("compliance_agent", comp is not None))
         if comp:
-            # Wash sale log is active if compliance agent is wired
-            checks.append(("wash_sale_tracking", True))
-            # Strategy level check active
-            checks.append(("strategy_level_enforcement", True))
+            # Real state, not vacuous True: is the wash-sale book free of a loss-cluster?
+            try:
+                wl = comp.get_wash_sale_watchlist()
+                checks.append(("wash_sale_no_cluster", len(wl) < _COMPLIANCE_WASH_CLUSTER))
+            except Exception:
+                pass
+        # Real strategy-level limit: open positions within the configured max (catches a
+        # live breach; in uncapped paper mode this passes, but it's a real check, not a stub).
+        pm = self._agents.get("position_mgr")
+        if pm is not None:
+            try:
+                from ..core.config import get_settings
+                mx = int(getattr(get_settings(), "max_open_positions", 0) or 0)
+                if mx > 0:
+                    checks.append(("position_count_within_max",
+                                   len(pm.get_open_positions()) <= mx))
+            except Exception:
+                pass
         return self._pillar_result("compliance", checks)
 
     # ── Helpers ────────────────────────────────────────────────────────────────
