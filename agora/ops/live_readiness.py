@@ -10,9 +10,11 @@ Pillars (8):
   2. Intelligence (weight 15%) — macro/sector/MI all reporting, pillar health OK
   3. Technology  (weight 15%) — signal pipeline 100%, scorer/resolver session stats available
   4. Operations  (weight 15%) — IBKR connected, orphan reconciler live, data integrity OK
-  5. Finance     (weight 10%) — PnL tracking active, performance monitor wired
+  5. Finance     (weight 10%) — PnL tracking wired + FITNESS: win rate ≥45%, net P&L > 0,
+                                max-loss exposure ≤100% of account (sample-gated)
   6. Research    (weight 10%) — earnings cal, transcript, analyst rev, event engine live
-  7. Execution   (weight 10%) — fill rate > 0%, no error 201 storm, slippage tracked
+  7. Execution   (weight 10%) — no error 201 storm, slippage tracked + FITNESS: 7-day
+                                fill rate ≥50% (can we actually deploy capital?)
   8. Compliance  (weight  5%) — strategy level checks live, wash sale log active
 
 Go-live requires:
@@ -44,6 +46,20 @@ _PILLAR_WEIGHTS = {
 
 _GO_LIVE_MIN_OVERALL  = 80.0
 _GO_LIVE_MIN_PILLAR   = 60.0
+
+# ── Performance-fitness gates ────────────────────────────────────────────────
+# The meter used to score pure infrastructure uptime, so it read ~100/100 while the book
+# lost money — a false go-live signal (CEO 2026-06-23). These gates make Finance and
+# Execution measure trading FITNESS, not just connectivity: a system that's all-green on
+# uptime but losing money, over-exposed, or unable to fill is NOT live-ready.
+# NOTE: these are live-READINESS gates only — they do not enforce caps on paper trading
+# (the owner runs paper uncapped for data collection). They just tell the truth about
+# whether real capital is responsible yet. Each is sample-gated so it never fires on noise.
+_READY_MIN_WIN_RATE       = 45.0    # % over the 30-day window
+_READY_MIN_TRADES         = 20      # min closed trades before gating on win rate / P&L
+_READY_MAX_EXPOSURE_RATIO = 1.00    # total max-loss / account_size (>100% can't survive a bad day live)
+_READY_MIN_FILL_RATE      = 0.50    # 7-day fill rate — can we actually deploy capital?
+_READY_MIN_FILL_ATTEMPTS  = 20
 
 
 class LiveReadinessMeter:
@@ -295,6 +311,26 @@ class LiveReadinessMeter:
         risk = self._agents.get("risk_council")
         if risk:
             checks.append(("pnl_tracking_active", True))
+
+        # ── Performance-fitness gates (live-readiness, not paper enforcement) ──
+        if perf:
+            snap = perf.get_latest_snapshot()
+            n = snap.get("total_trades", 0)
+            if n >= _READY_MIN_TRADES:    # only gate on a meaningful sample
+                checks.append(("win_rate_fit", snap.get("win_rate", 0.0) >= _READY_MIN_WIN_RATE))
+                net_pnl = sum(p.get("total_pnl", 0.0) for p in snap.get("by_pillar", []))
+                checks.append(("net_pnl_positive", net_pnl > 0))
+        if pm:
+            try:
+                from ..core.config import get_settings
+                acct = get_settings().account_size or 0.0
+                if acct > 0:
+                    total_ml = sum(getattr(p, "max_loss_dollars", 0.0) or 0.0
+                                   for p in pm.get_open_positions())
+                    checks.append(("exposure_within_account",
+                                   (total_ml / acct) <= _READY_MAX_EXPOSURE_RATIO))
+            except Exception:
+                pass  # DB/settings unavailable — don't penalize
         return self._pillar_result("finance", checks)
 
     def _score_research(self) -> dict:
@@ -339,6 +375,11 @@ class LiveReadinessMeter:
 
             no_201_storm = not eq.get_session_stats().get("error_201_storm", False)
             checks.append(("no_error_201_storm", no_201_storm))
+
+            # ── Performance-fitness: can we actually deploy capital? (7-day fill rate) ──
+            w7 = eq.get_7day_stats()
+            if w7.get("total", 0) >= _READY_MIN_FILL_ATTEMPTS:   # only gate on real volume
+                checks.append(("fill_rate_fit", w7.get("fill_rate", 0.0) >= _READY_MIN_FILL_RATE))
 
         return self._pillar_result("execution", checks)
 

@@ -161,3 +161,71 @@ class TestRiskPillarWiring:
     def test_no_agents_is_no_data(self):
         # nothing registered → no checks → no_data (score 0), which is a critical failure
         assert LiveReadinessMeter()._score_risk() == {"score": 0, "checks": {}, "status": "no_data"}
+
+
+# ── Performance-fitness gates (the 2026-06-23 rebuild: measure fitness, not uptime) ──
+class TestPerformanceFitnessGates:
+    """The meter used to read ~100/100 on uptime while the book lost money. These gates
+    make Finance and Execution fail when win rate / P&L / exposure / fill rate are unfit —
+    so the score tells the truth about live-readiness. All gates are sample-gated."""
+
+    def _perf(self, win_rate, net_pnl, n=50):
+        return SimpleNamespace(get_latest_snapshot=lambda: {
+            "status": "ok", "total_trades": n, "win_rate": win_rate,
+            "by_pillar": [{"pillar": "directional", "trades": n,
+                           "win_rate": win_rate, "total_pnl": net_pnl}]})
+
+    def _pm(self, total_max_loss):
+        return SimpleNamespace(get_open_positions=lambda: [
+            SimpleNamespace(max_loss_dollars=total_max_loss)])
+
+    def test_finance_fails_on_poor_performance(self):
+        m = LiveReadinessMeter()
+        m.register_agents(agent_performance=self._perf(22.0, -5000.0),
+                          position_mgr=self._pm(10**9),   # exposure ≫ any account → fail
+                          risk_council=SimpleNamespace())
+        r = m._score_finance()
+        assert r["checks"]["win_rate_fit"] is False
+        assert r["checks"]["net_pnl_positive"] is False
+        assert r["checks"]["exposure_within_account"] is False
+        assert r["score"] < _GO_LIVE_MIN_PILLAR    # drags the pillar below the go-live floor
+
+    def test_finance_passes_on_healthy_performance(self):
+        m = LiveReadinessMeter()
+        m.register_agents(agent_performance=self._perf(55.0, 3000.0),
+                          position_mgr=self._pm(0.0), risk_council=SimpleNamespace())
+        r = m._score_finance()
+        assert r["checks"]["win_rate_fit"] is True
+        assert r["checks"]["net_pnl_positive"] is True
+        assert r["checks"]["exposure_within_account"] is True
+
+    def test_thin_sample_does_not_gate_performance(self):
+        m = LiveReadinessMeter()
+        m.register_agents(agent_performance=self._perf(10.0, -100.0, n=5),  # n<20
+                          position_mgr=self._pm(0.0))
+        r = m._score_finance()
+        assert "win_rate_fit" not in r["checks"]
+        assert "net_pnl_positive" not in r["checks"]
+
+    def _eq(self, total7, fills7):
+        return SimpleNamespace(
+            get_today_db_stats=lambda: {"total": 0, "fills": 0, "timeouts": 0,
+                                        "fill_rate": None, "timeout_rate": None},
+            get_7day_stats=lambda: {"total": total7, "fills": fills7,
+                                    "fill_rate": (fills7 / total7 if total7 else 0.0)},
+            get_session_stats=lambda: {"error_201_storm": False})
+
+    def test_execution_fails_on_low_fill_rate(self):
+        m = LiveReadinessMeter()
+        m.register_agents(exec_quality=self._eq(500, 10))   # 2% fill, real volume
+        assert m._score_execution()["checks"]["fill_rate_fit"] is False
+
+    def test_execution_passes_on_healthy_fill_rate(self):
+        m = LiveReadinessMeter()
+        m.register_agents(exec_quality=self._eq(200, 140))  # 70% fill
+        assert m._score_execution()["checks"]["fill_rate_fit"] is True
+
+    def test_execution_thin_volume_does_not_gate(self):
+        m = LiveReadinessMeter()
+        m.register_agents(exec_quality=self._eq(5, 0))      # <20 attempts
+        assert "fill_rate_fit" not in m._score_execution()["checks"]
