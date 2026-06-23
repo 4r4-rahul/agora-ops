@@ -466,8 +466,14 @@ class ExecutiveAgent:
             _extra["output_config"] = {"effort": effort}
         try:
             async with self._client.messages.stream(
+                # max_tokens caps TOTAL output, thinking included. With adaptive thinking at
+                # high effort, a large brief prompt (the CRO carries the most data — full greeks,
+                # positions, wash-sale list) can spend the whole 1024 budget reasoning and emit
+                # no text block ("[synthesis failed]"), or run long enough to time out — which is
+                # how the CRO brief intermittently dropped from board meetings. Give thinking +
+                # the ~1-page brief real headroom; streaming keeps a large cap timeout-safe.
                 model=_model,
-                max_tokens=1024,
+                max_tokens=6000,
                 system=self._system_prompt,
                 messages=[{"role": "user", "content": prompt}],
                 **_extra,

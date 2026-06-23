@@ -1161,8 +1161,15 @@ Be direct. Flag anything that needs Rahul's attention with 🚨.
 
         try:
             async with self._client.messages.stream(
+                # max_tokens is the ENFORCED ceiling on TOTAL output, thinking INCLUDED.
+                # With adaptive thinking at high/xhigh effort, the model can spend the whole
+                # budget reasoning and emit zero text blocks (stop_reason=max_tokens) — which
+                # surfaced as "[synthesis failed — no text block]" at the old 1536 cap, where
+                # thinking alone exhausted the budget. Give thinking + the multi-section CEO
+                # directive real headroom; this is a streaming call, so a large cap is safe
+                # (no HTTP-timeout risk). 16000 ≫ any directive we render.
                 model=self._settings.claude_model,
-                max_tokens=1536,
+                max_tokens=16000,
                 thinking=thinking_cfg,
                 system=[{
                     "type": "text",
@@ -1184,7 +1191,14 @@ Be direct. Flag anything that needs Rahul's attention with 🚨.
             for block in reversed(msg.content):
                 if hasattr(block, "text"):
                     return block.text.strip()
-            return f"[{report_type}: synthesis failed — no text block]"
+            # No text block — almost always max_tokens exhausted by thinking. Log the
+            # stop_reason so a recurrence is diagnosable instead of silently opaque.
+            stop = getattr(msg, "stop_reason", "unknown")
+            logger.error(
+                "CEO synthesis for %s produced no text block (stop_reason=%s, blocks=%s)",
+                report_type, stop, [getattr(b, "type", "?") for b in msg.content],
+            )
+            return f"[{report_type}: synthesis failed — no text block (stop_reason={stop})]"
         except Exception as exc:
             logger.error("CEO synthesis failed for %s: %s", report_type, exc)
             return f"[{report_type} synthesis error: {exc}]"
