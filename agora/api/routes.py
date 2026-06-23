@@ -740,11 +740,12 @@ async def get_feature_store_summary() -> JSONResponse:
             "GROUP BY structure_class")}
         path_cov = conn.execute("SELECT COUNT(*) FROM trade_features WHERE n_frames IS NOT NULL").fetchone()[0]
         conn.close()
+        from agora.ops.model_runner import readiness_for  # canonical tiers — no duplicated literals
         return JSONResponse({
             "rows": rows, "labeled": labeled, "wins": wins, "losses": labeled - wins,
             "win_rate": round(wins / labeled, 3) if labeled else None,
             "path_feature_coverage": path_cov, "by_structure_class": by_class,
-            "ml_readiness": "BOOTSTRAP" if labeled < 20 else ("EMERGING" if labeled < 50 else "TRAINABLE"),
+            "ml_readiness": readiness_for(labeled),
         })
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)

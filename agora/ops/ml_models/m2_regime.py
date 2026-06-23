@@ -21,15 +21,15 @@ def regime_model(db_path: str) -> dict[str, Any]:
     try:
         conn = sqlite3.connect(db_path, timeout=8); conn.row_factory = sqlite3.Row
     except Exception as exc:
-        return {"status": "error", "n_samples": 0, "readiness": "BOOTSTRAP", "metrics": {}, "summary": str(exc)}
+        return {"status": "error", "n_samples": 0, "readiness": "N/A", "metrics": {}, "summary": str(exc)}
     try:
         if not conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='market_snapshots'").fetchone()[0]:
-            return {"status": "skipped", "n_samples": 0, "readiness": "BOOTSTRAP", "metrics": {},
+            return {"status": "skipped", "n_samples": 0, "readiness": "N/A", "metrics": {},
                     "summary": "no market snapshot yet (Phase 0d capture pending)"}
         snap = conn.execute("SELECT * FROM market_snapshots ORDER BY snapshot_date DESC LIMIT 1").fetchone()
         n_days = conn.execute("SELECT COUNT(*) FROM market_snapshots").fetchone()[0]
         if not snap:
-            return {"status": "skipped", "n_samples": 0, "readiness": "BOOTSTRAP", "metrics": {},
+            return {"status": "skipped", "n_samples": 0, "readiness": "N/A", "metrics": {},
                     "summary": "no market snapshot rows"}
         vix = snap["vix"]; vr = snap["vol_regime"] or "unknown"; ts = snap["term_state"] or "unknown"
         credit_favor = _CREDIT_FAVOR.get(vr, 0.5)
@@ -70,7 +70,11 @@ def regime_model(db_path: str) -> dict[str, Any]:
         except Exception:
             pass
 
-        return {"status": "ok", "n_samples": n_days, "readiness": "TRAINABLE" if n_days >= 1 else "BOOTSTRAP",
+        # Readiness is N/A, not TRAINABLE: this is a stateless heuristic (a fixed _CREDIT_FAVOR
+        # lookup on the LATEST snapshot only) — its score is identical at n=1 or n=1000, so the
+        # train-readiness tiers don't apply. It used to report TRAINABLE on a single snapshot,
+        # overstating maturity in the readiness view (e.g. "regime_model: TRAINABLE n=2").
+        return {"status": "ok", "n_samples": n_days, "readiness": "N/A",
                 "metrics": {"as_of": snap["snapshot_date"], "vix": vix, "vol_regime": vr,
                             "term_state": ts, "credit_favorability": credit_favor, "bias": bias,
                             "tickers_scored": len(scores) - 2, "high_ivr_tickers": high_ivr},

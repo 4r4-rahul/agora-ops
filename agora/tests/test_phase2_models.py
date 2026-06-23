@@ -81,3 +81,32 @@ def test_m8_path_profile_and_gating():
 def test_error_safe():
     for fn in (win_ev_model, conviction_calibration_model, lifecycle_attribution_model):
         assert fn("/nonexistent/x.db").get("status") in ("error", "skipped")
+
+
+# ── M2 regime: a stateless heuristic must report readiness N/A, never a train tier ──
+from agora.ops.ml_models.m2_regime import regime_model
+
+
+def _regime_db(n_rows):
+    p = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
+    c = sqlite3.connect(p)
+    if n_rows:
+        c.execute("CREATE TABLE market_snapshots "
+                  "(snapshot_date TEXT, vix REAL, vol_regime TEXT, term_state TEXT)")
+        c.executemany("INSERT INTO market_snapshots VALUES (?,?,?,?)",
+                      [(f"2026-06-{10+i:02d}", 18.0, "elevated", "contango") for i in range(n_rows)])
+    c.commit(); c.close()
+    return p
+
+
+def test_m2_regime_readiness_is_na_not_trainable():
+    # It scores off a fixed lookup on the latest snapshot — identical at n=1 or n=1000 — so the
+    # train tiers don't apply. Was wrongly reporting TRAINABLE on a single snapshot.
+    r1 = regime_model(_regime_db(1))
+    assert r1["status"] == "ok" and r1["readiness"] == "N/A"
+    r5 = regime_model(_regime_db(5))
+    assert r5["readiness"] == "N/A"           # never escalates with more snapshots
+
+
+def test_m2_regime_no_snapshot_is_na():
+    assert regime_model(_regime_db(0))["readiness"] == "N/A"
