@@ -354,6 +354,35 @@ class LiveReadinessMeter:
                 pass  # DB/settings unavailable — don't penalize
         return self._pillar_result("finance", checks)
 
+    def _ml_fleet_readiness(self) -> dict | None:
+        """Latest ML-fleet readiness from model_runs — the research/learning loop's real
+        maturity. Returns {'dataset': <tier|None>, 'predictive_validated': <bool|None>} or
+        None if the fleet hasn't run yet / DB unavailable (cold start → don't penalize)."""
+        try:
+            import sqlite3 as _sql
+
+            from ..core.config import get_settings
+            conn = _sql.connect(str(get_settings().db_path), check_same_thread=False)
+            dh = conn.execute(
+                "SELECT readiness FROM model_runs WHERE model_name='dataset_health' "
+                "AND status='ok' ORDER BY run_ts_utc DESC LIMIT 1"
+            ).fetchone()
+            preds = conn.execute(
+                "SELECT readiness, MAX(run_ts_utc) FROM model_runs WHERE model_name IN "
+                "('win_ev_model','conviction_calibration_model','lifecycle_attribution_model') "
+                "AND status='ok' GROUP BY model_name"
+            ).fetchall()
+            conn.close()
+            if dh is None and not preds:
+                return None
+            return {
+                "dataset": dh[0] if dh else None,
+                "predictive_validated": (any(p[0] not in (None, "BOOTSTRAP") for p in preds)
+                                         if preds else None),
+            }
+        except Exception:
+            return None
+
     def _score_research(self) -> dict:
         checks: list[tuple[str, bool]] = []
         checks.append(("event_engine", self._agents.get("event_engine") is not None))
@@ -367,6 +396,17 @@ class LiveReadinessMeter:
             if len(health) > 0:
                 checks.append(("pillar_health_reporting", True))
             # else: no scans have run yet — don't penalize for cold-start silence
+
+        # ── Research FITNESS: is the learning loop producing trainable models, or just wired? ──
+        # Pure presence checks read 100/excellent while the dataset is data-starved and every
+        # predictive model is BOOTSTRAP — overstating research maturity. Tie it to the ML fleet's
+        # real readiness. Only gate once the fleet has actually run (else cold-start, skipped).
+        fleet = self._ml_fleet_readiness()
+        if fleet:
+            if fleet.get("dataset") is not None:
+                checks.append(("training_set_trainable", fleet["dataset"] == "TRAINABLE"))
+            if fleet.get("predictive_validated") is not None:
+                checks.append(("predictive_models_validated", bool(fleet["predictive_validated"])))
         return self._pillar_result("research", checks)
 
     def _score_execution(self) -> dict:

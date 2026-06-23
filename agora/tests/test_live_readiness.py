@@ -251,3 +251,35 @@ def test_no_fitness_failure_keeps_weighted_average():
     s = m.get_score()
     assert s["fitness_failed"] is False
     assert s["overall_score"] == 100.0         # cold-start dip never caps falsely
+
+
+# ── Research fitness: tie the score to the learning loop's real maturity, not just uptime ──
+class TestResearchFitness:
+    def _meter_with_research_agents(self):
+        m = LiveReadinessMeter()
+        m.register_agents(event_engine=SimpleNamespace(), earnings_cal=SimpleNamespace(),
+                          earnings_transcript=SimpleNamespace(), analyst_rev=SimpleNamespace())
+        return m
+
+    def test_data_starved_is_not_excellent(self):
+        m = self._meter_with_research_agents()
+        m._ml_fleet_readiness = lambda: {"dataset": "EMERGING", "predictive_validated": False}
+        r = m._score_research()
+        assert r["checks"]["training_set_trainable"] is False
+        assert r["checks"]["predictive_models_validated"] is False
+        assert r["score"] < 100   # no longer a false "excellent"
+
+    def test_trainable_fleet_passes(self):
+        m = self._meter_with_research_agents()
+        m._ml_fleet_readiness = lambda: {"dataset": "TRAINABLE", "predictive_validated": True}
+        r = m._score_research()
+        assert r["checks"]["training_set_trainable"] is True
+        assert r["checks"]["predictive_models_validated"] is True
+
+    def test_no_fleet_runs_skips_fitness_no_false_penalty(self):
+        m = self._meter_with_research_agents()
+        m._ml_fleet_readiness = lambda: None      # cold start — fleet hasn't run
+        r = m._score_research()
+        assert "training_set_trainable" not in r["checks"]
+        assert "predictive_models_validated" not in r["checks"]
+        assert r["score"] == 100   # presence-only, not falsely penalized
