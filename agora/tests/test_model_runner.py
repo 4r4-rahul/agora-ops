@@ -33,6 +33,10 @@ def test_runs_and_logs(monkeypatch):
                 "summary": "hi", "scores": [{"entity_type": "ticker", "entity_id": "AAA", "score": 0.5}]}
 
     monkeypatch.setattr(MR, "MODEL_REGISTRY", [{"name": "t1", "cadence_days": 1.0, "fn": _m}])
+    # run_due_models lazily `import agora.ops.ml_models`, whose M1..M8 self-register into the
+    # registry — repopulating our isolated [t1] (order-dependent: only latent if ml_models
+    # wasn't already imported). Neutralize registration so this test stays hermetic.
+    monkeypatch.setattr(MR, "register_model", lambda *a, **k: None)
     r = MR.run_due_models(db)
     assert r["ran"] == ["t1"] and calls["n"] == 1
     c = sqlite3.connect(db)
@@ -73,3 +77,25 @@ def test_register_model_dedupes():
     before = len(MR.MODEL_REGISTRY)
     MR.register_model("dataset_health", 1.0, lambda d: {})   # already registered
     assert len(MR.MODEL_REGISTRY) == before
+
+
+# ── next_tier_gap: the readiness progress message must target the CORRECT next tier ──
+def test_next_tier_gap_targets_correct_tier():
+    # BOOTSTRAP → counts toward EMERGING (at BOOTSTRAP_MAX), not the old always-EMERGING_MAX bug.
+    assert MR.next_tier_gap(0)  == ("EMERGING", MR.BOOTSTRAP_MAX)
+    assert MR.next_tier_gap(8)  == ("EMERGING", MR.BOOTSTRAP_MAX - 8)
+    # EMERGING → counts toward TRAINABLE (the bug mislabeled this "for EMERGING").
+    assert MR.next_tier_gap(20) == ("TRAINABLE", MR.EMERGING_MAX - 20)
+    assert MR.next_tier_gap(49) == ("TRAINABLE", 1)
+    # TRAINABLE → nothing more needed.
+    assert MR.next_tier_gap(50)  == (None, 0)
+    assert MR.next_tier_gap(500) == (None, 0)
+
+
+def test_next_tier_gap_consistent_with_readiness():
+    for n in (0, 19, 20, 49, 50, 200):
+        nxt, _ = MR.next_tier_gap(n)
+        if MR.readiness_for(n) == "TRAINABLE":
+            assert nxt is None
+        else:
+            assert nxt == ("EMERGING" if MR.readiness_for(n) == "BOOTSTRAP" else "TRAINABLE")

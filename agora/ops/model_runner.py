@@ -63,6 +63,17 @@ def readiness_for(n_labeled: int) -> str:
     return "TRAINABLE"
 
 
+def next_tier_gap(n_labeled: int) -> tuple[str | None, int]:
+    """(next readiness tier, labeled samples still needed to reach it). The next tier depends
+    on the CURRENT tier: BOOTSTRAP→EMERGING at BOOTSTRAP_MAX, EMERGING→TRAINABLE at
+    EMERGING_MAX. (None, 0) once TRAINABLE."""
+    if n_labeled < BOOTSTRAP_MAX:
+        return "EMERGING", BOOTSTRAP_MAX - n_labeled
+    if n_labeled < EMERGING_MAX:
+        return "TRAINABLE", EMERGING_MAX - n_labeled
+    return None, 0
+
+
 def _ensure(conn: sqlite3.Connection) -> None:
     conn.executescript(_DDL)
 
@@ -122,12 +133,15 @@ def _model_dataset_health(db_path: str) -> dict[str, Any]:
         by_cls = {r["structure_class"]: r["lab"] for r in conn.execute(
             "SELECT structure_class, SUM(win IS NOT NULL) lab FROM trade_features GROUP BY structure_class")}
         rd = readiness_for(lab)
+        nxt, gap = next_tier_gap(lab)
+        progress = f"need {gap} more for {nxt}" if nxt else "fully TRAINABLE"
         return {
             "status": "ok", "n_samples": lab, "readiness": rd,
             "metrics": {"total_rows": rows, "labeled": lab, "wins": wins, "losses": lab - wins,
                         "win_rate": round(wins / lab, 3) if lab else None,
-                        "path_coverage": path, "labeled_by_structure": by_cls},
-            "summary": f"{lab} labeled / {rows} rows · {rd} · need {max(0, EMERGING_MAX - lab)} more for EMERGING",
+                        "path_coverage": path, "labeled_by_structure": by_cls,
+                        "next_tier": nxt, "next_tier_gap": gap},
+            "summary": f"{lab} labeled / {rows} rows · {rd} · {progress}",
         }
     finally:
         conn.close()
