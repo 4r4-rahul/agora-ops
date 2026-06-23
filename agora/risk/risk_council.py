@@ -309,9 +309,13 @@ class RiskCouncil:
         """, (today, realized, unrealized, trades))
         self._db.commit()
 
-        # Auto-trip kill switch on daily loss breach
+        # Auto-trip kill switch on daily loss breach.
+        # Honour the same paper-mode breaker-off intent as _check_daily_loss() and
+        # CircuitBreakerAgent: when the owner has lifted loss breakers for paper data
+        # collection, the ledger above must still update every cycle, but this trip
+        # must NOT fire (it bypassed the flag and halted the collection engine).
         total_pnl = realized + unrealized
-        if total_pnl < -self._settings.daily_loss_limit_dollars:
+        if total_pnl < -self._settings.daily_loss_limit_dollars and not self._paper_breakers_disabled():
             self.trip_kill_switch(
                 f"Daily loss limit breached: ${total_pnl:.0f}",
                 tripped_by="auto",

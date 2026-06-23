@@ -30,6 +30,7 @@ from agora.core.models import (
 )
 from agora.risk.circuit_breaker import CircuitBreakerAgent
 from agora.risk.compliance import ComplianceAgent
+from agora.risk.risk_council import RiskCouncil
 
 # ── Fixtures / builders ───────────────────────────────────────────────────────
 
@@ -478,3 +479,39 @@ class TestCircuitBreakerRebaseline:
         cb = CircuitBreakerAgent(settings=settings, position_mgr=None)
         cb.rebaseline_daily_loss()  # no positions → baseline 0.0
         assert cb._daily_unrealized_baseline == pytest.approx(0.0)
+
+
+# ── RiskCouncil.record_daily_pnl: paper breaker-off must NOT auto-trip ─────────
+# Regression for the bug that halted the paper data-collection engine on 2026-06-23:
+# record_daily_pnl() auto-tripped the kill switch on a loss breach WITHOUT honouring
+# paper_disable_loss_breakers, while every other trip path (RiskCouncil._check_daily_loss
+# and CircuitBreakerAgent) did honour it. So the one path meant to be silent in paper
+# mode was the one that fired. The ledger must keep updating either way.
+class TestRecordDailyPnlPaperBreakerOff:
+    def _paper(self, settings, breakers_disabled: bool):
+        return settings.model_copy(update={
+            "trading_mode": "paper",
+            "paper_disable_loss_breakers": breakers_disabled,
+        })
+
+    def test_no_trip_when_paper_breakers_disabled(self, settings):
+        rc = RiskCouncil(settings=self._paper(settings, breakers_disabled=True))
+        # -$3,000 < -$2,000 limit — would trip if the flag were ignored (the bug).
+        rc.record_daily_pnl(realized=-3_000.0, unrealized=0.0, trades=5)
+        assert rc.is_kill_switch_active() is False
+        # …but the ledger MUST still record the loss (bookkeeping never gated).
+        row = rc._db.execute(
+            "SELECT realized_pnl FROM daily_pnl WHERE record_date=?",
+            (date.today().isoformat(),),
+        ).fetchone()
+        assert row is not None and row[0] == pytest.approx(-3_000.0)
+
+    def test_trips_when_paper_breakers_enabled(self, settings):
+        rc = RiskCouncil(settings=self._paper(settings, breakers_disabled=False))
+        rc.record_daily_pnl(realized=-3_000.0, unrealized=0.0, trades=5)
+        assert rc.is_kill_switch_active() is True
+
+    def test_no_trip_when_loss_within_limit(self, settings):
+        rc = RiskCouncil(settings=self._paper(settings, breakers_disabled=False))
+        rc.record_daily_pnl(realized=-500.0, unrealized=-1_000.0, trades=3)  # -$1,500 > -$2,000
+        assert rc.is_kill_switch_active() is False
