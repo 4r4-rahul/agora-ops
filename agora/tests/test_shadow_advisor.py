@@ -55,7 +55,7 @@ def test_per_ticker_ivr_flags_debit_even_at_mid_market_vol():
     db = _db(0.5, [("d1", "AAA", "long_option", 0, "closed", -300.0, 0),
                    ("d2", "ZZZ", "long_option", 0, "closed", -50.0, 0)],
              ticker_ivr={"AAA": 0.8})  # only AAA is high-IVR
-    r = run_shadow_advisor(db)
+    run_shadow_advisor(db)   # run for side-effects; assertions read the DB below
     c = sqlite3.connect(db)
     aaa = c.execute("SELECT would_advise FROM shadow_model_decisions WHERE position_id='d1' AND model='regime_model'").fetchone()[0]
     zzz = c.execute("SELECT would_advise FROM shadow_model_decisions WHERE position_id='d2' AND model='regime_model'").fetchone()[0]

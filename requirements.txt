@@ -61,3 +61,6 @@ langfuse>=4.6
 python-multipart==0.0.32
 cryptography==49.0.0
 PyJWT==2.13.0
+# 2026-06-23: newly-disclosed CVEs with patched releases shipped — pin to the fix.
+msgpack==1.2.1            # GHSA-6v7p-g79w-8964 (fixed in 1.2.1)
+pydantic-settings==2.14.2 # GHSA-4xgf-cpjx-pc3j (fixed in 2.14.2)
