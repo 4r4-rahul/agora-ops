@@ -401,6 +401,12 @@ class COOAgent(ExecutiveAgent):
                     "total_attempts": w7.get("total", 0),
                 }
 
+                # Shadow slippage-budget advisor — surfaced to the board (writes no config).
+                try:
+                    intel["execution_advisor"] = self._eq.recommend_slippage()
+                except Exception:
+                    pass
+
                 # Self-audit: flag abnormal fill/timeout rates
                 if fill_rate is not None and fill_rate < 0.15:
                     alerts.append(
