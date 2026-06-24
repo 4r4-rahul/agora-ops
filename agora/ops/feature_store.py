@@ -92,6 +92,13 @@ def build_feature_store(db_path: str, legacy_cutoff: str = "2026-06-12") -> dict
         conn = sqlite3.connect(db_path, timeout=10)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(_DDL)
+        # Migration: CREATE TABLE IF NOT EXISTS never ADDS a column to a pre-existing table, so a
+        # table created before a DDL column was introduced is missing it — and EVERY row INSERT then
+        # fails silently (caught per-row), freezing the feature store. Add any missing DDL columns.
+        _have = {r[1] for r in conn.execute("PRAGMA table_info(trade_features)")}
+        for _col, _type in (("config_version_at_entry", "INTEGER"),):
+            if _col not in _have:
+                conn.execute(f"ALTER TABLE trade_features ADD COLUMN {_col} {_type}")
         conn.row_factory = sqlite3.Row
         has_life = conn.execute(
             "SELECT COUNT(*) FROM sqlite_master WHERE name='lifecycle_snapshots'").fetchone()[0]
@@ -163,13 +170,16 @@ def build_feature_store(db_path: str, legacy_cutoff: str = "2026-06-12") -> dict
                      (p["config_version_at_entry"] if "config_version_at_entry" in p.keys() else None),
                      datetime.now(UTC).date().isoformat()),
                 )
+                built += 1   # count REAL inserts so a silent row-failure (e.g. schema drift) is visible
             except Exception as _exc:
                 logger.debug("feature row failed for %s: %s", p["position_id"], _exc)
         conn.commit()
-        built = conn.execute("SELECT COUNT(*) FROM trade_features").fetchone()[0]
+        total = conn.execute("SELECT COUNT(*) FROM trade_features").fetchone()[0]
         labeled = conn.execute("SELECT COUNT(*) FROM trade_features WHERE win IS NOT NULL").fetchone()[0]
+        if built < total:   # some rows failed to (re)build — surface it instead of masking
+            logger.warning("feature_store: only %d/%d rows rebuilt — schema drift or bad data", built, total)
         conn.close()
-        return {"rows": built, "labeled": labeled}
+        return {"rows": total, "inserted": built, "labeled": labeled}
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("build_feature_store failed: %s", exc)
         return {"rows": built, "error": str(exc)}
