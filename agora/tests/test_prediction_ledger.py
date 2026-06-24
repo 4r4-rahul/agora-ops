@@ -116,6 +116,31 @@ def test_calibration_well_calibrated_not_inverted():
     assert good["inverted"] is False and good["brier"] < 0.2
 
 
+def test_backfill_conviction_from_history():
+    import sqlite3
+
+    from agora.ops.prediction_ledger import backfill_conviction
+    db = _db()
+    c = sqlite3.connect(db)
+    c.execute("""CREATE TABLE positions (position_id TEXT, conviction_at_entry REAL, realized_pnl REAL,
+        status TEXT, close_date TEXT, close_source TEXT, config_version_at_entry INTEGER)""")
+    c.executemany("INSERT INTO positions VALUES (?,?,?,?,?,?,?)", [
+        ("p1", 70.0, 50.0, "closed", "2026-06-20", "thesis_exit", 1),     # high conv, WON
+        ("p2", 75.0, -80.0, "closed", "2026-06-20", "stop_loss", 1),      # high conv, LOST (inverted)
+        ("p3", 40.0, 30.0, "closed", "2026-06-20", "trailing_stop", 1),   # low conv, won
+        ("po", 90.0, None, "open", "", "", 1),                            # open → excluded
+    ])
+    c.commit(); c.close()
+    r = backfill_conviction(db)
+    assert r["status"] == "ok" and r["backfilled"] == 3      # 3 real closes, open excluded
+    assert backfill_conviction(db)["backfilled"] == 0        # idempotent — no dupes
+    sc = recent_scored(db)
+    assert len(sc) == 3 and all(s["source"] == "conviction" for s in sc)
+    # p1 (0.7 predicted, won=1) → gap +0.3 ; p2 (0.75, lost=0) → gap -0.75
+    gaps = {s["target_key"]: s["gap"] for s in sc}
+    assert gaps["p1"] == 0.3 and gaps["p2"] == -0.75
+
+
 def test_error_safe():
     assert record_prediction("/nonexistent/x.db", source="s", target_key="k", target_type="t",
                              predicted=0.5) is False

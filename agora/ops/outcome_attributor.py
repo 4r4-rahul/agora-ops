@@ -1048,7 +1048,15 @@ class ScheduledAttributor:
                         try:
                             import sqlite3 as _sq
 
-                            from agora.ops.prediction_ledger import score_predictions
+                            from agora.ops.prediction_ledger import (
+                                backfill_conviction,
+                                score_predictions,
+                            )
+                            # Seed the ledger from history (idempotent) so calibration is meaningful
+                            # immediately rather than waiting weeks for new trades.
+                            _bf = backfill_conviction(self._db_path)
+                            if _bf.get("backfilled"):
+                                logger.info("prediction-ledger backfill: %s", _bf)
                             _pc = _sq.connect(self._db_path, timeout=8)
                             _real = ("status='closed' AND close_date IS NOT NULL AND close_date<>'' "
                                      "AND (close_source IN ('lifecycle','thesis_exit','trailing_stop',"

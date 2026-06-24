@@ -170,6 +170,42 @@ def calibration_summary(db_path: Any, *, min_n: int = 10) -> list[dict]:
     return out
 
 
+def backfill_conviction(db_path: Any) -> dict:
+    """One-shot seed: for every historical REAL close, record conviction→win as an ALREADY-SCORED
+    prediction (the conviction WAS predicted at entry; the win IS the realized actual — honest, not
+    look-ahead). Makes the calibration loop meaningful immediately instead of waiting weeks for new
+    trades. Idempotent — skips position_ids already in the ledger. Never raises."""
+    _real = ("status='closed' AND close_date IS NOT NULL AND close_date<>'' "
+             "AND (close_source IN ('lifecycle','thesis_exit','trailing_stop','stop_loss') "
+             "OR close_source LIKE 'session:%') AND realized_pnl IS NOT NULL")
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=10)
+        conn.executescript(_DDL)
+        existing = {r[0] for r in conn.execute(
+            "SELECT target_key FROM prediction_ledger WHERE source='conviction'")}
+        rows = conn.execute(
+            f"SELECT position_id, conviction_at_entry, realized_pnl, config_version_at_entry "
+            f"FROM positions WHERE {_real} AND conviction_at_entry IS NOT NULL").fetchall()
+        now = datetime.now(UTC).isoformat()
+        n = 0
+        for pid, conv, pnl, cfg in rows:
+            if pid in existing:
+                continue
+            pred = max(0.0, min(1.0, float(conv or 0) / 100.0))
+            actual = 1.0 if pnl > 0 else 0.0
+            conn.execute(
+                "INSERT INTO prediction_ledger (source, target_key, target_type, predicted, is_binary, "
+                "config_version, made_at, actual, gap, scored, scored_at) "
+                "VALUES ('conviction', ?, 'trade', ?, 1, ?, ?, ?, ?, 1, ?)",
+                (pid, pred, cfg, now, actual, bias(pred, actual), now))
+            n += 1
+        conn.commit()
+        conn.close()
+        return {"status": "ok", "backfilled": n, "skipped_existing": len(existing)}
+    except Exception:
+        return {"status": "error"}
+
+
 def recent_scored(db_path: Any, limit: int = 30) -> list[dict]:
     """Most recently scored predictions (for the dashboard). Never raises."""
     try:
