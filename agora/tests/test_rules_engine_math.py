@@ -153,6 +153,61 @@ class TestSizeContracts:
         n = StrategyRulesEngine._size_contracts(None, 0.01, 100.0, self._settings())
         assert n >= 1
 
+    # ── per-ticker adaptive entry sizing (down-only vol_size_factor) ──────────────
+    def test_vol_factor_one_is_unchanged(self):
+        # factor 1.0 (calm/disabled) → identical to base sizing (5)
+        assert StrategyRulesEngine._size_contracts(None, 1.0, 100.0, self._settings(),
+                                                   vol_size_factor=1.0) == 5
+
+    def test_vol_factor_shrinks_volatile(self):
+        # base 5 × 0.5 = 2.5 → 2 ; × 0.4 = 2.0 → 2 (a volatile name takes a smaller position)
+        assert StrategyRulesEngine._size_contracts(None, 1.0, 100.0, self._settings(),
+                                                   vol_size_factor=0.5) == 2
+        assert StrategyRulesEngine._size_contracts(None, 1.0, 100.0, self._settings(),
+                                                   vol_size_factor=0.4) == 2
+
+    def test_vol_factor_is_down_only(self):
+        # factor > 1.0 is clamped to 1.0 — entry sizing can NEVER be enlarged by vol
+        assert StrategyRulesEngine._size_contracts(None, 1.0, 100.0, self._settings(),
+                                                   vol_size_factor=2.0) == 5
+
+    def test_vol_factor_floors_at_one_contract(self):
+        # factor 0.0 → 5×0 = 0 → max(1,...) keeps a tradeable 1 contract
+        assert StrategyRulesEngine._size_contracts(None, 1.0, 100.0, self._settings(),
+                                                   vol_size_factor=0.0) == 1
+
+
+# ── _vol_size_factor (per-ticker resolver) ────────────────────────────────────
+class TestVolSizeFactor:
+    def _engine(self, *, enabled=True, profiles=(("TSLA", 0.58), ("KO", 0.16))):
+        import sqlite3
+        import tempfile
+        db = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
+        c = sqlite3.connect(db)
+        c.execute("CREATE TABLE ticker_profiles (ticker TEXT, hv_annual REAL)")
+        c.executemany("INSERT INTO ticker_profiles VALUES (?,?)", list(profiles))
+        c.commit(); c.close()
+        s = types.SimpleNamespace(db_path=db, adaptive_entry_sizing_enabled=enabled)
+        return StrategyRulesEngine(settings=s)
+
+    def test_volatile_ticker_sizes_down(self):
+        f = self._engine()._vol_size_factor("TSLA")    # HV 0.58 → 0.30/0.58 ≈ 0.52
+        assert 0.4 <= f < 1.0
+
+    def test_calm_ticker_is_full_size(self):
+        assert self._engine()._vol_size_factor("KO") == 1.0     # HV 0.16 < baseHV → 1.0 (clamped)
+
+    def test_unprofiled_ticker_is_full_size(self):
+        assert self._engine()._vol_size_factor("NOPROFILE") == 1.0
+
+    def test_disabled_flag_is_full_size(self):
+        assert self._engine(enabled=False)._vol_size_factor("TSLA") == 1.0   # gate off → 1.0
+
+    def test_cached_after_first_lookup(self):
+        eng = self._engine()
+        eng._vol_size_factor("TSLA")
+        assert "TSLA" in eng._hv_cache
+
 
 # ── _infer_direction (pillar → direction) ─────────────────────────────────────
 class TestInferDirection:

@@ -60,6 +60,27 @@ class StrategyRulesEngine:
         # resolve() returns the global default otherwise, so behaviour is unchanged today.
         from agora.ops.ticker_settings import TickerSettingsResolver
         self._ticker_resolver = TickerSettingsResolver(self._settings.db_path)
+        self._hv_cache: dict[str, float | None] = {}
+
+    def _vol_size_factor(self, ticker: str) -> float:
+        """Per-ticker DOWN-ONLY entry-size factor from the ticker's realized vol (agora.ops.adaptive_stop):
+        a volatile name takes a smaller position so its (wider) adaptive stop still risks ~1R. Returns
+        1.0 when disabled, or for a calm/unprofiled ticker (never sizes UP). Cached; never raises."""
+        if not getattr(self._settings, "adaptive_entry_sizing_enabled", False):
+            return 1.0
+        tk = (ticker or "").upper()
+        if tk not in self._hv_cache:
+            try:
+                from agora.ops.ticker_profile import get_profile
+                prof = get_profile(self._settings.db_path, tk)
+                self._hv_cache[tk] = (prof or {}).get("hv_annual")
+            except Exception:
+                self._hv_cache[tk] = None
+        try:
+            from agora.ops.adaptive_stop import size_factor
+            return size_factor(self._hv_cache[tk])
+        except Exception:
+            return 1.0
 
     @staticmethod
     def _dynamic_rr_floor(iv_rank: float | None, vix: float | None) -> float:
@@ -223,7 +244,8 @@ class StrategyRulesEngine:
         _risk_cap = self._ticker_resolver.resolve(
             conviction.ticker, "max_risk_per_trade_dollars", self._settings.max_risk_per_trade_dollars)
         contracts = self._size_contracts(
-            conviction.size_multiplier, max_loss, self._settings, risk_cap=_risk_cap
+            conviction.size_multiplier, max_loss, self._settings, risk_cap=_risk_cap,
+            vol_size_factor=self._vol_size_factor(conviction.ticker),
         )
         # #4 risk cap: a single contract whose max-loss exceeds the (per-ticker) cap returns 0 here —
         # the structure is too wide to size within the per-trade risk budget, so skip it rather than
@@ -936,12 +958,15 @@ class StrategyRulesEngine:
 
     def _size_contracts(
         self, size_multiplier: float, max_loss_per_contract: float, settings: AgoraSettings,
-        risk_cap: float | None = None,
+        risk_cap: float | None = None, vol_size_factor: float = 1.0,
     ) -> int:
         if max_loss_per_contract <= 0:
             return 1
         base = max(1, int(settings.risk_per_trade_dollars / max_loss_per_contract))
         sized = max(1, round(base * size_multiplier))
+        # Per-ticker ADAPTIVE entry sizing (down-only): shrink a volatile name's position so its wider
+        # adaptive stop still risks ~1R. vol_size_factor ≤ 1.0 (1.0 = disabled/calm) → never sizes up.
+        sized = max(1, round(sized * max(0.0, min(1.0, vol_size_factor))))
         sized = min(sized, settings.max_contracts_per_trade)
         # PAPER operational-effectiveness mode (2026-06-24): scale contracts UP so the full
         # multi-contract management machinery (partial closes, scaling out, surveillance) is actually

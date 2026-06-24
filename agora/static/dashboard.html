@@ -2346,8 +2346,10 @@ async function fetchTickerEngine() {
         ? '<span style="color:#5d9">LIVE</span>'
         : '<span style="color:#d9a">SHADOW</span>';
       const onBadge = d.adaptive_stop_enabled ? 'adaptive ON' : 'adaptive OFF (fixed −55%)';
-      stops.innerHTML = ad.length ? ('<div style="color:#678;margin:4px 0 3px">🎚️ Per-ticker adaptive stop — '
-        + `width GENERATED from each ticker's vol (×theta ×regime); ${onBadge}; action ${liveBadge}:</div>`
+      const entryBadge = d.adaptive_entry_sizing_live
+        ? '<span style="color:#5d9">ENTRIES LIVE</span>' : '<span style="color:#d9a">entries off</span>';
+      stops.innerHTML = ad.length ? ('<div style="color:#678;margin:4px 0 3px">🎚️ Per-ticker adaptivity — '
+        + `stop width from each ticker's vol (×theta ×regime), ${onBadge}, exits ${liveBadge}; size× applied at entry ${entryBadge}:</div>`
         + '<table style="width:100%;border-collapse:collapse">'
         + '<tr style="color:#678"><td style="padding:1px 6px">ticker</td><td style="padding:1px 6px">HV</td>'
         + '<td style="padding:1px 6px">debit stop</td><td style="padding:1px 6px">credit stop</td>'

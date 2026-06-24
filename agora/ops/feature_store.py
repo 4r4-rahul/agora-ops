@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS trade_features (
     return_on_risk      REAL,
     win                 INTEGER, -- 1 win / 0 loss / NULL if not a real close
     config_version_at_entry INTEGER, -- settings regime this trade was opened under (ML provenance)
+    hv_at_entry         REAL,    -- per-ticker realized vol (drives the adaptive stop + adaptive sizing)
     built_at            TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tf_status ON trade_features(status);
@@ -96,12 +97,18 @@ def build_feature_store(db_path: str, legacy_cutoff: str = "2026-06-12") -> dict
         # table created before a DDL column was introduced is missing it — and EVERY row INSERT then
         # fails silently (caught per-row), freezing the feature store. Add any missing DDL columns.
         _have = {r[1] for r in conn.execute("PRAGMA table_info(trade_features)")}
-        for _col, _type in (("config_version_at_entry", "INTEGER"),):
+        for _col, _type in (("config_version_at_entry", "INTEGER"), ("hv_at_entry", "REAL")):
             if _col not in _have:
                 conn.execute(f"ALTER TABLE trade_features ADD COLUMN {_col} {_type}")
         conn.row_factory = sqlite3.Row
         has_life = conn.execute(
             "SELECT COUNT(*) FROM sqlite_master WHERE name='lifecycle_snapshots'").fetchone()[0]
+        # Per-ticker realized vol (the signal that drives BOTH the adaptive stop and the adaptive entry
+        # sizing) → give the ML the same per-ticker vol the engine adapts on. Read once; join per row.
+        hv_by_ticker = {r[0]: r[1] for r in conn.execute(
+            "SELECT ticker, hv_annual FROM ticker_profiles WHERE hv_annual IS NOT NULL")} \
+            if conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='ticker_profiles'").fetchone()[0] \
+            else {}
 
         positions = conn.execute("SELECT * FROM positions").fetchall()
         for p in positions:
@@ -159,8 +166,8 @@ def build_feature_store(db_path: str, legacy_cutoff: str = "2026-06-12") -> dict
                         max_gain_dollars, entry_price, triggered_by, gates_passed_n, n_frames, days_held,
                         max_adverse_pct, max_favorable_pct, final_net_delta, final_net_theta,
                         status, is_real_close, realized_pnl, return_on_risk, win,
-                        config_version_at_entry, built_at
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        config_version_at_entry, hv_at_entry, built_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (pid, p["ticker"], p["strategy"], _structure_class(p["strategy"], bool(is_credit)),
                      p["pillar"], p["direction"], is_credit, p["conviction_at_entry"], p["regime_at_entry"],
                      _dte(p["entry_date"], p["expiry_date"]),
@@ -168,6 +175,7 @@ def build_feature_store(db_path: str, legacy_cutoff: str = "2026-06-12") -> dict
                      dc["triggered_by"] if dc else None, gates_n, nf, dh, mae, mfe, fnd, fnt,
                      p["status"], 1 if is_real else 0, rpnl, ror, win,
                      (p["config_version_at_entry"] if "config_version_at_entry" in p.keys() else None),
+                     hv_by_ticker.get(p["ticker"]),
                      datetime.now(UTC).date().isoformat()),
                 )
                 built += 1   # count REAL inserts so a silent row-failure (e.g. schema drift) is visible

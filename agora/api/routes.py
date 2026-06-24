@@ -934,6 +934,7 @@ async def get_ticker_settings() -> JSONResponse:
             "adaptive_stops": adaptive_stops,
             "adaptive_stop_enabled": getattr(session._settings, "adaptive_stop_enabled", False),
             "structure_stops_live": getattr(session._settings, "surveillance_act_all_stops", False),
+            "adaptive_entry_sizing_live": getattr(session._settings, "adaptive_entry_sizing_enabled", False),
             "calibration": calibration,
             "config_versions": versions,
             "current_config_version": versions[0]["version"] if versions else 0,

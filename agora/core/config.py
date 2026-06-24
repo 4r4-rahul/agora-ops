@@ -538,6 +538,17 @@ class AgoraSettings(BaseSettings):
         description="PAPER-ONLY: scales contracts above the floor to stress-test scaling/partial-close "
                     "logic at realistic size. Daily-loss breaker still applies. Tune via .env.",
     )
+    adaptive_entry_sizing_enabled: bool = Field(
+        default=True,
+        description="PER-TICKER ADAPTIVE ENTRY SIZING (2026-06-24): scale each entry's contract count by "
+                    "the ticker's vol-based size factor (agora.ops.adaptive_stop.size_factor = "
+                    "clamp(baseHV/HV, 0.4, 1.0)) so a volatile name (TSLA HV58% → 0.52×) takes a SMALLER "
+                    "position — pairing with its wider adaptive STOP for ~constant $ risk per trade (1R). "
+                    "DOWN-ONLY (factor ≤ 1.0): can only shrink a position, never enlarge it → purely "
+                    "protective, same safety profile as edge_sizing. Safe to run LIVE (not shadow) for "
+                    "exactly this reason. In paper mode the paper_min_contracts floor still applies. "
+                    "Calm/unprofiled tickers get 1.0× (unchanged).",
+    )
     surveillance_act_enabled: bool = Field(
         default=True,
         description="PositionSurveillance (2026-06-24): act on the BLOWOUT backstop — exit at 85% of "
