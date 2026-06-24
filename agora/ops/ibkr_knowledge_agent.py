@@ -568,6 +568,11 @@ class IBKRKnowledgeAgent:
         # Latest scan results — readable synchronously by COO.collect_intelligence()
         self._last_scan: dict[str, Any] = {}
         self._last_scan_time: datetime | None = None
+        # Liveness from the 90s portfolio poller (clientId 18). A successful poll is positive proof
+        # the TWS API accepts connections — i.e. orders CAN be submitted — even when the 30-min
+        # _background_scan's _connection_healthy flag is stale (e.g. its last run landed inside a
+        # transient outage). The COO uses this to avoid a false "orders cannot be submitted" alarm.
+        self._last_portfolio_ok_time: datetime | None = None
         self._last_diagnosis: str = ""
         self._connection_healthy: bool = False
         self._open_order_count: int = 0
@@ -612,6 +617,9 @@ class IBKRKnowledgeAgent:
                         self._last_scan = {}
                     self._last_scan["ibkr_portfolio_items"] = items
                     self._last_scan_time = datetime.now(tz=ET)
+                    # A successful connect+fetch on the dedicated clientId is hard proof the TWS API
+                    # is reachable and orders can flow — stamp it for the COO health check.
+                    self._last_portfolio_ok_time = datetime.now(tz=ET)
             except Exception as exc:
                 logger.debug("portfolio refresh failed: %s", exc)
             await asyncio.sleep(interval)
@@ -729,8 +737,13 @@ class IBKRKnowledgeAgent:
 
     def get_status(self) -> dict[str, Any]:
         """Synchronous snapshot for COO.collect_intelligence()."""
+        portfolio_poll_age = (
+            (datetime.now(tz=ET) - self._last_portfolio_ok_time).total_seconds()
+            if self._last_portfolio_ok_time else None
+        )
         return {
             "connection_healthy":  self._connection_healthy,
+            "portfolio_poll_age_secs": portfolio_poll_age,
             "open_order_count":    self._open_order_count,
             "orphan_count":        self._orphan_count,
             "error_201_count":     self._error_201_count,

@@ -114,6 +114,21 @@ class TestCOOSelfAudit:
         f = COOAgent.self_audit(_stub(ibkr_healthy=False))
         assert "ibkr_connection_unhealthy" in _keys(f)
 
+    def test_ibkr_unhealthy_suppressed_by_fresh_portfolio_poll(self):
+        # connection_healthy is stale-False (its 30-min scan ran during an outage) BUT the 90s
+        # portfolio poller succeeded 30s ago → orders demonstrably flow → no false alarm.
+        stub = _stub(ibkr_healthy=False)
+        stub._ibkr_agent = types.SimpleNamespace(
+            get_status=lambda: {"connection_healthy": False, "portfolio_poll_age_secs": 30.0})
+        assert "ibkr_connection_unhealthy" not in _keys(COOAgent.self_audit(stub))
+
+    def test_ibkr_unhealthy_fires_when_poll_also_stale(self):
+        # No fresh poll evidence (poll age > 180s) → the alarm is real and must fire.
+        stub = _stub(ibkr_healthy=False)
+        stub._ibkr_agent = types.SimpleNamespace(
+            get_status=lambda: {"connection_healthy": False, "portfolio_poll_age_secs": 600.0})
+        assert "ibkr_connection_unhealthy" in _keys(COOAgent.self_audit(stub))
+
     def test_system_health_failing(self):
         f = COOAgent.self_audit(_stub(health_ok=False))
         assert "system_health_failing" in _keys(f)

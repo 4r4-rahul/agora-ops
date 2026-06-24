@@ -344,7 +344,12 @@ class COOAgent(ExecutiveAgent):
         if self._ibkr_agent:
             try:
                 status = self._ibkr_agent.get_status()
-                if not status.get("connection_healthy", False):
+                # A successful portfolio poll within ~3 min (2× the 90s cadence) is fresh proof the
+                # TWS API accepts connections, so it suppresses the false-unhealthy that the stale
+                # 30-min connection_healthy flag produces after a transient outage. See get_status().
+                poll_age = status.get("portfolio_poll_age_secs")
+                poll_is_fresh = poll_age is not None and poll_age < 180
+                if not status.get("connection_healthy", False) and not poll_is_fresh:
                     findings.append((
                         "ibkr_connection_unhealthy",
                         "critical",
@@ -532,7 +537,13 @@ class COOAgent(ExecutiveAgent):
             try:
                 ibkr_status = self._ibkr_agent.get_status()
                 intel["ibkr"] = ibkr_status
-                if not ibkr_status.get("connection_healthy", False):
+                # connection_healthy is refreshed only by the 30-min background scan, so it lags by
+                # up to 30 min after a transient outage. A successful portfolio poll within the last
+                # ~3 min (2× the 90s poll cadence) is hard, fresh proof the TWS API accepts
+                # connections — i.e. orders CAN flow — so it suppresses the (otherwise false) alarm.
+                poll_age = ibkr_status.get("portfolio_poll_age_secs")
+                poll_is_fresh = poll_age is not None and poll_age < 180
+                if not ibkr_status.get("connection_healthy", False) and not poll_is_fresh:
                     alerts.append("🚨 IBKR connection UNHEALTHY — orders cannot be submitted.")
             except Exception as exc:
                 intel["ibkr"] = {"error": str(exc)}
