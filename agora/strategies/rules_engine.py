@@ -943,9 +943,17 @@ class StrategyRulesEngine:
         base = max(1, int(settings.risk_per_trade_dollars / max_loss_per_contract))
         sized = max(1, round(base * size_multiplier))
         sized = min(sized, settings.max_contracts_per_trade)
-        # #4 (2026-06-24): hard per-trade risk ceiling. Positions >=$400 risk had -$134 EV; the
-        # max(1,...) floor above let a single wide contract blow the budget. Trim to the cap; if a
-        # single contract already exceeds it, return 0 — the caller skips (too wide to size safely).
+        # PAPER operational-effectiveness mode (2026-06-24): scale contracts UP so the full
+        # multi-contract management machinery (partial closes, scaling out, surveillance) is actually
+        # exercised — 63/81 trades were 1-contract and could never partial-close. Deliberate
+        # operational testing, PAPER-ONLY; the #4 live risk cap is bypassed here. Live is unchanged.
+        if getattr(settings, "trading_mode", "live") == "paper":
+            floor = getattr(settings, "paper_min_contracts", 1)
+            mult = getattr(settings, "paper_contract_multiplier", 1.0)
+            return max(1, min(int(round(max(sized, floor) * mult)), settings.max_contracts_per_trade))
+        # LIVE — #4 hard per-trade risk ceiling. Positions >=$400 risk had -$134 EV; the max(1,...)
+        # floor above let a single wide contract blow the budget. Trim to the cap; if a single
+        # contract already exceeds it, return 0 — the caller skips (too wide to size safely).
         # risk_cap is the per-ticker-resolved ceiling (falls back to the global setting).
         cap = risk_cap if risk_cap is not None else getattr(settings, "max_risk_per_trade_dollars", 0.0)
         if cap and cap > 0:

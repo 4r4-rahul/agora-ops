@@ -137,3 +137,39 @@ def test_r4_skips_when_single_contract_exceeds_cap():
 def test_r4_disabled_restores_uncapped_floor():
     # cap=0 → old behavior: max(1,...) floors a too-wide single contract at 1 (no skip)
     assert _sized(1.0, 450.0, cap=0.0) == 1
+
+
+# ── PAPER operational-effectiveness sizing: floor + multiplier, bypasses the live #4 cap ──────
+def _paper_settings(floor=2, mult=2.0):
+    return types.SimpleNamespace(
+        trading_mode="paper", risk_per_trade_dollars=150.0, max_contracts_per_trade=10,
+        max_risk_per_trade_dollars=400.0, paper_min_contracts=floor, paper_contract_multiplier=mult)
+
+
+def _paper_sized(max_loss, floor=2, mult=2.0, size_mult=1.0):
+    return StrategyRulesEngine._size_contracts(None, size_mult, max_loss, _paper_settings(floor, mult))
+
+
+def test_paper_floors_and_scales_contracts():
+    # a normally-1-contract wide structure ($779) → floor 2 × mult 2 = 4 contracts (multi-contract ops)
+    assert _paper_sized(779.0) == 4
+    # base sizing already > floor still gets the multiplier: $50 max_loss → base 3 → ×2 = 6
+    assert _paper_sized(50.0) == 6
+
+
+def test_paper_bypasses_the_live_risk_cap():
+    # a $450 single contract is SKIPPED in live (exceeds $400 cap) but in paper it is sized up, not 0
+    assert _sized(1.0, 450.0) == 0                 # live: skip
+    assert _paper_sized(450.0) >= 2                # paper: multi-contract, cap bypassed
+
+
+def test_paper_respects_max_contracts_hard_cap():
+    # floor 8 × mult 2 = 16 → clamped to max_contracts_per_trade (10)
+    assert _paper_sized(50.0, floor=8, mult=2.0) == 10
+
+
+def test_live_mode_unchanged_when_mode_absent_or_live():
+    # the existing #4 tests (no trading_mode) and explicit live both keep the cap
+    s = types.SimpleNamespace(trading_mode="live", risk_per_trade_dollars=150.0,
+                              max_contracts_per_trade=10, max_risk_per_trade_dollars=400.0)
+    assert StrategyRulesEngine._size_contracts(None, 1.0, 450.0, s) == 0   # live cap still skips

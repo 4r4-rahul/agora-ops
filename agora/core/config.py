@@ -530,6 +530,19 @@ class AgoraSettings(BaseSettings):
         default=10,
         description="Hard cap on contracts per trade regardless of size_multiplier",
     )
+    paper_min_contracts: int = Field(
+        default=3, ge=1, le=20,
+        description="PAPER-ONLY (2026-06-24): floor on contracts per trade in paper mode so the full "
+                    "multi-contract operational machinery (partial closes, scaling out, surveillance) "
+                    "is exercised — 63/81 trades were 1-contract, which can't partial-close. This is "
+                    "operational-effectiveness testing, NOT a profitability choice; the #4 live risk "
+                    "cap is bypassed in paper. Live mode is unaffected (keeps the conservative cap).",
+    )
+    paper_contract_multiplier: float = Field(
+        default=1.0, ge=1.0, le=10.0,
+        description="PAPER-ONLY: scales contracts above the floor to stress-test scaling/partial-close "
+                    "logic at realistic size. Daily-loss breaker still applies. Tune via .env.",
+    )
     # ── Learning-loop auto-approval (bounded §17 relaxation) ────────────────────
     lesson_auto_approve_enabled: bool = Field(
         default=True,
