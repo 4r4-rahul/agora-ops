@@ -1,7 +1,7 @@
 # AGORA — Agent Inventory & Wiring Reference
 
 > **44 agents** across 8 categories. 24 LLM-backed (Claude), 20 pure Python.  
-> Last updated: 2026-06-24 (added §8b — Adaptive & Learning Ops: per-ticker engine, ML provenance, model fleet)
+> Last updated: 2026-06-24 (§8b — Adaptive & Learning Ops: per-ticker engine, news-response capture, ML provenance, model fleet)
 
 ---
 
@@ -426,6 +426,16 @@ Deterministic, read-only/shadow learning layer. All run in the `ScheduledAttribu
   `active=1`). **Wired into** `StrategyRulesEngine._size_contracts` (per-ticker `max_risk_per_trade_dollars`,
   inert until promoted — zero-regression).
 - **Output → consumed by:** `/agora/ticker-settings` route + 🎯 Per-Ticker Engine dashboard panel.
+
+### Per-Ticker News Response (Phase N1, observational)
+- **`agora/ops/news_events.py`** — gives the (already-rich) live news ingestion MEMORY. Every catalyst
+  is recorded at ingestion time (point-in-time, no look-ahead) via `record_news_event` from
+  `session._on_catalyst`. `capture_forward_returns` (daily, yfinance) backfills each event's realized
+  5-day forward return once the horizon elapses. `news_response_profile` aggregates per (ticker,
+  category) → hit-rate / signed response / responsiveness + an actionable `news_edge_hint`
+  (predictable_reactor | contrarian_or_noisy | non_reactive). **Forward-captured** → no PIT-vendor
+  cost, cannot leak the future. Observational only (does not steer trades yet).
+- **Output → consumed by:** `/agora/ticker-settings` route (`news_response`) + 📰 panel rows.
 
 ### ML Config-Provenance
 - **`agora/ops/config_provenance.py`** — fingerprints trade-affecting tunables; records a monotonic

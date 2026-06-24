@@ -3237,6 +3237,18 @@ class AgoraSession:
 
     async def _on_catalyst(self, catalyst: Catalyst) -> None:
         """Called by discovery agents for real-time catalyst trades."""
+        # Phase N1 — remember every news event at INGESTION time (point-in-time, no look-ahead) so we
+        # can learn each ticker's forward response to news. Observational/shadow — recorded before any
+        # gate, never affects this trade. Best-effort; never raises into the catalyst path.
+        try:
+            from agora.ops.news_events import record_news_event
+            _ncat = "macro" if catalyst.ticker in self._CATALYST_ETF_SKIP else "stock"
+            record_news_event(str(self._settings.db_path), catalyst.ticker, _ncat,
+                              catalyst.direction, source=catalyst.source or "catalyst",
+                              headline=catalyst.headline or "")
+        except Exception:
+            pass
+
         if self._risk.is_kill_switch_active():
             return
 

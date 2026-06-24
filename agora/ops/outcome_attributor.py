@@ -1021,6 +1021,19 @@ class ScheduledAttributor:
                                 self._weekly_mark("ticker_profiles")
                             except Exception as _bpexc:
                                 logger.debug("ticker-profiles skipped: %s", _bpexc)
+                        # Phase N1 — news-response capture: backfill the forward return of stored news
+                        # events whose 5d horizon has elapsed (point-in-time, no look-ahead). DAILY-gated.
+                        if self._weekly_due("news_capture", interval_days=1):
+                            try:
+                                from agora.ops.news_events import (
+                                    capture_forward_returns,
+                                    default_capture_fetcher,
+                                )
+                                _nc = capture_forward_returns(self._db_path, fetcher=default_capture_fetcher)
+                                logger.info("news-capture: %s", _nc)
+                                self._weekly_mark("news_capture")
+                            except Exception as _ncexc:
+                                logger.debug("news-capture skipped: %s", _ncexc)
                         # Per-ticker adaptive job (Phase 2, SHADOW): unify vol signature (profile) +
                         # shrunk realized edge → per-ticker risk cap (min, down-only) — logged, NOT applied.
                         try:

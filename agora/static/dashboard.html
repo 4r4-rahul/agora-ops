@@ -635,6 +635,7 @@ tr.pos-detail-row td { padding: 0; background: var(--bg1); }
       <div style="font-size:11px;letter-spacing:.08em;color:#8aa;text-transform:uppercase">🎯 Per-Ticker Engine <span style="color:#789;text-transform:none;margin-left:8px">adaptive per-ticker settings (Phase 2 — SHADOW, not applied) + settings-regime provenance</span></div>
       <div id="te-cfg" style="margin-top:8px;font-size:11px;color:#789"></div>
       <div id="te-profiles" style="margin-top:6px;font-size:11px;color:#9ab"></div>
+      <div id="te-news" style="margin-top:6px;font-size:11px;color:#9ab"></div>
       <div id="te-list" style="margin-top:6px;font-size:11px;color:#9ab"></div>
     </div>
 
@@ -2294,6 +2295,27 @@ async function fetchTickerEngine() {
               + `<td style="padding:2px 6px;color:${capcol}">${capc}</td></tr>`;
           }).join('') + '</table>')
         : '<span style="color:#789">Profiles build daily from price history — none yet (first build pending).</span>';
+    }
+    const news = document.getElementById('te-news');
+    if (news) {
+      const nr = d.news_response || [];
+      const ev = d.news_event_count || 0;
+      news.innerHTML = nr.length ? ('<div style="color:#678;margin:4px 0 3px">📰 Per-ticker news response (forward-captured, point-in-time — how each ticker moves WITH its news):</div>'
+        + '<table style="width:100%;border-collapse:collapse">'
+        + '<tr style="color:#678"><td style="padding:2px 6px">ticker</td><td style="padding:2px 6px">cat</td><td style="padding:2px 6px">n</td><td style="padding:2px 6px">hit-rate</td><td style="padding:2px 6px">signed resp</td><td style="padding:2px 6px">react</td></tr>'
+        + nr.slice(0,10).map(p => {
+            const hr = p.hit_rate==null?'—':(p.hit_rate*100).toFixed(0)+'%';
+            const hrcol = (p.hit_rate!=null && p.hit_rate>0.55)?'#5d9':(p.hit_rate!=null && p.hit_rate<0.45?'#e76':'#9ab');
+            const sr = (p.mean_signed_response*100).toFixed(1)+'%';
+            return `<tr><td style="padding:2px 6px"><b>${p.ticker}</b></td>`
+              + `<td style="padding:2px 6px;color:#789">${p.category}</td>`
+              + `<td style="padding:2px 6px;color:#789">${p.n}</td>`
+              + `<td style="padding:2px 6px;color:${hrcol}">${hr}</td>`
+              + `<td style="padding:2px 6px;color:${p.mean_signed_response>=0?'#5d9':'#e76'}">${sr}</td>`
+              + `<td style="padding:2px 6px;color:#789">${(p.responsiveness*100).toFixed(1)}%</td>`
+              + `<td style="padding:2px 6px;color:${p.hint=='predictable_reactor'?'#5d9':(p.hint=='contrarian_or_noisy'?'#e76':'#789')}">${(p.hint||'').replace(/_/g,' ')}</td></tr>`;
+          }).join('') + '</table>')
+        : `<div style="color:#789">📰 News-response: ${ev} events captured so far — profiles build forward as each ticker accumulates ≥5 events with a 5d horizon.</div>`;
     }
     const sh = d.shadow_overrides || [];
     list.innerHTML = sh.length ? ('<table style="width:100%;border-collapse:collapse">' +

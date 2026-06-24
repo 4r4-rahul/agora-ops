@@ -863,6 +863,7 @@ async def get_ticker_settings() -> JSONResponse:
     the dashboard can see what the engine learned per ticker and which settings regime is live."""
     import sqlite3
 
+    from agora.ops.news_events import news_response_profile, recent_events
     from agora.ops.ticker_profile import all_profiles
     from agora.ops.ticker_settings import get_overrides
     session = get_session()
@@ -872,6 +873,8 @@ async def get_ticker_settings() -> JSONResponse:
         shadow = [o for o in overrides if not o["active"]]
         live = [o for o in overrides if o["active"]]
         profiles = all_profiles(db)[:40]   # per-ticker market signatures (the characterization)
+        news_resp = news_response_profile(db)[:30]   # per-ticker news-response (Phase N1)
+        news_recent = recent_events(db, limit=15)
         versions = []
         try:
             conn = sqlite3.connect(db, timeout=8); conn.row_factory = sqlite3.Row
@@ -889,6 +892,9 @@ async def get_ticker_settings() -> JSONResponse:
             "live_count": len(live),
             "profiles": profiles,
             "profile_count": len(profiles),
+            "news_response": news_resp,
+            "news_recent": news_recent,
+            "news_event_count": len(news_recent),
             "config_versions": versions,
             "current_config_version": versions[0]["version"] if versions else 0,
             "note": "Per-ticker profiles = each ticker's market signature (realized vol/trend/beta) "
