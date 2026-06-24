@@ -875,6 +875,12 @@ async def get_ticker_settings() -> JSONResponse:
         profiles = all_profiles(db)[:40]   # per-ticker market signatures (the characterization)
         news_resp = news_response_profile(db)[:30]   # per-ticker news-response (Phase N1)
         news_recent = recent_events(db, limit=15)
+        calibration = []    # predicted-vs-actual calibration per source (the meaningfulness loop)
+        try:
+            from agora.ops.prediction_ledger import calibration_summary
+            calibration = calibration_summary(db, min_n=10)
+        except Exception:
+            pass
         surveillance = []   # recent deterministic surveillance verdicts (Phase S1)
         try:
             sconn = sqlite3.connect(db, timeout=8); sconn.row_factory = sqlite3.Row
@@ -906,6 +912,7 @@ async def get_ticker_settings() -> JSONResponse:
             "news_recent": news_recent,
             "news_event_count": len(news_recent),
             "surveillance": surveillance,
+            "calibration": calibration,
             "config_versions": versions,
             "current_config_version": versions[0]["version"] if versions else 0,
             "note": "Per-ticker profiles = each ticker's market signature (realized vol/trend/beta) "

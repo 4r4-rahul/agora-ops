@@ -1337,6 +1337,17 @@ class PositionManager:
         self._db.commit()
         # Register with profit engine so entry-time Greeks are captured
         self._profit_engine.register_position(position)
+        # Prediction ledger: log the entry conviction as P(win) so the predicted-vs-actual loop can
+        # grade it at close — this is what proves (or recalibrates) the conviction signal vs reality.
+        try:
+            from agora.ops.prediction_ledger import record_prediction
+            _conv = float(getattr(position, "conviction_at_entry", 0.0) or 0.0)
+            record_prediction(str(self._settings.db_path), source="conviction",
+                              target_key=position.position_id, target_type="trade",
+                              predicted=max(0.0, min(1.0, _conv / 100.0)),
+                              config_version=getattr(self, "_config_version", None))
+        except Exception:
+            pass
 
     def add_journal_entry(
         self,

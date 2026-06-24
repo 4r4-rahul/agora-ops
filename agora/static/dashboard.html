@@ -637,6 +637,7 @@ tr.pos-detail-row td { padding: 0; background: var(--bg1); }
       <div id="te-profiles" style="margin-top:6px;font-size:11px;color:#9ab"></div>
       <div id="te-news" style="margin-top:6px;font-size:11px;color:#9ab"></div>
       <div id="te-surv" style="margin-top:6px;font-size:11px;color:#9ab"></div>
+      <div id="te-calib" style="margin-top:6px;font-size:11px;color:#9ab"></div>
       <div id="te-list" style="margin-top:6px;font-size:11px;color:#9ab"></div>
     </div>
 
@@ -2317,6 +2318,25 @@ async function fetchTickerEngine() {
               + `<td style="padding:2px 6px;color:${p.hint=='predictable_reactor'?'#5d9':(p.hint=='contrarian_or_noisy'?'#e76':'#789')}">${(p.hint||'').replace(/_/g,' ')}</td></tr>`;
           }).join('') + '</table>')
         : `<div style="color:#789">📰 News-response: ${ev} events captured so far — profiles build forward as each ticker accumulates ≥5 events with a 5d horizon.</div>`;
+    }
+    const calib = document.getElementById('te-calib');
+    if (calib) {
+      const cal = d.calibration || [];
+      calib.innerHTML = cal.length ? ('<div style="color:#678;margin:4px 0 3px">🎯 Predicted vs actual (the engine grading itself — out-of-sample, daily):</div>'
+        + '<table style="width:100%;border-collapse:collapse">'
+        + '<tr style="color:#678"><td style="padding:2px 6px">source</td><td style="padding:2px 6px">n</td><td style="padding:2px 6px">predicted</td><td style="padding:2px 6px">actual</td><td style="padding:2px 6px">Brier</td><td style="padding:2px 6px">verdict</td></tr>'
+        + cal.slice(0,8).map(s => {
+            const inv = s.inverted===true;
+            const vcol = inv?'#e76':(s.brier!=null && s.brier<0.2?'#5d9':'#d9a');
+            const verdict = inv?'INVERTED ⚠️':(s.brier!=null && s.brier<0.2?'calibrated ✓':'biased');
+            return `<tr><td style="padding:2px 6px"><b>${s.source}</b></td>`
+              + `<td style="padding:2px 6px;color:#789">${s.n}</td>`
+              + `<td style="padding:2px 6px;color:#789">${(s.mean_predicted*100).toFixed(0)}%</td>`
+              + `<td style="padding:2px 6px;color:${s.actual_rate>=s.mean_predicted?'#5d9':'#e76'}">${(s.actual_rate*100).toFixed(0)}%</td>`
+              + `<td style="padding:2px 6px;color:#789">${s.brier!=null?s.brier:'—'}</td>`
+              + `<td style="padding:2px 6px;color:${vcol}">${verdict}</td></tr>`;
+          }).join('') + '</table>')
+        : '<span style="color:#789">🎯 Predicted-vs-actual: accruing — predictions score as trades close (need ≥10/source).</span>';
     }
     const surv = document.getElementById('te-surv');
     if (surv) {

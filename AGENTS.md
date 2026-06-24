@@ -447,6 +447,18 @@ Deterministic, read-only/shadow learning layer. All run in the `ScheduledAttribu
   regime-tightened) stay SHADOW (`surveillance_act_all_stops=False`) until validated via the
   `surveillance_log` table. **Output → consumed by:** `/agora/ticker-settings` (`surveillance`) + 🛡️ panel.
 
+### Prediction Ledger — the predicted-vs-actual loop
+- **`agora/ops/prediction_ledger.py`** — unified store where every prediction lands (conviction→win
+  first; news/surveillance/models to follow), tagged with config_version. `record_prediction` at the
+  moment made (point-in-time); `score_predictions` records the actual + gap once known (out-of-sample
+  by construction — cannot overfit, unlike backtesting). `calibration_summary` flags biased/INVERTED
+  predictors (Brier, mean bias). Wired: `PositionManager.add_position` records conviction;
+  `outcome_attributor` scores at close. **Proven on real data: conviction Brier 0.34, INVERTED.**
+- **`agora/ops/ledger_calibration.py`** (distinct from `recalibrate.py` = advocate) — fits a binned
+  calibration map (raw predicted → empirical actual rate) that provably LOWERS Brier on an inverted
+  predictor. Stored SHADOW (`calibration_maps.active=0`) until promoted. **Output → consumed by:**
+  `/agora/ticker-settings` (`calibration`) + 🎯 predicted-vs-actual panel.
+
 ### ML Config-Provenance
 - **`agora/ops/config_provenance.py`** — fingerprints trade-affecting tunables; records a monotonic
   `config_version` (auto-diff) on change. `PositionManager` stamps `config_version_at_entry` on every

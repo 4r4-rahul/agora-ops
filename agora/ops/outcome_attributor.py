@@ -1042,6 +1042,34 @@ class ScheduledAttributor:
                             logger.info("ticker-adapter: %s", _ta.get("summary", _ta))
                         except Exception as _taexc:
                             logger.debug("ticker-adapter skipped: %s", _taexc)
+                        # Prediction ledger — score predictions whose ACTUAL is now known (the engine
+                        # grading itself vs reality, out-of-sample by construction). conviction→win:
+                        # resolve actual = 1.0 win / 0.0 loss for genuinely-closed positions.
+                        try:
+                            import sqlite3 as _sq
+
+                            from agora.ops.prediction_ledger import score_predictions
+                            _pc = _sq.connect(self._db_path, timeout=8)
+                            _real = ("status='closed' AND close_date IS NOT NULL AND close_date<>'' "
+                                     "AND (close_source IN ('lifecycle','thesis_exit','trailing_stop',"
+                                     "'stop_loss') OR close_source LIKE 'session:%') "
+                                     "AND realized_pnl IS NOT NULL")
+
+                            def _win(pid: str, _pc=_pc, _real=_real) -> float | None:
+                                r = _pc.execute(f"SELECT realized_pnl FROM positions WHERE position_id=? "
+                                                f"AND {_real}", (pid,)).fetchone()
+                                return None if not r else (1.0 if r[0] > 0 else 0.0)
+
+                            _ps = score_predictions(self._db_path, source="conviction", actual_resolver=_win)
+                            _pc.close()
+                            logger.info("prediction-ledger: %s", _ps)
+                            # Fit a SHADOW calibration map from the scored pairs (logged, not applied) —
+                            # the "recalibrate" half of the predicted→actual→recalibrate loop.
+                            from agora.ops.ledger_calibration import run_ledger_recalibration
+                            _rc = run_ledger_recalibration(self._db_path, ["conviction"])
+                            logger.info("ledger-recalibration: %s", _rc.get("summary", _rc))
+                        except Exception as _psexc:
+                            logger.debug("prediction-ledger skipped: %s", _psexc)
                 except Exception as _mrexc:
                     logger.debug("model-runner skipped: %s", _mrexc)
                 if result.get("attributed", 0) > 0 or new_analyst > 0:
