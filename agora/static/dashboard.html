@@ -2354,15 +2354,17 @@ async function fetchTickerEngine() {
         + '<tr style="color:#678"><td style="padding:1px 6px">ticker</td><td style="padding:1px 6px">HV</td>'
         + '<td style="padding:1px 6px">debit stop</td><td style="padding:1px 6px">credit stop</td>'
         + '<td style="padding:1px 6px">size×</td></tr>'
-        + ad.slice(0,10).map(a => {
+        + ad.slice(0,6).concat(ad.length>6?ad.slice(-4):[]).map(a => {
             const wide = (a.debit_stop_pct||0) >= 0.5;
+            const sf = a.size_factor||1;
+            const sfcol = sf>1.0?'#5d9':(sf<1.0?'#d9a':'#9ab');   // up=green, down=amber
             return `<tr><td style="padding:2px 6px"><b>${a.ticker}</b></td>`
               + `<td style="padding:2px 6px;color:#9ab">${((a.hv||0)*100).toFixed(0)}%</td>`
               + `<td style="padding:2px 6px;color:${wide?'#d9a':'#5d9'}">−${((a.debit_stop_pct||0)*100).toFixed(0)}%</td>`
               + `<td style="padding:2px 6px;color:#9ab">${(a.credit_stop_mult||0).toFixed(2)}×</td>`
-              + `<td style="padding:2px 6px;color:#9ab">${(a.size_factor||1).toFixed(2)}×</td></tr>`;
+              + `<td style="padding:2px 6px;color:${sfcol}">${sf.toFixed(2)}×</td></tr>`;
           }).join('') + '</table>'
-        + '<div style="color:#789;margin-top:2px">TSLA-type names get a wider stop + smaller size; calm names a tight stop — both risk ~the same (1R).</div>')
+        + '<div style="color:#789;margin-top:2px">Volatile names (top): wider stop + smaller size. Calm names (bottom): tighter stop + LARGER size. Both risk ~1R.</div>')
         : '<span style="color:#789">🎚️ Adaptive stop: per-ticker vol profiles building (need HV signatures).</span>';
     }
     const surv = document.getElementById('te-surv');

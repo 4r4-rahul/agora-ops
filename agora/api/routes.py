@@ -900,7 +900,9 @@ async def get_ticker_settings() -> JSONResponse:
         try:
             from agora.ops.adaptive_stop import explain as _stop_explain
             _size_ceil = float(getattr(session._settings, "adaptive_size_ceil", 1.0))
-            for p in profiles:
+            # Build from the FULL universe (not the volatile top-40 display slice) so BOTH the sized-up
+            # calm names and the sized-down volatile names are represented (two-sided is the whole point).
+            for p in all_profiles(db):
                 _hv = p.get("hv_annual")
                 if _hv is None:
                     continue
