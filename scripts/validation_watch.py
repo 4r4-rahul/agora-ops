@@ -22,7 +22,6 @@ sys.path.insert(0, str(ROOT))
 
 RECAL_DATE = "2026-06-24"      # the entry-recalibration deploy date
 PROMOTE_MIN_CLOSES = 6        # per-ticker closes before a shadow cap is Phase-3-eligible
-PROMOTE_MIN_SURV = 25        # surveillance structure-stop verdicts to consider promoting them
 
 
 def _q(c: sqlite3.Connection, sql: str, params=()):
@@ -55,20 +54,29 @@ def build_report() -> str:
     else:
         lines.append(f"1️⃣ Since {RECAL_DATE}: no real closes yet")
 
-    # 2. Surveillance verdicts — structure stops ready to promote?
-    sv = _q(c, "SELECT COUNT(*), SUM(action='EXIT') FROM surveillance_log") \
-        if _q(c, "SELECT 1 FROM sqlite_master WHERE name='surveillance_log'") else None
-    if sv and sv[0]:
-        struct = _q(c, "SELECT COUNT(*) FROM surveillance_log WHERE action='EXIT' AND reason LIKE '%stop%'")
-        n_struct = struct[0] if struct else 0
-        rdy = n_struct >= PROMOTE_MIN_SURV
-        lines.append(f"2️⃣ Surveillance: {sv[0]} verdicts, {n_struct} structure-stop EXITs "
-                     f"({'✅ enough to review promotion' if rdy else f'need ≥{PROMOTE_MIN_SURV}'})")
-        if rdy:
-            ready.append("Surveillance structure stops — review `surveillance_log`, then set "
-                         "`SURVEILLANCE_ACT_ALL_STOPS=true`")
+    # 2. Per-ticker ADAPTIVE STRUCTURE STOPS — LIVE since 2026-06-24 (d22701b). Watch the FIRES:
+    #    are they actually closing positions, at what P&L, and at the predicted per-ticker levels?
+    if _q(c, "SELECT 1 FROM sqlite_master WHERE name='surveillance_log'"):
+        fired = _q(c, f"SELECT COUNT(*), COALESCE(SUM(realized_pnl),0) FROM positions "
+                      f"WHERE {_REAL_CLOSE} AND close_source LIKE 'Surveillance:%stop%'")
+        bo = _q(c, f"SELECT COUNT(*) FROM positions WHERE {_REAL_CLOSE} "
+                   f"AND close_source LIKE 'Surveillance:%blowout%'")
+        queued = _q(c, "SELECT COUNT(*) FROM surveillance_log WHERE action='EXIT' AND reason LIKE '%stop%'")
+        n_fired = (fired[0] or 0) if fired else 0
+        pnl_fired = (fired[1] or 0.0) if fired else 0.0
+        n_bo = (bo[0] or 0) if bo else 0
+        n_q = (queued[0] or 0) if queued else 0
+        if n_fired or n_bo:
+            lines.append(f"2️⃣ Adaptive stops LIVE: 🔥 {n_fired} structure-stop fires (P&L=${pnl_fired:.0f}) "
+                         f"+ {n_bo} blowout | {n_q} verdicts logged")
+            if n_fired:
+                ready.append(f"REVIEW: adaptive stops fired {n_fired}× live (${pnl_fired:.0f}) — confirm they "
+                             "landed at the predicted per-ticker level (`surveillance_log` hv/dte/debit_stop_pct)")
+        else:
+            lines.append(f"2️⃣ Adaptive stops LIVE (act_all_stops=on): no fires yet | "
+                         f"{n_q} verdicts queued (act on next adverse mark)")
     else:
-        lines.append("2️⃣ Surveillance: no verdicts logged yet")
+        lines.append("2️⃣ Adaptive stops: surveillance_log not initialized yet")
 
     # 3. Per-ticker shadow caps — any ticker with enough closes for Phase 3?
     if _q(c, "SELECT 1 FROM sqlite_master WHERE name='ticker_settings'"):
