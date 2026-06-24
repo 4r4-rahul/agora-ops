@@ -18,7 +18,7 @@ Design:
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 # Action constants
 HOLD = "HOLD"
@@ -49,6 +49,28 @@ class SurveillanceVerdict:
     urgency: str = "low"          # "low" | "high"
     stop_level: float | None = None   # the dollar unrealized at which a stop would fire (debug/UI)
     is_backstop: bool = False     # True only for the blowout backstop — the always-safe-to-act exit
+
+
+def adaptive_config(*, hv: float | None, dte: int | None, regime: str = "neutral",
+                    iv_ratio: float | None = None,
+                    base: SurveillanceConfig = DEFAULTS) -> SurveillanceConfig:
+    """Build a per-position SurveillanceConfig whose debit_stop_pct / credit_stop_mult are GENERATED
+    from the ticker's realized vol + time-to-expiry + regime (agora.ops.adaptive_stop), keeping every
+    other backstop / lock-gain / profit threshold from `base`. This is how the volatility-BLIND fixed
+    stop becomes a per-ticker adaptive one WITHOUT touching the pure surveil() decision logic.
+
+    NB: regime is already baked into the stop levels here, so the returned cfg sets risk_off_tighten=1.0
+    to stop surveil() from applying the regime tightening a SECOND time (it would double-count)."""
+    from agora.ops.adaptive_stop import (
+        adaptive_credit_stop_mult,
+        adaptive_debit_stop_pct,
+    )
+    return replace(
+        base,
+        debit_stop_pct=adaptive_debit_stop_pct(hv, dte, regime, iv_ratio=iv_ratio),
+        credit_stop_mult=adaptive_credit_stop_mult(hv, dte, regime, iv_ratio=iv_ratio),
+        risk_off_tighten=1.0,
+    )
 
 
 def surveil(*, is_credit: bool, unrealized: float, premium: float, max_loss: float,

@@ -885,10 +885,29 @@ async def get_ticker_settings() -> JSONResponse:
         try:
             sconn = sqlite3.connect(db, timeout=8); sconn.row_factory = sqlite3.Row
             if sconn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='surveillance_log'").fetchone()[0]:
+                _scols = {r[1] for r in sconn.execute("PRAGMA table_info(surveillance_log)")}
+                _extra = ", hv, dte, debit_stop_pct" if {"hv", "dte", "debit_stop_pct"} <= _scols else ""
                 surveillance = [dict(r) for r in sconn.execute(
-                    "SELECT ticker, action, reason, urgency, unrealized, ts_utc FROM surveillance_log "
-                    "ORDER BY id DESC LIMIT 15")]
+                    f"SELECT ticker, action, reason, urgency, unrealized, ts_utc{_extra} "
+                    "FROM surveillance_log ORDER BY id DESC LIMIT 15")]
             sconn.close()
+        except Exception:
+            pass
+        # Per-ticker ADAPTIVE STOP — the vol-normalized stop GENERATED per ticker (the smartness, made
+        # transparent): each ticker's HV → its own stop width + risk-budgeted size, at a representative
+        # 30-DTE neutral snapshot. Shadow-safe; the action gate is surveillance_act_all_stops.
+        adaptive_stops = []
+        try:
+            from agora.ops.adaptive_stop import explain as _stop_explain
+            for p in profiles:
+                _hv = p.get("hv_annual")
+                if _hv is None:
+                    continue
+                e = _stop_explain(p["ticker"], _hv, 30, "neutral")
+                adaptive_stops.append({
+                    "ticker": e["ticker"], "hv": e["hv"], "debit_stop_pct": e["debit_stop_pct"],
+                    "credit_stop_mult": e["credit_stop_mult"], "size_factor": e["size_factor"]})
+            adaptive_stops.sort(key=lambda d: -(d["hv"] or 0))
         except Exception:
             pass
         versions = []
@@ -912,6 +931,9 @@ async def get_ticker_settings() -> JSONResponse:
             "news_recent": news_recent,
             "news_event_count": len(news_recent),
             "surveillance": surveillance,
+            "adaptive_stops": adaptive_stops,
+            "adaptive_stop_enabled": getattr(session._settings, "adaptive_stop_enabled", False),
+            "structure_stops_live": getattr(session._settings, "surveillance_act_all_stops", False),
             "calibration": calibration,
             "config_versions": versions,
             "current_config_version": versions[0]["version"] if versions else 0,

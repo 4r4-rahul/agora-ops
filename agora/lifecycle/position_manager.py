@@ -609,37 +609,76 @@ class PositionManager:
 
     # ── Target checks ──────────────────────────────────────────────
 
+    def _ticker_hv(self, ticker: str) -> float | None:
+        """Per-ticker annualized HV from ticker_profiles (cached). Drives the adaptive stop width.
+        None when we have no profile for the ticker (→ adaptive stop falls back to the base width)."""
+        if not hasattr(self, "_hv_cache"):
+            self._hv_cache: dict[str, float | None] = {}
+        tk = (ticker or "").upper()
+        if tk not in self._hv_cache:
+            try:
+                row = self._db.execute(
+                    "SELECT hv_annual FROM ticker_profiles WHERE ticker=?", (tk,)).fetchone()
+                self._hv_cache[tk] = float(row[0]) if row and row[0] is not None else None
+            except Exception:
+                self._hv_cache[tk] = None
+        return self._hv_cache[tk]
+
     def _log_surveillance(self, position: OpenPosition) -> Any:
         """Compute the deterministic surveillance verdict; log non-HOLD verdicts. Returns the verdict
-        (or None) so the caller can ACT on it per config. Observational logging never raises."""
+        (or None) so the caller can ACT on it per config. Observational logging never raises.
+
+        The structure-stop LEVEL is now per-ticker ADAPTIVE (vol × time-to-expiry × regime) when
+        adaptive_stop_enabled — TSLA gets a wide stop, KO a tight one — instead of a fixed −55%. This
+        only changes the level the (still-shadow) structure stop logs at; the live BLOWOUT backstop and
+        the action gate (surveillance_act_all_stops) are unchanged."""
         try:
-            from agora.ops.position_surveillance import HOLD, surveil
+            from agora.ops.position_surveillance import DEFAULTS, HOLD, adaptive_config, surveil
             is_credit = (position.entry_price or 0) < 0
             premium = abs((position.entry_price or 0) * 100 * position.contracts)
             regime = getattr(self._macro_ctx, "macro_stance", "neutral") if self._macro_ctx else "neutral"
+            regime = str(regime or "neutral")
             row = self._db.execute(
                 "SELECT peak_unrealized_pnl FROM positions WHERE position_id=?",
                 (position.position_id,)).fetchone()
             mfe = row[0] if row else None
+            # Per-ticker adaptive stop config (shadow-safe — see flag docs). DTE from expiry; HV from profile.
+            hv = self._ticker_hv(position.ticker)
+            dte = None
+            try:
+                if getattr(position, "expiry_date", None) is not None:
+                    dte = (position.expiry_date - date.today()).days
+            except Exception:
+                dte = None
+            cfg = (adaptive_config(hv=hv, dte=dte, regime=regime)
+                   if getattr(self._settings, "adaptive_stop_enabled", False) else DEFAULTS)
             v = surveil(
                 is_credit=is_credit, unrealized=float(position.unrealized_pnl or 0.0), premium=premium,
                 max_loss=abs(getattr(position, "max_loss_dollars", 0.0) or 0.0),
                 max_gain=abs(getattr(position, "max_gain_dollars", 0.0) or 0.0),
-                mfe=mfe, regime=str(regime or "neutral"))
+                mfe=mfe, regime=regime, cfg=cfg)
             if v.action == HOLD:
                 return v
             self._db.execute(
                 "CREATE TABLE IF NOT EXISTS surveillance_log (id INTEGER PRIMARY KEY AUTOINCREMENT, "
                 "position_id TEXT, ticker TEXT, action TEXT, reason TEXT, urgency TEXT, "
                 "unrealized REAL, ts_utc TEXT)")
+            # Migration: surface the adaptive inputs/level for transparency (CREATE IF NOT EXISTS won't add).
+            _have = {r[1] for r in self._db.execute("PRAGMA table_info(surveillance_log)")}
+            for _c, _t in (("hv", "REAL"), ("dte", "INTEGER"), ("debit_stop_pct", "REAL"),
+                           ("stop_level", "REAL")):
+                if _c not in _have:
+                    self._db.execute(f"ALTER TABLE surveillance_log ADD COLUMN {_c} {_t}")
             self._db.execute(
                 "INSERT INTO surveillance_log (position_id, ticker, action, reason, urgency, "
-                "unrealized, ts_utc) VALUES (?,?,?,?,?,?,?)",
+                "unrealized, hv, dte, debit_stop_pct, stop_level, ts_utc) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (position.position_id, position.ticker, v.action, v.reason, v.urgency,
-                 float(position.unrealized_pnl or 0.0), datetime.now(tz=UTC).isoformat()))
+                 float(position.unrealized_pnl or 0.0), hv, dte, round(cfg.debit_stop_pct, 4),
+                 v.stop_level, datetime.now(tz=UTC).isoformat()))
             self._db.commit()
-            logger.info("SURVEILLANCE %s: %s — %s (unreal=$%.0f)",
-                        position.ticker, v.action, v.reason, position.unrealized_pnl or 0.0)
+            logger.info("SURVEILLANCE %s: %s — %s (unreal=$%.0f, hv=%s, dte=%s)",
+                        position.ticker, v.action, v.reason, position.unrealized_pnl or 0.0,
+                        f"{hv:.2f}" if hv else "n/a", dte)
             return v
         except Exception:
             return None

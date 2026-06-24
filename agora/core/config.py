@@ -556,6 +556,15 @@ class AgoraSettings(BaseSettings):
                     "from shadow to LIVE — set True only after the shadow surveillance_log validates "
                     "the verdicts fire sensibly. Default False (shadow-first discipline).",
     )
+    adaptive_stop_enabled: bool = Field(
+        default=True,
+        description="PER-TICKER ADAPTIVE STOP (2026-06-24): generate the structure-stop level from each "
+                    "ticker's realized vol (HV) × time-to-expiry (theta) × regime instead of a fixed "
+                    "−55%/−1.5× (TSLA HV58%→wide ~−65%, KO HV16%→tight ~−27%). SHADOW-SAFE to leave True: "
+                    "it only changes the LEVEL the structure stop is evaluated/logged at; the structure "
+                    "stop's ACTION is independently gated by surveillance_act_all_stops (still False = "
+                    "shadow). The live BLOWOUT backstop is unaffected (independent of stop level).",
+    )
     # ── Learning-loop auto-approval (bounded §17 relaxation) ────────────────────
     lesson_auto_approve_enabled: bool = Field(
         default=True,

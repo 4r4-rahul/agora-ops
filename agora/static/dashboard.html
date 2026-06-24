@@ -636,6 +636,7 @@ tr.pos-detail-row td { padding: 0; background: var(--bg1); }
       <div id="te-cfg" style="margin-top:8px;font-size:11px;color:#789"></div>
       <div id="te-profiles" style="margin-top:6px;font-size:11px;color:#9ab"></div>
       <div id="te-news" style="margin-top:6px;font-size:11px;color:#9ab"></div>
+      <div id="te-stops" style="margin-top:6px;font-size:11px;color:#9ab"></div>
       <div id="te-surv" style="margin-top:6px;font-size:11px;color:#9ab"></div>
       <div id="te-calib" style="margin-top:6px;font-size:11px;color:#9ab"></div>
       <div id="te-list" style="margin-top:6px;font-size:11px;color:#9ab"></div>
@@ -2337,6 +2338,30 @@ async function fetchTickerEngine() {
               + `<td style="padding:2px 6px;color:${vcol}">${verdict}</td></tr>`;
           }).join('') + '</table>')
         : '<span style="color:#789">🎯 Predicted-vs-actual: accruing — predictions score as trades close (need ≥10/source).</span>';
+    }
+    const stops = document.getElementById('te-stops');
+    if (stops) {
+      const ad = d.adaptive_stops || [];
+      const liveBadge = d.structure_stops_live
+        ? '<span style="color:#5d9">LIVE</span>'
+        : '<span style="color:#d9a">SHADOW</span>';
+      const onBadge = d.adaptive_stop_enabled ? 'adaptive ON' : 'adaptive OFF (fixed −55%)';
+      stops.innerHTML = ad.length ? ('<div style="color:#678;margin:4px 0 3px">🎚️ Per-ticker adaptive stop — '
+        + `width GENERATED from each ticker's vol (×theta ×regime); ${onBadge}; action ${liveBadge}:</div>`
+        + '<table style="width:100%;border-collapse:collapse">'
+        + '<tr style="color:#678"><td style="padding:1px 6px">ticker</td><td style="padding:1px 6px">HV</td>'
+        + '<td style="padding:1px 6px">debit stop</td><td style="padding:1px 6px">credit stop</td>'
+        + '<td style="padding:1px 6px">size×</td></tr>'
+        + ad.slice(0,10).map(a => {
+            const wide = (a.debit_stop_pct||0) >= 0.5;
+            return `<tr><td style="padding:2px 6px"><b>${a.ticker}</b></td>`
+              + `<td style="padding:2px 6px;color:#9ab">${((a.hv||0)*100).toFixed(0)}%</td>`
+              + `<td style="padding:2px 6px;color:${wide?'#d9a':'#5d9'}">−${((a.debit_stop_pct||0)*100).toFixed(0)}%</td>`
+              + `<td style="padding:2px 6px;color:#9ab">${(a.credit_stop_mult||0).toFixed(2)}×</td>`
+              + `<td style="padding:2px 6px;color:#9ab">${(a.size_factor||1).toFixed(2)}×</td></tr>`;
+          }).join('') + '</table>'
+        + '<div style="color:#789;margin-top:2px">TSLA-type names get a wider stop + smaller size; calm names a tight stop — both risk ~the same (1R).</div>')
+        : '<span style="color:#789">🎚️ Adaptive stop: per-ticker vol profiles building (need HV signatures).</span>';
     }
     const surv = document.getElementById('te-surv');
     if (surv) {
