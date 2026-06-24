@@ -517,6 +517,15 @@ class AgoraSettings(BaseSettings):
         default=150.0,
         description="Max dollar risk per spread (1 contract) before size multiplier. $150 = 1.5% of $10k account, safely within 2% daily loss cap.",
     )
+    max_risk_per_trade_dollars: float = Field(
+        default=400.0,
+        description="RECALIBRATION 2026-06-24 (#4): HARD per-trade risk ceiling. Path data proved "
+                    "positions >=$400 risk had -$134 EV (40% win) vs +$13 EV (55% win) for <$400 — "
+                    "robust even within-regime ($-280 vs $-5 in neutral). The leak was _size_contracts' "
+                    "max(1,...) floor forcing >=1 contract even when a single wide contract already "
+                    "exceeds the risk budget. This caps total position risk; a structure too wide to "
+                    "fit even 1 contract is skipped. 0 = disabled (restore old uncapped behavior).",
+    )
     max_contracts_per_trade: int = Field(
         default=10,
         description="Hard cap on contracts per trade regardless of size_multiplier",

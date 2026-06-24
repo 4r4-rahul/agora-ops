@@ -217,6 +217,15 @@ class StrategyRulesEngine:
         contracts = self._size_contracts(
             conviction.size_multiplier, max_loss, self._settings
         )
+        # #4 risk cap: a single contract whose max-loss exceeds max_risk_per_trade_dollars returns
+        # 0 here — the structure is too wide to size within the per-trade risk budget, so skip it
+        # rather than force an oversized 1-contract position (the >=$400 / -$134-EV cohort).
+        if contracts < 1:
+            logger.info(
+                "RISK CAP: %s — 1 contract max-loss $%.0f exceeds per-trade cap $%.0f — skip",
+                conviction.ticker, max_loss, self._settings.max_risk_per_trade_dollars,
+            )
+            return None
         # Edge-aware sizing (DARK by default → multiplier 1.0, no change). Only ever sizes DOWN a
         # proven negative-edge (pillar, regime) cell; never up. Inert until edge_sizing_enabled.
         try:
@@ -923,4 +932,11 @@ class StrategyRulesEngine:
             return 1
         base = max(1, int(settings.risk_per_trade_dollars / max_loss_per_contract))
         sized = max(1, round(base * size_multiplier))
-        return min(sized, settings.max_contracts_per_trade)
+        sized = min(sized, settings.max_contracts_per_trade)
+        # #4 (2026-06-24): hard per-trade risk ceiling. Positions >=$400 risk had -$134 EV; the
+        # max(1,...) floor above let a single wide contract blow the budget. Trim to the cap; if a
+        # single contract already exceeds it, return 0 — the caller skips (too wide to size safely).
+        cap = getattr(settings, "max_risk_per_trade_dollars", 0.0)
+        if cap and cap > 0:
+            sized = min(sized, int(cap / max_loss_per_contract))
+        return sized

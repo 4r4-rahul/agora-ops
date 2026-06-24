@@ -103,3 +103,37 @@ def test_r3_not_applied_when_macro_has_directional_bias():
 def test_r3_allows_confirmed_uptrend_in_neutral():
     direction, strategy, *_ = _score("neutral", confirm_flag=True, confirmed_up=True)
     assert direction == "bullish" and strategy is not None   # confirmed trend → debit proceeds
+
+
+# ── #4 hard per-trade risk cap: positions >=$400 risk had -$134 EV vs +$13 for <$400. The cap
+# trims contracts to the risk budget and returns 0 (caller skips) for a structure too wide to fit
+# even one contract. Tests the pure _size_contracts logic (self is unused). ─────────────────────
+from agora.strategies.rules_engine import StrategyRulesEngine
+
+
+def _settings(cap: float):
+    return types.SimpleNamespace(
+        risk_per_trade_dollars=150.0, max_contracts_per_trade=10, max_risk_per_trade_dollars=cap)
+
+
+def _sized(size_mult, max_loss_per_contract, cap=400.0):
+    return StrategyRulesEngine._size_contracts(None, size_mult, max_loss_per_contract, _settings(cap))
+
+
+def test_r4_normal_size_within_budget_unchanged():
+    assert _sized(1.0, 50.0) == 3            # 150/50 = 3 contracts, $150 total — under the $400 cap
+
+
+def test_r4_trims_to_risk_cap():
+    # many cheap contracts would risk past the cap → trimmed to int(400/50)=8
+    assert _sized(5.0, 50.0) == 8
+
+
+def test_r4_skips_when_single_contract_exceeds_cap():
+    # one $450 contract > $400 cap → returns 0 so the caller skips (the oversized-position leak)
+    assert _sized(1.0, 450.0) == 0
+
+
+def test_r4_disabled_restores_uncapped_floor():
+    # cap=0 → old behavior: max(1,...) floors a too-wide single contract at 1 (no skip)
+    assert _sized(1.0, 450.0, cap=0.0) == 1
