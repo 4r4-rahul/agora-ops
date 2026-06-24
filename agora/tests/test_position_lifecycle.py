@@ -101,11 +101,15 @@ def _long_position(
     )
 
 
-def _targets_stub(closed: list, long_routed: list):
+def _targets_stub(closed: list, long_routed: list, *, with_surveillance: bool = False):
     """Stub `self` for _check_position_targets. The profit engine is a no-op that
     returns a HOLD-like decision; _close_position and _check_long_options_targets are
     recorders. The real-fill DB read in _close_position is never reached because we
-    record at the _close_position boundary."""
+    record at the _close_position boundary.
+
+    with_surveillance=True binds the REAL surveillance methods over an in-memory DB so a test can
+    exercise the surveillance-owned stop (now the single loss-cutting layer after the legacy 2× hard
+    stop was retired). Default False keeps the lighter stub for the 21-DTE / routing / profit tests."""
     async def _close(position, reason, source="lifecycle"):
         closed.append((position.position_id, reason, source))
 
@@ -132,7 +136,7 @@ def _targets_stub(closed: list, long_routed: list):
         clear_position=lambda pid: None,
     )
 
-    return types.SimpleNamespace(
+    stub = types.SimpleNamespace(
         _settings=_SETTINGS,
         _profit_engine=profit_engine,
         _close_position=_close,
@@ -142,6 +146,19 @@ def _targets_stub(closed: list, long_routed: list):
         _attempt_roll=_attempt_roll,
         get_realized_pnl_today=lambda: 0.0,
     )
+    if with_surveillance:
+        import sqlite3
+
+        from agora.lifecycle.position_manager import PositionManager
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE positions (position_id TEXT, peak_unrealized_pnl REAL)")
+        conn.execute("CREATE TABLE ticker_profiles (ticker TEXT, hv_annual REAL)")
+        conn.commit()
+        stub._db = conn
+        stub._macro_ctx = None
+        for _m in ("_ticker_hv", "_within_stop_grace", "_log_surveillance"):
+            setattr(stub, _m, types.MethodType(getattr(PositionManager, _m), stub))
+    return stub
 
 
 # ── review_on_shock — deeper than the two existing tests ──────────────────────
@@ -337,17 +354,17 @@ async def test_spread_with_ample_dte_not_21dte_closed():
 
 @pytest.mark.asyncio
 async def test_spread_hard_stop_fires_when_no_roll():
-    """When unrealized P&L breaches the 2x-entry hard floor and a roll is not available,
-    the spread is closed with the hard-stop reason (deterministic backstop)."""
+    """A spread breaching deep into max loss with no roll available is closed. After the legacy 2× hard
+    stop was consolidated into surveillance (2026-06-24), this exit is owned by the surveillance layer —
+    here a blowout (−650 vs max_loss 300 = 217% → past the 85% backstop). Verifies loss-cutting still
+    fires through the single consolidated path."""
     closed, long_routed = [], []
-    stub = _targets_stub(closed, long_routed)
-    # hard_stop = -(entry_price * 100 * contracts * stop_loss_multiplier)
+    stub = _targets_stub(closed, long_routed, with_surveillance=True)
     entry, contracts = 3.00, 1
-    floor = -(entry * 100 * contracts * _SETTINGS.stop_loss_multiplier)
     pos = _spread_position(
         pid="HARDSTOP", dte=_SETTINGS.target_dte_close + 30,
         entry_price=entry, contracts=contracts,
-        unrealized_pnl=floor - 50.0,     # breach the floor
+        unrealized_pnl=-650.0,     # far past max_loss (300) → blowout backstop
     )
 
     await PositionManager._check_position_targets(stub, pos)
@@ -355,7 +372,7 @@ async def test_spread_hard_stop_fires_when_no_roll():
     assert len(closed) == 1
     pid, reason, _ = closed[0]
     assert pid == "HARDSTOP"
-    assert "Hard stop" in reason
+    assert "Surveillance" in reason      # loss-cutting now owned by the surveillance layer
 
 
 @pytest.mark.asyncio

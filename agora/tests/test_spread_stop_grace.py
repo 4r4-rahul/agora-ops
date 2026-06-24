@@ -57,8 +57,9 @@ def _run(pm, pos):
 
 def test_day0_2x_credit_loss_is_graced(pm_closed=None):
     pm, closed = _pm()
-    # 2x-credit loss (-$240) on day 0, NOT near max_loss ($380) -> grace, no close
-    _run(pm, _credit_spread(held_days=0, unreal=-240.0))
+    # Day-0 credit loss past the adaptive credit stop (-$270 breaches the ≤2.2x-credit level) but NOT
+    # near max_loss ($380) -> the surveillance grace suppresses the structure stop, no close.
+    _run(pm, _credit_spread(held_days=0, unreal=-270.0))
     assert closed == [], f"day-0 mark-noise stop should be graced, got {closed}"
 
 
@@ -74,9 +75,10 @@ def test_genuine_blowout_still_stops_within_grace():
 
 def test_past_grace_stops_normally():
     pm, closed = _pm()
-    # day 4 (>= grace 3), 2x-credit loss -> normal hard stop fires
-    _run(pm, _credit_spread(held_days=4, unreal=-240.0))
-    assert closed and "Hard stop" in closed[0], f"past grace should stop, got {closed}"
+    # day 4 (>= grace 3), loss past the adaptive credit stop -> surveillance structure stop fires
+    # (the legacy 2x hard stop was consolidated into surveillance; grace has expired).
+    _run(pm, _credit_spread(held_days=4, unreal=-270.0))
+    assert closed and "Surveillance" in closed[0], f"past grace should stop, got {closed}"
 
 
 def test_debit_spread_not_graced():

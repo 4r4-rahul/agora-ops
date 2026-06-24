@@ -624,6 +624,22 @@ class PositionManager:
                 self._hv_cache[tk] = None
         return self._hv_cache[tk]
 
+    def _within_stop_grace(self, position: OpenPosition) -> bool:
+        """Credit-spread stop GRACE (THE expectancy lever — preserved when the legacy 2× hard stop was
+        consolidated into surveillance). A credit spread's first-few-days unrealized P&L is dominated by
+        bid-ask MARK NOISE, not real loss, so within spread_stop_min_hold_days we suppress its (non-blowout)
+        structure stop to let theta work — the cause of the old 6% credit-spread win rate. Debits get no
+        grace. The blowout backstop fires independently, so this never masks a genuine blowout. Never raises."""
+        if (position.entry_price or 0) >= 0:        # debit → no grace
+            return False
+        grace = int(getattr(self._settings, "spread_stop_min_hold_days", 0) or 0)
+        if grace <= 0:
+            return False
+        try:
+            return (date.today() - position.entry_date).days < grace
+        except Exception:
+            return False
+
     def _log_surveillance(self, position: OpenPosition) -> Any:
         """Compute the deterministic surveillance verdict; log non-HOLD verdicts. Returns the verdict
         (or None) so the caller can ACT on it per config. Observational logging never raises.
@@ -692,7 +708,21 @@ class PositionManager:
         if _verdict is not None and _verdict.action == "EXIT":
             _act = self._settings.surveillance_act_enabled and (
                 _verdict.is_backstop or getattr(self._settings, "surveillance_act_all_stops", False))
+            # Credit-spread stop GRACE (preserved from the retired legacy 2× hard stop): suppress a
+            # NON-blowout structure stop within the grace window — day-1 mark noise, not real loss. The
+            # blowout backstop still fires independently, so real tail risk is never masked.
+            if _act and not _verdict.is_backstop and self._within_stop_grace(position):
+                logger.info("Credit-spread stop GRACE [%s]: structure stop suppressed in %d-day window "
+                            "(unreal=$%.0f)", position.ticker,
+                            int(getattr(self._settings, "spread_stop_min_hold_days", 0) or 0),
+                            position.unrealized_pnl or 0.0)
+                _act = False
             if _act:
+                # Roll-before-close for a rollable credit structure (also inherited from the legacy block);
+                # the blowout backstop exits immediately (tail safety) and is never rolled.
+                if (not _verdict.is_backstop and (position.entry_price or 0) < 0
+                        and await self._attempt_roll(position)):
+                    return
                 self._profit_engine.clear_position(position.position_id)
                 await self._close_position(position, f"Surveillance: {_verdict.reason}")
                 return
@@ -750,41 +780,13 @@ class PositionManager:
             return
 
         # ── Stop-loss ────────────────────────────────────────────────
-        # Hard floor: 2× entry credit (absolute backstop, never negotiable).
-        # Ratchet stop is already handled inside the engine above — if ratchet fired
-        # we returned above. This block only fires when ratchet hasn't activated yet
-        # and loss breaches the hard floor.
-        hard_stop = -abs(position.entry_price * 100 * position.contracts * self._settings.stop_loss_multiplier)
-        if position.unrealized_pnl <= hard_stop:
-            # Credit-spread stop grace (THE expectancy lever): a credit spread's day-1 unrealized
-            # P&L is dominated by bid-ask/natural MARK NOISE, not real loss, so the 2×-credit floor
-            # routinely trips on day 1 and kills the position before theta works — the cause of the
-            # 6% credit-spread win rate (vs ~70% norm; 16/18 closed at 1.0d). Credit spreads are
-            # theta trades AND defined-risk, so within the grace window we suppress the 2×-credit
-            # stop UNLESS the loss is a genuine blowout (near max_loss — the only real risk).
-            _is_credit = (position.entry_price or 0) < 0
-            _grace = int(getattr(self._settings, "spread_stop_min_hold_days", 0))
-            try:
-                _held = (date.today() - position.entry_date).days
-            except Exception:
-                _held = 99
-            _ml = abs(getattr(position, "max_loss_dollars", 0.0) or 0.0)
-            _blowout_frac = float(getattr(self._settings, "spread_stop_blowout_max_loss_frac", 0.85))
-            _genuine_blowout = _ml > 0 and position.unrealized_pnl <= -_blowout_frac * _ml
-            if _is_credit and _held < _grace and not _genuine_blowout:
-                logger.info(
-                    "Credit-spread stop GRACE [%s]: day %d < %d, unrealized=$%.0f not near max_loss "
-                    "$%.0f — holding for theta (defined risk capped)",
-                    position.ticker, _held, _grace, position.unrealized_pnl, _ml)
-            else:
-                rolled = await self._attempt_roll(position)
-                if not rolled:
-                    self._profit_engine.clear_position(position.position_id)
-                    await self._close_position(
-                        position,
-                        f"Hard stop: 2× entry hit (unrealized=${position.unrealized_pnl:.0f} ≤ ${hard_stop:.0f})",
-                    )
-                return
+        # CONSOLIDATED (2026-06-24): the legacy 2×-entry hard stop was RETIRED here. Loss-cutting now
+        # lives in ONE place — the deterministic surveillance layer at the top of this method: the
+        # always-live BLOWOUT backstop (85% of max loss) + the per-ticker ADAPTIVE structure stop
+        # (vol × theta × regime, gated by surveillance_act_all_stops), which for a debit fires at
+        # −27..−65% of premium and so ALWAYS preempts the old −200% (2×) floor (the unreachable stop
+        # that let debits ride to −92%). The credit-spread grace and roll-before-close it used to own
+        # were moved into the surveillance action block above. Below is only the OUTAGE backstop.
 
         # ── Stale-quote safety backstop ──────────────────────────────
         # The no-data HOLD guard freezes a position's mark when quotes go missing, so a blowout
@@ -796,12 +798,14 @@ class PositionManager:
         _stale = getattr(self, "_stale_cycles", {})
         if _stale.get(_pid, 0) >= getattr(self._settings, "spread_stale_stop_cycles", 5):
             _intr = self._intrinsic_unrealized(position, getattr(self, "_last_spot", {}).get(_pid, 0.0))
-            # Defined-risk spreads cap at max_loss, so the 2×-credit hard stop is often unreachable;
-            # the meaningful backstop is "near max loss during an outage" — close to dodge short-leg
-            # assignment/pin and free capital. Trigger = whichever is REACHABLE: the 2× hard stop OR
-            # 95% of max loss.
+            # Defined-risk spreads cap at max_loss, so a 2×-premium floor is often unreachable; the
+            # meaningful OUTAGE backstop is "near max loss during a data outage" — close to dodge
+            # short-leg assignment/pin and free capital. Trigger = whichever is REACHABLE: 2× premium
+            # OR 95% of max loss (this is the only place the legacy 2× threshold survives — as an
+            # outage-only intrinsic backstop, independent of the live surveillance stops above).
             _ml = abs(getattr(position, "max_loss_dollars", 0.0) or 0.0)
-            _stop_thr = max(hard_stop, -0.95 * _ml) if _ml > 0 else hard_stop
+            _two_x = -2.0 * abs((position.entry_price or 0) * 100 * position.contracts)
+            _stop_thr = max(_two_x, -0.95 * _ml) if _ml > 0 else _two_x
             if _intr is not None and _intr <= _stop_thr:
                 self._profit_engine.clear_position(_pid)
                 await self._close_position(
