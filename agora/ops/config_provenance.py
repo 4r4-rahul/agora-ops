@@ -41,7 +41,8 @@ _TRACKED: tuple[str, ...] = (
     "max_contracts_per_trade",
     "max_position_size_pct",
     "edge_sizing_enabled",
-    "adaptive_entry_sizing_enabled",   # per-ticker vol-normalized entry sizing (down-only)
+    "adaptive_entry_sizing_enabled",   # per-ticker vol-normalized entry sizing
+    "adaptive_size_ceil",              # 1.0 down-only vs >1.0 two-sided risk parity (regime change)
     # exits — adaptivity regime (so ML segments outcomes by the stop logic in force)
     "adaptive_stop_enabled",           # per-ticker vol-normalized stop level
     "surveillance_act_all_stops",      # structure stops live vs shadow

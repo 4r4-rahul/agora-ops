@@ -899,11 +899,12 @@ async def get_ticker_settings() -> JSONResponse:
         adaptive_stops = []
         try:
             from agora.ops.adaptive_stop import explain as _stop_explain
+            _size_ceil = float(getattr(session._settings, "adaptive_size_ceil", 1.0))
             for p in profiles:
                 _hv = p.get("hv_annual")
                 if _hv is None:
                     continue
-                e = _stop_explain(p["ticker"], _hv, 30, "neutral")
+                e = _stop_explain(p["ticker"], _hv, 30, "neutral", size_ceil=_size_ceil)
                 adaptive_stops.append({
                     "ticker": e["ticker"], "hv": e["hv"], "debit_stop_pct": e["debit_stop_pct"],
                     "credit_stop_mult": e["credit_stop_mult"], "size_factor": e["size_factor"]})

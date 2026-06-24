@@ -110,20 +110,26 @@ def adaptive_credit_stop_mult(hv: float | None, dte: int | None, regime: str | N
     return round(_clamp(raw, cfg.credit_mult_floor, cfg.credit_mult_ceil), 4)
 
 
-def size_factor(hv: float | None, cfg: AdaptiveStopConfig = DEFAULTS) -> float:
-    """Risk-budgeted sizing companion: smaller position for higher vol so $ risk per trade is ~constant
-    (the wider stop is offset by fewer contracts). 1.0 at/below baseline vol, down to size_floor.
-    LIVE since 2026-06-24 — consumed by StrategyRulesEngine._vol_size_factor for down-only entry sizing
-    (gated by adaptive_entry_sizing_enabled). Down-only: never returns > 1.0."""
+def size_factor(hv: float | None, ceil: float = 1.0, cfg: AdaptiveStopConfig = DEFAULTS) -> float:
+    """Risk-parity sizing companion: position scales INVERSELY with vol so $ risk per trade is ~constant
+    around the adaptive stop (a volatile name's wider stop is offset by fewer contracts; a calm name's
+    tighter stop allows more). Returns clamp(baseHV/HV, size_floor, ceil).
+
+    LIVE since 2026-06-24 — consumed by StrategyRulesEngine._vol_size_factor (gated by
+    adaptive_entry_sizing_enabled). `ceil` = adaptive_size_ceil: 1.0 → DOWN-ONLY (calm names capped at
+    1.0, purely protective); >1.0 → TWO-SIDED (calm names sized UP to `ceil`, bounded). Never returns
+    above `ceil` or below size_floor."""
     if not hv or hv <= 0:
         return 1.0
-    return round(_clamp(cfg.base_hv / hv, cfg.size_floor, 1.0), 3)
+    return round(_clamp(cfg.base_hv / hv, cfg.size_floor, max(1.0, ceil)), 3)
 
 
 def explain(ticker: str, hv: float | None, dte: int | None, regime: str | None, *,
-            iv_ratio: float | None = None, cfg: AdaptiveStopConfig = DEFAULTS) -> dict:
+            iv_ratio: float | None = None, size_ceil: float = 1.0,
+            cfg: AdaptiveStopConfig = DEFAULTS) -> dict:
     """One dict describing the full adaptive stop for a ticker/position — for the UI and shadow logging.
-    Exposes every factor so the decision is transparent (no black box)."""
+    Exposes every factor so the decision is transparent (no black box). size_ceil = adaptive_size_ceil
+    (1.0 down-only / >1.0 two-sided) so the UI shows the same size factor entries actually use."""
     return {
         "ticker": ticker,
         "hv": round(hv, 4) if hv else None,
@@ -131,7 +137,7 @@ def explain(ticker: str, hv: float | None, dte: int | None, regime: str | None, 
         "regime": regime,
         "debit_stop_pct": adaptive_debit_stop_pct(hv, dte, regime, iv_ratio=iv_ratio, cfg=cfg),
         "credit_stop_mult": adaptive_credit_stop_mult(hv, dte, regime, iv_ratio=iv_ratio, cfg=cfg),
-        "size_factor": size_factor(hv, cfg),
+        "size_factor": size_factor(hv, size_ceil, cfg),
         "vol_factor": round(vol_factor(hv, cfg), 3),
         "theta_factor": round(theta_factor(dte, cfg), 3),
         "regime_factor": round(regime_factor(regime, cfg), 3),

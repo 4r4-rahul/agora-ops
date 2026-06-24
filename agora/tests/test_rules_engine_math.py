@@ -166,10 +166,15 @@ class TestSizeContracts:
         assert StrategyRulesEngine._size_contracts(None, 1.0, 100.0, self._settings(),
                                                    vol_size_factor=0.4) == 2
 
-    def test_vol_factor_is_down_only(self):
-        # factor > 1.0 is clamped to 1.0 — entry sizing can NEVER be enlarged by vol
+    def test_vol_factor_two_sided_sizes_up(self):
+        # factor > 1.0 (a calm name) enlarges the position — base 5 × 1.5 = 7.5 → 8
         assert StrategyRulesEngine._size_contracts(None, 1.0, 100.0, self._settings(),
-                                                   vol_size_factor=2.0) == 5
+                                                   vol_size_factor=1.5) == 8
+
+    def test_vol_factor_up_is_capped_by_max_contracts(self):
+        # the hard max_contracts ceiling bounds any up-size — 5 × 3.0 = 15 → capped at 10
+        assert StrategyRulesEngine._size_contracts(None, 1.0, 100.0, self._settings(cap=10),
+                                                   vol_size_factor=3.0) == 10
 
     def test_vol_factor_floors_at_one_contract(self):
         # factor 0.0 → 5×0 = 0 → max(1,...) keeps a tradeable 1 contract
@@ -179,7 +184,7 @@ class TestSizeContracts:
 
 # ── _vol_size_factor (per-ticker resolver) ────────────────────────────────────
 class TestVolSizeFactor:
-    def _engine(self, *, enabled=True, profiles=(("TSLA", 0.58), ("KO", 0.16))):
+    def _engine(self, *, enabled=True, ceil=1.0, profiles=(("TSLA", 0.58), ("KO", 0.16))):
         import sqlite3
         import tempfile
         db = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
@@ -187,15 +192,24 @@ class TestVolSizeFactor:
         c.execute("CREATE TABLE ticker_profiles (ticker TEXT, hv_annual REAL)")
         c.executemany("INSERT INTO ticker_profiles VALUES (?,?)", list(profiles))
         c.commit(); c.close()
-        s = types.SimpleNamespace(db_path=db, adaptive_entry_sizing_enabled=enabled)
+        s = types.SimpleNamespace(db_path=db, adaptive_entry_sizing_enabled=enabled,
+                                  adaptive_size_ceil=ceil)
         return StrategyRulesEngine(settings=s)
 
     def test_volatile_ticker_sizes_down(self):
         f = self._engine()._vol_size_factor("TSLA")    # HV 0.58 → 0.30/0.58 ≈ 0.52
         assert 0.4 <= f < 1.0
 
-    def test_calm_ticker_is_full_size(self):
-        assert self._engine()._vol_size_factor("KO") == 1.0     # HV 0.16 < baseHV → 1.0 (clamped)
+    def test_calm_ticker_full_size_when_down_only(self):
+        assert self._engine(ceil=1.0)._vol_size_factor("KO") == 1.0   # ceil 1.0 → calm capped at 1.0
+
+    def test_calm_ticker_sizes_up_when_two_sided(self):
+        # ceil 1.5 → calm KO (HV 0.16 → 0.30/0.16 = 1.875) sized UP, bounded by the ceil
+        assert self._engine(ceil=1.5)._vol_size_factor("KO") == 1.5
+
+    def test_volatile_ticker_still_down_when_two_sided(self):
+        # raising the ceil never affects the DOWN side — TSLA still shrinks
+        assert self._engine(ceil=1.5)._vol_size_factor("TSLA") < 1.0
 
     def test_unprofiled_ticker_is_full_size(self):
         assert self._engine()._vol_size_factor("NOPROFILE") == 1.0

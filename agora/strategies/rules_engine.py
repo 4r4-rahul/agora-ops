@@ -63,9 +63,10 @@ class StrategyRulesEngine:
         self._hv_cache: dict[str, float | None] = {}
 
     def _vol_size_factor(self, ticker: str) -> float:
-        """Per-ticker DOWN-ONLY entry-size factor from the ticker's realized vol (agora.ops.adaptive_stop):
-        a volatile name takes a smaller position so its (wider) adaptive stop still risks ~1R. Returns
-        1.0 when disabled, or for a calm/unprofiled ticker (never sizes UP). Cached; never raises."""
+        """Per-ticker RISK-PARITY entry-size factor from the ticker's realized vol (agora.ops.adaptive_stop):
+        a volatile name takes a smaller position and a calm name a larger one, so each risks ~1R around its
+        adaptive stop. Two-sided up to adaptive_size_ceil (1.0 = down-only). Returns 1.0 when disabled or
+        for an unprofiled ticker. Bounded downstream by max_contracts_per_trade. Cached; never raises."""
         if not getattr(self._settings, "adaptive_entry_sizing_enabled", False):
             return 1.0
         tk = (ticker or "").upper()
@@ -78,7 +79,7 @@ class StrategyRulesEngine:
                 self._hv_cache[tk] = None
         try:
             from agora.ops.adaptive_stop import size_factor
-            return size_factor(self._hv_cache[tk])
+            return size_factor(self._hv_cache[tk], float(getattr(self._settings, "adaptive_size_ceil", 1.0)))
         except Exception:
             return 1.0
 
@@ -964,9 +965,10 @@ class StrategyRulesEngine:
             return 1
         base = max(1, int(settings.risk_per_trade_dollars / max_loss_per_contract))
         sized = max(1, round(base * size_multiplier))
-        # Per-ticker ADAPTIVE entry sizing (down-only): shrink a volatile name's position so its wider
-        # adaptive stop still risks ~1R. vol_size_factor ≤ 1.0 (1.0 = disabled/calm) → never sizes up.
-        sized = max(1, round(sized * max(0.0, min(1.0, vol_size_factor))))
+        # Per-ticker ADAPTIVE entry sizing (risk parity): shrink a volatile name / enlarge a calm one so
+        # each risks ~1R around its adaptive stop. vol_size_factor is two-sided up to adaptive_size_ceil
+        # (already clamped by adaptive_stop.size_factor); the hard max_contracts cap below bounds any up-size.
+        sized = max(1, round(sized * max(0.0, vol_size_factor)))
         sized = min(sized, settings.max_contracts_per_trade)
         # PAPER operational-effectiveness mode (2026-06-24): scale contracts UP so the full
         # multi-contract management machinery (partial closes, scaling out, surveillance) is actually

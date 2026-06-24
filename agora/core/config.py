@@ -542,12 +542,20 @@ class AgoraSettings(BaseSettings):
         default=True,
         description="PER-TICKER ADAPTIVE ENTRY SIZING (2026-06-24): scale each entry's contract count by "
                     "the ticker's vol-based size factor (agora.ops.adaptive_stop.size_factor = "
-                    "clamp(baseHV/HV, 0.4, 1.0)) so a volatile name (TSLA HV58% → 0.52×) takes a SMALLER "
-                    "position — pairing with its wider adaptive STOP for ~constant $ risk per trade (1R). "
-                    "DOWN-ONLY (factor ≤ 1.0): can only shrink a position, never enlarge it → purely "
-                    "protective, same safety profile as edge_sizing. Safe to run LIVE (not shadow) for "
-                    "exactly this reason. In paper mode the paper_min_contracts floor still applies. "
-                    "Calm/unprofiled tickers get 1.0× (unchanged).",
+                    "clamp(baseHV/HV, 0.4, adaptive_size_ceil)) so a volatile name (TSLA HV58% → 0.52×) "
+                    "takes a SMALLER position and a calm name a LARGER one — risk-parity around the "
+                    "adaptive STOP for ~constant $ risk per trade (1R). Bounded by max_contracts_per_trade "
+                    "(hard 10) and the daily-loss breaker. Calm/unprofiled tickers ≥ 1.0×.",
+    )
+    adaptive_size_ceil: float = Field(
+        default=1.5, ge=1.0, le=2.5,
+        description="TWO-SIDED cap on the per-ticker vol size factor (2026-06-24). 1.0 = DOWN-ONLY "
+                    "(volatile names shrink, calm names unchanged — purely protective). >1.0 = TWO-SIDED "
+                    "RISK PARITY: a calm/low-vol name is sized UP (more contracts for the same $ risk, "
+                    "since its adaptive stop is tighter), bounded by this ceiling AND max_contracts_per_trade. "
+                    "Default 1.5 — testing full two-sided adaptivity on PAPER (the up-side is unproven, so "
+                    "it is bounded + breaker-backstopped; revert to 1.0 to make sizing down-only again). "
+                    "NB: this is vol RISK-PARITY, not edge-betting; edge_sizing stays strictly down-only.",
     )
     surveillance_act_enabled: bool = Field(
         default=True,
