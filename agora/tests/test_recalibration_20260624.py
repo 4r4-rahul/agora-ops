@@ -64,9 +64,42 @@ def test_r2_low_conviction_unaffected():
     assert out["size_multiplier"] == 1.0 and out["gate"] == "standard"
 
 
-# ── R3 was REJECTED by the C-suite cross-check (2026-06-24): it edited
-# dynamic_params.min_conviction_score, but NOTHING consumes that value — the live entry gate
-# (session.py) reads the static settings.min_conviction_score instead, which isn't regime-aware.
-# The change was reverted as dead code. R3 (a regime-aware neutral-regime conviction bar) needs a
-# proper rewire of the real gate and will land as a separate, verified change. No test here until
-# it targets a consumed gate.
+# ── R3 (REDESIGNED): the first R3 (raise neutral conviction bar) was rejected twice — dead code
+# AND conceptually backwards (conviction is anti-predictive *within* neutral: high>=70 → 0% win, so
+# raising the bar selects toward the worst trades). The expert panel re-derived R3 from the leak
+# itself: long_call in neutral regime = -$4,419 (n=19), the single biggest hole — buying directional
+# debits into a no-tailwind tape. R3 now requires CONFIRMED TREND (above/below both SMAs + 10d move)
+# to take a long debit when macro has no directional bias. Wired through long_options_agent
+# _score_direction (verified consumed, unlike the dead dynamic_params field).
+from agora.agents.long_options_agent import LongOptionsAgent
+
+
+def _score(stance: str, *, confirm_flag: bool, confirmed_up: bool):
+    macro = types.SimpleNamespace(macro_stance=stance, iv_rank=50.0, vix=18.0, timestamp=None)
+    flow  = types.SimpleNamespace(direction="bullish", sweeps=["sweep"])   # → bull += 2 (>= floor)
+    mom = {"above_sma20": confirmed_up, "above_sma50": confirmed_up,
+           "ret_10d": 0.05 if confirmed_up else 0.0, "rsi": 50.0}
+    return LongOptionsAgent._score_direction(
+        macro, flow, mom, "neutral", min_conviction=2, neutral_trend_confirm=confirm_flag)
+
+
+def test_r3_blocks_unconfirmed_long_call_in_neutral():
+    direction, strategy, stack, *_ = _score("neutral", confirm_flag=True, confirmed_up=False)
+    assert direction is None and strategy is None       # the unconfirmed neutral debit is skipped
+    assert "neutral_trend_gate" in stack
+
+
+def test_r3_off_flag_lets_unconfirmed_neutral_debit_through():
+    direction, strategy, *_ = _score("neutral", confirm_flag=False, confirmed_up=False)
+    assert direction == "bullish" and strategy is not None   # flag off → old behavior
+
+
+def test_r3_not_applied_when_macro_has_directional_bias():
+    # risk_on = bullish tailwind → no confirmation required even unconfirmed
+    direction, strategy, *_ = _score("risk_on", confirm_flag=True, confirmed_up=False)
+    assert direction == "bullish" and strategy is not None
+
+
+def test_r3_allows_confirmed_uptrend_in_neutral():
+    direction, strategy, *_ = _score("neutral", confirm_flag=True, confirmed_up=True)
+    assert direction == "bullish" and strategy is not None   # confirmed trend → debit proceeds

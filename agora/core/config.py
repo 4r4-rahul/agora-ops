@@ -840,6 +840,15 @@ class AgoraSettings(BaseSettings):
                     "this False, high-conviction trades still proceed but at standard 1.0x size "
                     "(gate label kept 'high' for honest calibration tracking). Set True to restore.",
     )
+    neutral_regime_require_trend_confirm: bool = Field(
+        default=True,
+        description="RECALIBRATION 2026-06-24 (R3): in a NEUTRAL macro regime (no directional "
+                    "tailwind), require explicit trend confirmation (price above/below BOTH SMAs + "
+                    "10d move) before taking a long directional debit. Targets the single biggest "
+                    "leak: long_call in neutral regime = -$4,419 (n=19) — buying premium into a "
+                    "trendless tape is theta suicide. NB: raising the conviction bar would be WRONG "
+                    "(conviction is anti-predictive in neutral: high>=70 -> 0% win). Reversible.",
+    )
     long_options_vetter_overrides_advocate: bool = Field(
         default=True,
         description="For LONG options, a PROCEED from the purpose-built Opus vetter overrides a "

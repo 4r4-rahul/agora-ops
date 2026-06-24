@@ -454,6 +454,7 @@ class LongOptionsAgent:
             score2_floor=getattr(self._settings, "long_options_score2_min_signal_winrate", 0.0),
             rsi_capitulation_floor=getattr(self._settings, "long_options_rsi_capitulation_floor", 0),
             counter_trend_flow_damp=getattr(self._settings, "long_options_counter_trend_flow_damp", False),
+            neutral_trend_confirm=getattr(self._settings, "neutral_regime_require_trend_confirm", True),
         )
         if _is_drift and direction is not None:
             signal_stack["pre_earnings_drift"] = f"floor→1(dtc={days_to_catalyst}d,rs={_ret_10d:.1%})"
@@ -971,6 +972,7 @@ class LongOptionsAgent:
         score2_floor:   float = 0.0,
         rsi_capitulation_floor: int = 0,   # 0 = disabled (plain oversold/overbought veto)
         counter_trend_flow_damp: bool = False,
+        neutral_trend_confirm: bool = False,   # R3: require confirmed trend for debits in neutral regime
     ) -> tuple[str | None, StrategyType | None, dict, int, str, float]:
         """
         Returns (direction, strategy, signal_stack, net_score, flow_dir, quality_score).
@@ -1157,7 +1159,16 @@ class LongOptionsAgent:
         _confirmed_down = (not sma20_ok) and (not sma50_ok) and ret_10d < -0.03
         _confirmed_up   = sma20_ok and sma50_ok and ret_10d > 0.03
         _cap = rsi_capitulation_floor if rsi_capitulation_floor > 0 else 0
+        # R3 (2026-06-24): in a NEUTRAL macro regime there is no directional tailwind, and long
+        # directional debits bled -$4,419 (long_call in neutral, n=19). Require an explicit
+        # confirmed trend (above/below BOTH SMAs + 10d move) to buy a directional debit here.
+        # Only applies when macro has no directional bias (not risk_on / risk_off).
+        _no_macro_bias = stance not in ("risk_on", "risk_off")
+        _r3_confirm = neutral_trend_confirm and _no_macro_bias
         if bull >= min_conviction and bull > bear:
+            if _r3_confirm and not _confirmed_up:
+                stack["neutral_trend_gate"] = "SKIP_CALL(neutral regime: no confirmed uptrend)"
+                return None, None, stack, bull, flow_dir, qual_bull
             _call_ceiling = (100 - _cap) if (_cap and _confirmed_up) else rsi_overbought
             if rsi > _call_ceiling:
                 _tag = "[blowoff]" if _call_ceiling != rsi_overbought else ""
@@ -1169,6 +1180,9 @@ class LongOptionsAgent:
                 return None, None, stack, bull, flow_dir, qual_bull
             return "bullish", StrategyType.LONG_CALL, stack, bull, flow_dir, qual_bull
         if bear >= min_conviction and bear > bull:
+            if _r3_confirm and not _confirmed_down:
+                stack["neutral_trend_gate"] = "SKIP_PUT(neutral regime: no confirmed downtrend)"
+                return None, None, stack, bear, flow_dir, qual_bear
             _put_floor = _cap if (_cap and _confirmed_down) else rsi_oversold
             if rsi < _put_floor:
                 _tag = "[capit]" if _put_floor != rsi_oversold else ""
