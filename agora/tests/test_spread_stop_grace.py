@@ -84,4 +84,8 @@ def test_debit_spread_not_graced():
     pos = _credit_spread(held_days=0, unreal=-240.0)
     pos.entry_price = 1.20            # DEBIT (positive) -> not a credit spread -> no grace
     _run(pm, pos)
-    assert closed and "Hard stop" in closed[0], f"debit spread should stop (no grace), got {closed}"
+    # No grace for debits → it stops immediately. With the adaptive structure stop LIVE (2026-06-24),
+    # the surveillance debit stop now owns this exit and fires BEFORE the legacy hard stop (a debit down
+    # 200% of premium is far past the per-ticker −65% stop). Either reason satisfies the intent.
+    assert closed and ("Hard stop" in closed[0] or "Surveillance" in closed[0]), \
+        f"debit spread should stop (no grace), got {closed}"

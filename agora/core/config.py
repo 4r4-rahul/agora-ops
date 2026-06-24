@@ -551,10 +551,13 @@ class AgoraSettings(BaseSettings):
                     "Other verdicts (structure stops, lock-gains) stay SHADOW until validated.",
     )
     surveillance_act_all_stops: bool = Field(
-        default=False,
-        description="Promote the structure-aware stops (debit −55% / credit −1.5×, regime-tightened) "
-                    "from shadow to LIVE — set True only after the shadow surveillance_log validates "
-                    "the verdicts fire sensibly. Default False (shadow-first discipline).",
+        default=True,
+        description="PROMOTED LIVE 2026-06-24 (owner directive). The structure-aware stops now ACT — "
+                    "PER-TICKER ADAPTIVE level (debit ~−27%..−65% by vol × theta(DTE) × regime; credit "
+                    "scaled) — not just shadow-logged. Pre-flight on the 49-position book showed 0 "
+                    "immediate disruptive exits (48 hold, 1 already covered by the blowout backstop), so "
+                    "promotion was non-disruptive; the adaptive stops fire going forward as positions "
+                    "deteriorate to their per-ticker level. Set False to revert to shadow.",
     )
     adaptive_stop_enabled: bool = Field(
         default=True,
