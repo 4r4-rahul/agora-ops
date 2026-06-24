@@ -631,6 +631,12 @@ tr.pos-detail-row td { padding: 0; background: var(--bg1); }
       </div>
     </div>
 
+    <div id="ticker-engine" style="margin:10px 0;padding:14px 18px;border:1px solid #2a3550;border-radius:10px;background:linear-gradient(90deg,#10141f,#161c2c)">
+      <div style="font-size:11px;letter-spacing:.08em;color:#8aa;text-transform:uppercase">🎯 Per-Ticker Engine <span style="color:#789;text-transform:none;margin-left:8px">adaptive per-ticker settings (Phase 2 — SHADOW, not applied) + settings-regime provenance</span></div>
+      <div id="te-cfg" style="margin-top:8px;font-size:11px;color:#789"></div>
+      <div id="te-list" style="margin-top:6px;font-size:11px;color:#9ab"></div>
+    </div>
+
     <!-- Kill switch banner (shown prominently when active) -->
     <div id="ks-banner">
       🚨 KILL SWITCH ACTIVE — <span id="ks-reason">—</span>
@@ -2255,6 +2261,32 @@ async function fetchModels() {
   } catch(e) {}
 }
 
+async function fetchTickerEngine() {
+  try {
+    const r = await fetch('/agora/ticker-settings');
+    const d = await r.json();
+    const cfg = document.getElementById('te-cfg');
+    const list = document.getElementById('te-list'); if (!list) return;
+    if (cfg) {
+      const v = d.config_versions && d.config_versions[0];
+      cfg.innerHTML = `Settings regime: <b style="color:#9cf">v${d.current_config_version||0}</b>`
+        + (v ? ` <span style="color:#678">— ${(v.description||'').slice(0,80)}</span>` : '')
+        + ` &nbsp;|&nbsp; live overrides: <b style="color:${d.live_count?'#d9a':'#5d9'}">${d.live_count||0}</b>`
+        + ` &nbsp; shadow: <b style="color:#89a">${d.shadow_count||0}</b>`;
+    }
+    const sh = d.shadow_overrides || [];
+    list.innerHTML = sh.length ? ('<table style="width:100%;border-collapse:collapse">' +
+      sh.slice(0,20).map(o => `<tr>`
+        + `<td style="padding:3px 6px"><b>${o.ticker}</b></td>`
+        + `<td style="padding:3px 6px;color:#9ab">${o.setting_key}</td>`
+        + `<td style="padding:3px 6px;color:#d9a">${JSON.stringify(o.value)}</td>`
+        + `<td style="padding:3px 6px;color:#789">${(o.rationale||'').slice(0,90)}</td></tr>`
+      ).join('') + '</table>'
+      + '<div style="margin-top:6px;color:#678">SHADOW — would-be per-ticker settings, NOT applied; validating before promotion.</div>')
+      : '<span style="color:#789">No per-ticker overrides yet — tickers use global settings until they earn one (≥6 clean closes, proven edge).</span>';
+  } catch(e) {}
+}
+
 async function fetchLifecycle() {
   try {
     const r = await fetch('/agora/lifecycle/summary');
@@ -3227,7 +3259,7 @@ async function fetchToday() {
   await Promise.all([
     fetchHealth(), fetchOrders(), fetchPositions(), fetchAttribution(), fetchSignals(),
     fetchMarket(), fetchReadiness(), fetchCsuite(), fetchToday(), fetchLong(), fetchExits(), fetchCosts(), fetchFactCheck(),
-    fetchPerformance(), fetchExpectancy(), fetchLifecycle(), fetchModels(), fetchRecs(), fetchShadow(),
+    fetchPerformance(), fetchExpectancy(), fetchLifecycle(), fetchModels(), fetchRecs(), fetchShadow(), fetchTickerEngine(),
   ]);
 
   // TWS live data — fetch once on load then every 30s (makes a real IBKR connection)
@@ -3238,6 +3270,7 @@ async function fetchToday() {
   setInterval(fetchModels,      60_000);  // ML model fleet
   setInterval(fetchRecs,        60_000);  // model analyst recommendations
   setInterval(fetchShadow,      60_000);  // shadow validation (Rung 2)
+  setInterval(fetchTickerEngine, 60_000); // per-ticker adaptive engine (Phase 2 shadow)
   setInterval(fetchHealth,      10_000);
   setInterval(fetchOrders,       8_000);  // orders refresh every 8s — catches fills fast
   setInterval(fetchPositions,   15_000);

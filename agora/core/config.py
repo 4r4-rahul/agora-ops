@@ -981,9 +981,9 @@ class AgoraSettings(BaseSettings):
     # ── Logging ───────────────────────────────────────────────────
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field(default="INFO")
 
-    @property
-    def max_risk_per_trade(self) -> float:
-        return self.account_size * self.max_position_size_pct
+    # (removed dead `max_risk_per_trade` property — account_size × max_position_size_pct was a
+    # per-trade ceiling consumed by nothing; the live cap is max_risk_per_trade_dollars, enforced
+    # in StrategyRulesEngine._size_contracts. Removed 2026-06-24 cleanup.)
 
     @property
     def daily_loss_limit_dollars(self) -> float:

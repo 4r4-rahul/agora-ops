@@ -1005,6 +1005,14 @@ class ScheduledAttributor:
                             logger.debug("shadow-advisor: %s", _sa)
                         except Exception as _saexc:
                             logger.debug("shadow-advisor skipped: %s", _saexc)
+                        # Per-ticker adaptive job (Phase 2, SHADOW): compute per-ticker setting
+                        # overrides from each ticker's shrunk realized edge — logged, NOT applied.
+                        try:
+                            from agora.ops.ticker_adapter import run_ticker_adapter
+                            _ta = run_ticker_adapter(self._db_path)
+                            logger.info("ticker-adapter: %s", _ta.get("summary", _ta))
+                        except Exception as _taexc:
+                            logger.debug("ticker-adapter skipped: %s", _taexc)
                 except Exception as _mrexc:
                     logger.debug("model-runner skipped: %s", _mrexc)
                 if result.get("attributed", 0) > 0 or new_analyst > 0:

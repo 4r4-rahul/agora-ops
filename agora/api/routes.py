@@ -856,6 +856,44 @@ async def get_shadow_validation() -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+@router.get("/ticker-settings")
+async def get_ticker_settings() -> JSONResponse:
+    """Per-ticker adaptive engine (Phase 2, SHADOW) + settings-regime provenance. Read-only.
+    Shows each ticker's would-be overrides (active=0 → NOT applied) and the config_version history so
+    the dashboard can see what the engine learned per ticker and which settings regime is live."""
+    import sqlite3
+
+    from agora.ops.ticker_settings import get_overrides
+    session = get_session()
+    db = str(session._settings.db_path)
+    try:
+        overrides = get_overrides(db)
+        shadow = [o for o in overrides if not o["active"]]
+        live = [o for o in overrides if o["active"]]
+        versions = []
+        try:
+            conn = sqlite3.connect(db, timeout=8); conn.row_factory = sqlite3.Row
+            if conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='config_versions'").fetchone()[0]:
+                versions = [dict(r) for r in conn.execute(
+                    "SELECT version, created_at, description FROM config_versions "
+                    "ORDER BY version DESC LIMIT 20")]
+            conn.close()
+        except Exception:
+            pass
+        return JSONResponse({
+            "live_overrides": live,
+            "shadow_overrides": shadow,
+            "shadow_count": len(shadow),
+            "live_count": len(live),
+            "config_versions": versions,
+            "current_config_version": versions[0]["version"] if versions else 0,
+            "note": "Per-ticker overrides are SHADOW (logged, not applied) until board-promoted. "
+                    "config_versions tags every trade so ML can segment outcomes by settings regime.",
+        })
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 @router.get("/health")
 async def get_health() -> JSONResponse:
     """

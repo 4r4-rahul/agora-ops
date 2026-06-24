@@ -56,6 +56,10 @@ class StrategyRulesEngine:
 
     def __init__(self, settings: AgoraSettings | None = None) -> None:
         self._settings = settings or get_settings()
+        # Per-ticker settings resolver (Phase 1). Inert until a ticker has an ACTIVE override —
+        # resolve() returns the global default otherwise, so behaviour is unchanged today.
+        from agora.ops.ticker_settings import TickerSettingsResolver
+        self._ticker_resolver = TickerSettingsResolver(self._settings.db_path)
 
     @staticmethod
     def _dynamic_rr_floor(iv_rank: float | None, vix: float | None) -> float:
@@ -214,20 +218,25 @@ class StrategyRulesEngine:
                 )
                 return None
 
+        # Per-ticker risk cap (Phase 1 wiring): the ticker's LIVE override if one exists, else the
+        # global cap. Inert today (no active overrides) → identical to self._settings value.
+        _risk_cap = self._ticker_resolver.resolve(
+            conviction.ticker, "max_risk_per_trade_dollars", self._settings.max_risk_per_trade_dollars)
         contracts = self._size_contracts(
-            conviction.size_multiplier, max_loss, self._settings
+            conviction.size_multiplier, max_loss, self._settings, risk_cap=_risk_cap
         )
-        # #4 risk cap: a single contract whose max-loss exceeds max_risk_per_trade_dollars returns
-        # 0 here — the structure is too wide to size within the per-trade risk budget, so skip it
-        # rather than force an oversized 1-contract position (the >=$400 / -$134-EV cohort).
+        # #4 risk cap: a single contract whose max-loss exceeds the (per-ticker) cap returns 0 here —
+        # the structure is too wide to size within the per-trade risk budget, so skip it rather than
+        # force an oversized 1-contract position (the >=$400 / -$134-EV cohort).
         if contracts < 1:
             logger.info(
                 "RISK CAP: %s — 1 contract max-loss $%.0f exceeds per-trade cap $%.0f — skip",
-                conviction.ticker, max_loss, self._settings.max_risk_per_trade_dollars,
+                conviction.ticker, max_loss, _risk_cap,
             )
             return None
-        # Edge-aware sizing (DARK by default → multiplier 1.0, no change). Only ever sizes DOWN a
-        # proven negative-edge (pillar, regime) cell; never up. Inert until edge_sizing_enabled.
+        # Edge-aware sizing (LIVE since 2026-06-18, edge_sizing_enabled=True). Only ever sizes DOWN
+        # a proven negative-edge (pillar, regime) cell by its real-fill Sharpe; never up. A cell
+        # below edge_min_sample stays at 1.0 (neutral), so it ramps with data.
         try:
             from agora.ops.edge_sizing import edge_size_multiplier
             _em = edge_size_multiplier(str(self._settings.db_path), conviction.pillar,
@@ -926,7 +935,8 @@ class StrategyRulesEngine:
         return None
 
     def _size_contracts(
-        self, size_multiplier: float, max_loss_per_contract: float, settings: AgoraSettings
+        self, size_multiplier: float, max_loss_per_contract: float, settings: AgoraSettings,
+        risk_cap: float | None = None,
     ) -> int:
         if max_loss_per_contract <= 0:
             return 1
@@ -936,7 +946,8 @@ class StrategyRulesEngine:
         # #4 (2026-06-24): hard per-trade risk ceiling. Positions >=$400 risk had -$134 EV; the
         # max(1,...) floor above let a single wide contract blow the budget. Trim to the cap; if a
         # single contract already exceeds it, return 0 — the caller skips (too wide to size safely).
-        cap = getattr(settings, "max_risk_per_trade_dollars", 0.0)
+        # risk_cap is the per-ticker-resolved ceiling (falls back to the global setting).
+        cap = risk_cap if risk_cap is not None else getattr(settings, "max_risk_per_trade_dollars", 0.0)
         if cap and cap > 0:
             sized = min(sized, int(cap / max_loss_per_contract))
         return sized
