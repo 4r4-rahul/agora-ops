@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS trade_features (
     realized_pnl        REAL,
     return_on_risk      REAL,
     win                 INTEGER, -- 1 win / 0 loss / NULL if not a real close
+    config_version_at_entry INTEGER, -- settings regime this trade was opened under (ML provenance)
     built_at            TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tf_status ON trade_features(status);
@@ -150,14 +151,16 @@ def build_feature_store(db_path: str, legacy_cutoff: str = "2026-06-12") -> dict
                         conviction_at_entry, regime_at_entry, dte_at_entry, rr_ratio, max_loss_dollars,
                         max_gain_dollars, entry_price, triggered_by, gates_passed_n, n_frames, days_held,
                         max_adverse_pct, max_favorable_pct, final_net_delta, final_net_theta,
-                        status, is_real_close, realized_pnl, return_on_risk, win, built_at
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        status, is_real_close, realized_pnl, return_on_risk, win,
+                        config_version_at_entry, built_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (pid, p["ticker"], p["strategy"], _structure_class(p["strategy"], bool(is_credit)),
                      p["pillar"], p["direction"], is_credit, p["conviction_at_entry"], p["regime_at_entry"],
                      _dte(p["entry_date"], p["expiry_date"]),
                      round(mg / ml, 3) if ml > 0 else None, ml, mg, p["entry_price"],
                      dc["triggered_by"] if dc else None, gates_n, nf, dh, mae, mfe, fnd, fnt,
                      p["status"], 1 if is_real else 0, rpnl, ror, win,
+                     (p["config_version_at_entry"] if "config_version_at_entry" in p.keys() else None),
                      datetime.now(UTC).date().isoformat()),
                 )
             except Exception as _exc:

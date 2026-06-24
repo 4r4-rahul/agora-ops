@@ -67,6 +67,10 @@ class PositionManager:
         self._on_close = on_close_order
         self._on_roll = on_roll_order
         self._db = self._init_db()
+        # Record the current settings regime (no-op if unchanged) and cache its version so every
+        # position opened this session is stamped with the config it ran under — ML provenance.
+        from agora.ops.config_provenance import record_config_version
+        self._config_version = record_config_version(str(self._settings.db_path), self._settings)
         self._running = False
         self._profit_engine = IntelligentProfitEngine()
         # LLM exit intelligence (thesis re-validation) — injected by the session via
@@ -224,6 +228,10 @@ class PositionManager:
             conn.execute("ALTER TABLE positions ADD COLUMN peak_unrealized_pnl REAL")
         if "trough_unrealized_pnl" not in existing_cols:
             conn.execute("ALTER TABLE positions ADD COLUMN trough_unrealized_pnl REAL")
+        # Settings-regime provenance: which config_version this trade was opened under, so ML can
+        # segment outcomes by the settings that produced them (R1/R2/R3, #4 risk cap, per-ticker…).
+        if "config_version_at_entry" not in existing_cols:
+            conn.execute("ALTER TABLE positions ADD COLUMN config_version_at_entry INTEGER")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS trade_records (
                 trade_id TEXT PRIMARY KEY,
@@ -1245,8 +1253,8 @@ class PositionManager:
                 max_gain_dollars, unrealized_pnl, realized_pnl, rolled_count, last_reviewed,
                 ibkr_order_ids, notes, direction, conviction_at_entry, regime_at_entry,
                 earnings_date, is_pre_earnings, close_date, close_price, close_source,
-                entry_ts_utc, exit_ts_utc
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                entry_ts_utc, exit_ts_utc, config_version_at_entry
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             position.position_id,
             position.ticker,
@@ -1278,6 +1286,7 @@ class PositionManager:
             # precise TWS fill timestamps — prefer the broker fill time; fall back to the record
             # moment (full UTC, seconds) so entry_ts_utc is NEVER null going forward. exit NULL on open.
             getattr(position, "entry_ts_utc", "") or datetime.now(tz=UTC).isoformat(), None,
+            getattr(self, "_config_version", 0),   # settings regime this trade was opened under
         ))
         self._db.commit()
         # Register with profit engine so entry-time Greeks are captured
