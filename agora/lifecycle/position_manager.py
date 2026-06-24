@@ -609,8 +609,54 @@ class PositionManager:
 
     # ── Target checks ──────────────────────────────────────────────
 
+    def _log_surveillance(self, position: OpenPosition) -> Any:
+        """Compute the deterministic surveillance verdict; log non-HOLD verdicts. Returns the verdict
+        (or None) so the caller can ACT on it per config. Observational logging never raises."""
+        try:
+            from agora.ops.position_surveillance import HOLD, surveil
+            is_credit = (position.entry_price or 0) < 0
+            premium = abs((position.entry_price or 0) * 100 * position.contracts)
+            regime = getattr(self._macro_ctx, "macro_stance", "neutral") if self._macro_ctx else "neutral"
+            row = self._db.execute(
+                "SELECT peak_unrealized_pnl FROM positions WHERE position_id=?",
+                (position.position_id,)).fetchone()
+            mfe = row[0] if row else None
+            v = surveil(
+                is_credit=is_credit, unrealized=float(position.unrealized_pnl or 0.0), premium=premium,
+                max_loss=abs(getattr(position, "max_loss_dollars", 0.0) or 0.0),
+                max_gain=abs(getattr(position, "max_gain_dollars", 0.0) or 0.0),
+                mfe=mfe, regime=str(regime or "neutral"))
+            if v.action == HOLD:
+                return v
+            self._db.execute(
+                "CREATE TABLE IF NOT EXISTS surveillance_log (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "position_id TEXT, ticker TEXT, action TEXT, reason TEXT, urgency TEXT, "
+                "unrealized REAL, ts_utc TEXT)")
+            self._db.execute(
+                "INSERT INTO surveillance_log (position_id, ticker, action, reason, urgency, "
+                "unrealized, ts_utc) VALUES (?,?,?,?,?,?,?)",
+                (position.position_id, position.ticker, v.action, v.reason, v.urgency,
+                 float(position.unrealized_pnl or 0.0), datetime.now(tz=UTC).isoformat()))
+            self._db.commit()
+            logger.info("SURVEILLANCE %s: %s — %s (unreal=$%.0f)",
+                        position.ticker, v.action, v.reason, position.unrealized_pnl or 0.0)
+            return v
+        except Exception:
+            return None
+
     async def _check_position_targets(self, position: OpenPosition) -> None:
         today = date.today()
+        # Phase S1 — deterministic surveillance verdict. Logs every non-HOLD (shadow), and ACTS on the
+        # exits gated by config: the BLOWOUT backstop always (pure tail-risk safety — the old 2× debit
+        # stop was unreachable so losers rode to −105%); structure stops only when promoted from shadow.
+        _verdict = self._log_surveillance(position) if hasattr(self, "_log_surveillance") else None
+        if _verdict is not None and _verdict.action == "EXIT":
+            _act = self._settings.surveillance_act_enabled and (
+                _verdict.is_backstop or getattr(self._settings, "surveillance_act_all_stops", False))
+            if _act:
+                self._profit_engine.clear_position(position.position_id)
+                await self._close_position(position, f"Surveillance: {_verdict.reason}")
+                return
 
         # Long options use their OWN exit rules (5-day time stop, conviction-dynamic
         # profit target, trailing + flat stops) — NOT the spread-calibrated logic below

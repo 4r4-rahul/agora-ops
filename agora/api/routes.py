@@ -875,6 +875,16 @@ async def get_ticker_settings() -> JSONResponse:
         profiles = all_profiles(db)[:40]   # per-ticker market signatures (the characterization)
         news_resp = news_response_profile(db)[:30]   # per-ticker news-response (Phase N1)
         news_recent = recent_events(db, limit=15)
+        surveillance = []   # recent deterministic surveillance verdicts (Phase S1)
+        try:
+            sconn = sqlite3.connect(db, timeout=8); sconn.row_factory = sqlite3.Row
+            if sconn.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='surveillance_log'").fetchone()[0]:
+                surveillance = [dict(r) for r in sconn.execute(
+                    "SELECT ticker, action, reason, urgency, unrealized, ts_utc FROM surveillance_log "
+                    "ORDER BY id DESC LIMIT 15")]
+            sconn.close()
+        except Exception:
+            pass
         versions = []
         try:
             conn = sqlite3.connect(db, timeout=8); conn.row_factory = sqlite3.Row
@@ -895,6 +905,7 @@ async def get_ticker_settings() -> JSONResponse:
             "news_response": news_resp,
             "news_recent": news_recent,
             "news_event_count": len(news_recent),
+            "surveillance": surveillance,
             "config_versions": versions,
             "current_config_version": versions[0]["version"] if versions else 0,
             "note": "Per-ticker profiles = each ticker's market signature (realized vol/trend/beta) "

@@ -543,6 +543,19 @@ class AgoraSettings(BaseSettings):
         description="PAPER-ONLY: scales contracts above the floor to stress-test scaling/partial-close "
                     "logic at realistic size. Daily-loss breaker still applies. Tune via .env.",
     )
+    surveillance_act_enabled: bool = Field(
+        default=True,
+        description="PositionSurveillance (2026-06-24): act on the BLOWOUT backstop — exit at 85% of "
+                    "max loss. Pure tail-risk safety: the old 2×-premium debit stop was UNREACHABLE so "
+                    "losers rode to −92/−105% (the −$3,847 stop_loss leak). Strictly loss-reducing. "
+                    "Other verdicts (structure stops, lock-gains) stay SHADOW until validated.",
+    )
+    surveillance_act_all_stops: bool = Field(
+        default=False,
+        description="Promote the structure-aware stops (debit −55% / credit −1.5×, regime-tightened) "
+                    "from shadow to LIVE — set True only after the shadow surveillance_log validates "
+                    "the verdicts fire sensibly. Default False (shadow-first discipline).",
+    )
     # ── Learning-loop auto-approval (bounded §17 relaxation) ────────────────────
     lesson_auto_approve_enabled: bool = Field(
         default=True,

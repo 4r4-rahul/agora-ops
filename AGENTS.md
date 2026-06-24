@@ -437,6 +437,16 @@ Deterministic, read-only/shadow learning layer. All run in the `ScheduledAttribu
   cost, cannot leak the future. Observational only (does not steer trades yet).
 - **Output → consumed by:** `/agora/ticker-settings` route (`news_response`) + 📰 panel rows.
 
+### Position Surveillance (Phase S1)
+- **`agora/ops/position_surveillance.py`** — unified, PURE, zero-LLM exit-decision core. `surveil()`
+  fuses structure (debit vs credit), running MFE/MAE, regime, per-ticker vol → verdict (HOLD / TIGHTEN
+  / PARTIAL_TAKE / EXIT). Fixes the scattered logic where the `2×-premium` debit stop was UNREACHABLE
+  (losers rode to −105%). Wired in `PositionManager._check_position_targets` via `_log_surveillance`
+  (runs for every position each eval). **Acts on the BLOWOUT backstop (85% of max loss) by default**
+  (`surveillance_act_enabled`, pure tail-risk safety); structure stops (debit −55% / credit −1.5×,
+  regime-tightened) stay SHADOW (`surveillance_act_all_stops=False`) until validated via the
+  `surveillance_log` table. **Output → consumed by:** `/agora/ticker-settings` (`surveillance`) + 🛡️ panel.
+
 ### ML Config-Provenance
 - **`agora/ops/config_provenance.py`** — fingerprints trade-affecting tunables; records a monotonic
   `config_version` (auto-diff) on change. `PositionManager` stamps `config_version_at_entry` on every

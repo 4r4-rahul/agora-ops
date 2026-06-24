@@ -66,7 +66,10 @@ def test_genuine_blowout_still_stops_within_grace():
     pm, closed = _pm()
     # loss near max_loss (-$340 >= 0.85*380=$323) on day 0 -> genuine blowout -> STOP
     _run(pm, _credit_spread(held_days=0, unreal=-340.0))
-    assert closed and "Hard stop" in closed[0], f"blowout must stop even in grace, got {closed}"
+    # A genuine blowout MUST stop even in grace — now owned by the surveillance blowout backstop
+    # (85% of max loss) which fires before the legacy hard stop. Either reason satisfies the intent.
+    assert closed and ("Hard stop" in closed[0] or "Surveillance" in closed[0]), \
+        f"blowout must stop even in grace, got {closed}"
 
 
 def test_past_grace_stops_normally():
