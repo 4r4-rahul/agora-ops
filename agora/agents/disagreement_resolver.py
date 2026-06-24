@@ -190,9 +190,18 @@ class DisagreementResolver:
             reason = f"{agreers}/{n} agree {consensus_dir}, 1 disagrees — half size"
         elif agreers >= min_agreers:
             if avg_conf >= thresholds[1.5] and total_conviction >= 70:
-                multiplier = 1.5
                 gate   = "high"
-                reason = f"{agreers}/{n} agree {consensus_dir}, conf={avg_conf:.2f} — high conviction"
+                # RECALIBRATION 2026-06-24: high-conviction (>=70) was 0% win over n=8
+                # (-$2,008) — anti-predictive, so the 1.5x boost amplified the worst trades.
+                # Keep the "high" gate label (honest calibration tracking) but do NOT size up
+                # unless explicitly re-enabled. Reversible via high_conviction_size_boost_enabled.
+                if self._settings.high_conviction_size_boost_enabled:
+                    multiplier = 1.5
+                    reason = f"{agreers}/{n} agree {consensus_dir}, conf={avg_conf:.2f} — high conviction (1.5x)"
+                else:
+                    multiplier = 1.0
+                    reason = (f"{agreers}/{n} agree {consensus_dir}, conf={avg_conf:.2f} — high conviction, "
+                              f"size boost suppressed (0%-win recalibration)")
             else:
                 multiplier = 1.0
                 gate   = "standard"

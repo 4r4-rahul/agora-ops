@@ -822,10 +822,23 @@ class AgoraSettings(BaseSettings):
         ge=1, le=1000,
     )
     long_options_min_conviction: int = Field(
-        default=2,
+        default=3,
         description="Minimum signal score (out of 5 possible) to enter a trade. "
-                    "Score 2 = 2 confirming signals; 3+ = high conviction.",
+                    "Score 2 = 2 confirming signals; 3+ = high conviction. "
+                    "RECALIBRATION 2026-06-24: raised 2->3. Long directional debits bled "
+                    "-$5,711 (long_call -$4,062 @ 32% win) — the marginal score-2 bets are "
+                    "negative-EV theta burn. Require 3-signal confluence to buy premium. "
+                    "Reversible: set back to 2 to restore.",
         ge=1, le=5,
+    )
+    high_conviction_size_boost_enabled: bool = Field(
+        default=False,
+        description="RECALIBRATION 2026-06-24: when True, conviction>=70 + signal agreement "
+                    "boosts position size to 1.5x. DISABLED by default because high-conviction "
+                    "(>=70) trades were 0% win over n=8 (-$2,008, avg -$251) — the conviction "
+                    "signal is anti-predictive, so the boost amplified the worst trades. With "
+                    "this False, high-conviction trades still proceed but at standard 1.0x size "
+                    "(gate label kept 'high' for honest calibration tracking). Set True to restore.",
     )
     long_options_vetter_overrides_advocate: bool = Field(
         default=True,
