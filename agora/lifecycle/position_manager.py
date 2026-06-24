@@ -216,6 +216,14 @@ class PositionManager:
             conn.execute("ALTER TABLE positions ADD COLUMN close_price REAL")
         if "close_source" not in existing_cols:
             conn.execute("ALTER TABLE positions ADD COLUMN close_source TEXT NOT NULL DEFAULT ''")
+        # Running MFE/MAE in DOLLARS — updated at every mark (every exit-eval cycle, ~minutes), so
+        # they capture the true peak/trough excursion instead of being reconstructed from the sparse
+        # DAILY lifecycle_snapshots (positions hold ~2 days → 1-2 daily points → MFE/MAE missed).
+        # The feature store converts these to max_favorable_pct / max_adverse_pct at build time.
+        if "peak_unrealized_pnl" not in existing_cols:
+            conn.execute("ALTER TABLE positions ADD COLUMN peak_unrealized_pnl REAL")
+        if "trough_unrealized_pnl" not in existing_cols:
+            conn.execute("ALTER TABLE positions ADD COLUMN trough_unrealized_pnl REAL")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS trade_records (
                 trade_id TEXT PRIMARY KEY,
@@ -1374,9 +1382,17 @@ class PositionManager:
     def _update_position_price(
         self, position_id: str, current_price: float, unrealized_pnl: float
     ) -> None:
+        # Also advance the running MFE/MAE (peak/trough unrealized P&L in $) so the feature store
+        # gets the TRUE excursion, not a daily-snapshot reconstruction. MAX/MIN over the existing
+        # value (COALESCE → first mark seeds both to the current mark). Dollars avoid the sign/
+        # division pitfalls that corrupted the old pct snapshots.
         self._db.execute(
-            "UPDATE positions SET current_price=?, unrealized_pnl=?, last_reviewed=? WHERE position_id=?",
-            (current_price, unrealized_pnl, datetime.now(tz=UTC).isoformat(), position_id),
+            "UPDATE positions SET current_price=?, unrealized_pnl=?, last_reviewed=?, "
+            "peak_unrealized_pnl = MAX(COALESCE(peak_unrealized_pnl, ?), ?), "
+            "trough_unrealized_pnl = MIN(COALESCE(trough_unrealized_pnl, ?), ?) "
+            "WHERE position_id=?",
+            (current_price, unrealized_pnl, datetime.now(tz=UTC).isoformat(),
+             unrealized_pnl, unrealized_pnl, unrealized_pnl, unrealized_pnl, position_id),
         )
         self._db.commit()
 

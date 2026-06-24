@@ -126,6 +126,16 @@ def build_feature_store(db_path: str, legacy_cutoff: str = "2026-06-12") -> dict
                            ORDER BY snapshot_date DESC LIMIT 1""", (pid,)).fetchone()
                     if fr:
                         fnd, fnt = fr["net_delta"], fr["net_theta"]
+                # Prefer the RUNNING MFE/MAE (captured at every mark → true excursion) over the
+                # sparse daily-snapshot reconstruction, which missed intraday peaks/troughs on a
+                # ~2-day swing book. peak/trough are dollars → convert to pct of max_gain/max_loss.
+                _keys = p.keys()
+                peak = p["peak_unrealized_pnl"] if "peak_unrealized_pnl" in _keys else None
+                trough = p["trough_unrealized_pnl"] if "trough_unrealized_pnl" in _keys else None
+                if peak is not None and mg > 0:
+                    mfe = round(peak / mg, 4)
+                if trough is not None and ml > 0:
+                    mae = round(trough / ml, 4)
                 # label — only on a trustworthy real close, post-cutoff
                 is_real = conn.execute(
                     f"SELECT COUNT(*) FROM positions WHERE position_id=? AND ({_REAL_CLOSE}) "
