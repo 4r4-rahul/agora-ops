@@ -58,38 +58,46 @@ def run_ticker_adapter(db_path: Any) -> dict:
         by_ticker.setdefault(r["ticker"], []).append(r["realized_pnl"])
 
     cfg_v = current_config_version(str(db_path))
+    # Vol-scaled cap factors from the per-ticker profiles (price-history characterization, Phase A).
+    # Down-only: a high-realized-vol ticker gets a tighter cap; 1.0 if no profile yet.
     try:
-        from agora.ops.market_capture import iv_rank_for_ticker
+        from agora.ops.ticker_profile import all_profiles
+        vol_factor = {p["ticker"]: (p.get("cap_factor") or 1.0) for p in all_profiles(db_path)}
     except Exception:
-        iv_rank_for_ticker = lambda _t: None   # noqa: E731
+        vol_factor = {}
 
+    cap_global = 400.0   # global max_risk_per_trade_dollars (#4); overrides only ever TIGHTEN it.
+    universe = set(by_ticker) | set(vol_factor)
     written, examined = 0, 0
-    cap_global = 400.0   # the global max_risk_per_trade_dollars (#4); overrides only ever tighten it
-    for ticker, pnls in by_ticker.items():
-        n = len(pnls)
-        if n < _MIN_N:
-            continue
+    for ticker in sorted(universe):
         examined += 1
-        ticker_ev = sum(pnls) / n
-        shrunk_ev = _shrink(ticker_ev, global_ev, n)
-        # Down-only: only proven (shrunk) per-ticker losers get a tighter cap.
-        if shrunk_ev >= 0:
-            continue
-        ivr = None
-        try:
-            ivr = iv_rank_for_ticker(ticker)
-        except Exception:
-            pass
-        new_cap = round(cap_global * _DOWN_FACTOR)
-        rationale = (f"shrunk_EV=${shrunk_ev:.0f} (raw ${ticker_ev:.0f}, n={n}, global ${global_ev:.0f}) "
-                     f"→ tighten risk cap {cap_global:.0f}→{new_cap}"
-                     + (f"; IVR={ivr:.0f}" if ivr is not None else ""))
+        pnls = by_ticker.get(ticker, [])
+        n = len(pnls)
+        # Edge factor — n-gated, down-only: a proven (shrunk-EV<0) per-ticker loser → _DOWN_FACTOR.
+        edge_factor, shrunk_ev = 1.0, None
+        if n >= _MIN_N:
+            ticker_ev = sum(pnls) / n
+            shrunk_ev = _shrink(ticker_ev, global_ev, n)
+            if shrunk_ev < 0:
+                edge_factor = _DOWN_FACTOR
+        # Vol factor — from the ticker's realized-vol profile (abundant price history, no n-gate).
+        vf = vol_factor.get(ticker, 1.0)
+        factor = min(edge_factor, vf)
+        if factor >= 1.0:
+            continue   # neither signal tightens → use the global default
+        new_cap = round(cap_global * factor)
+        parts = []
+        if vf < 1.0:
+            parts.append(f"vol×{vf}")
+        if edge_factor < 1.0 and shrunk_ev is not None:
+            parts.append(f"edge shrunk_EV=${shrunk_ev:.0f}(n={n})")
+        rationale = f"cap {cap_global:.0f}→{new_cap} [{', '.join(parts)}; global EV ${global_ev:.0f}]"
         if set_override(db_path, ticker, "max_risk_per_trade_dollars", new_cap,
-                        source=_SOURCE, n_samples=n, active=False,  # SHADOW
+                        source=_SOURCE, n_samples=n, active=False,   # SHADOW — never applied
                         rationale=rationale, config_version=cfg_v):
             written += 1
 
     return {"status": "ok", "global_ev": round(global_ev, 2), "tickers_examined": examined,
             "shadow_overrides_written": written,
-            "summary": f"{written} shadow per-ticker risk-cap overrides "
-                       f"(from {examined} tickers with >={_MIN_N} closes; global EV ${global_ev:.0f})"}
+            "summary": f"{written} shadow per-ticker cap overrides (vol+edge, down-only) "
+                       f"from {examined} tickers; global EV ${global_ev:.0f}"}

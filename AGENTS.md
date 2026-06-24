@@ -1,7 +1,7 @@
 # AGORA — Agent Inventory & Wiring Reference
 
 > **44 agents** across 8 categories. 24 LLM-backed (Claude), 20 pure Python.  
-> Last updated: 2026-05-17
+> Last updated: 2026-06-24 (added §8b — Adaptive & Learning Ops: per-ticker engine, ML provenance, model fleet)
 
 ---
 
@@ -407,6 +407,41 @@ Pure-Python deterministic signals — no LLM, run in the hot scan path.
 - **What it has learned:** System prompt embeds the full IBKR TWS API reference (cached via `cache_control: ephemeral`). Each call sees current state. Background scans accumulate in `scan_history`.
 - **Output → consumed by:** COO department diagnostic reports; `POST /agora/ibkr-diagnose` endpoint
 - **Wired in session.py as:** `self._ibkr_agent` | Runs in own thread with separate event loop
+
+---
+
+## 8b. Adaptive & Learning Ops (added 2026-06)
+
+Deterministic, read-only/shadow learning layer. All run in the `ScheduledAttributor` loop
+(`agora/ops/outcome_attributor.py`); none affect live trades until board-promoted.
+
+### Per-Ticker Engine (Phase 1+2, SHADOW)
+- **`agora/ops/ticker_profile.py`** — characterizes each ticker from ~3y price history (yfinance):
+  realized vol (HV), ATR%, trend persistence, β-SPY, 1m momentum → `ticker_profiles` table. Derives a
+  DOWN-ONLY vol-scaled risk-cap factor. `build_profiles()` runs **daily** (network-gated).
+- **`agora/ops/ticker_adapter.py`** — unifies the vol signature (profile) + shrunk realized edge
+  (Bayesian partial-pooling, n≥6) → per-ticker risk-cap override = `min(vol, edge)` factor, **down-only,
+  SHADOW** (`ticker_settings.active=0`). Runs every attributor cycle.
+- **`agora/ops/ticker_settings.py`** — store + `TickerSettingsResolver` (O(1) cache; applies only
+  `active=1`). **Wired into** `StrategyRulesEngine._size_contracts` (per-ticker `max_risk_per_trade_dollars`,
+  inert until promoted — zero-regression).
+- **Output → consumed by:** `/agora/ticker-settings` route + 🎯 Per-Ticker Engine dashboard panel.
+
+### ML Config-Provenance
+- **`agora/ops/config_provenance.py`** — fingerprints trade-affecting tunables; records a monotonic
+  `config_version` (auto-diff) on change. `PositionManager` stamps `config_version_at_entry` on every
+  position; `feature_store` carries it → ML segments outcomes by settings regime. **Extend:** add new
+  tunables to `_TRACKED`.
+
+### Path Instrumentation (MFE/MAE)
+- `PositionManager._update_position_price` tracks running `peak_unrealized_pnl`/`trough_unrealized_pnl`
+  (the sole mark path); `feature_store` converts to `max_favorable_pct`/`max_adverse_pct`. Fixed the
+  sparse-daily-snapshot bug that corrupted exit-tuning data.
+
+### ML Model Fleet
+- **`agora/ops/model_runner.py`** + `agora/ops/ml_models/` (M1 fill, M2 regime, M3 liquidity, M4 win/EV,
+  M5 conviction-calib, M8 lifecycle, dataset_health) + `model_analyst.py` + `shadow_advisor.py`. All
+  n-gated/shadow. Routes: `/agora/models/*`.
 
 ---
 

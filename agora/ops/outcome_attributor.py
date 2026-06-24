@@ -1005,8 +1005,24 @@ class ScheduledAttributor:
                             logger.debug("shadow-advisor: %s", _sa)
                         except Exception as _saexc:
                             logger.debug("shadow-advisor skipped: %s", _saexc)
-                        # Per-ticker adaptive job (Phase 2, SHADOW): compute per-ticker setting
-                        # overrides from each ticker's shrunk realized edge — logged, NOT applied.
+                        # Phase A — per-ticker characterization: profile each traded ticker from ~3y
+                        # price history (yfinance). DAILY-gated (network-heavy); the adapter below
+                        # reads the stored vol signature each cycle.
+                        if self._weekly_due("ticker_profiles", interval_days=1):
+                            try:
+                                import sqlite3 as _sq
+                                _c = _sq.connect(self._db_path, timeout=8)
+                                _tk = [r[0] for r in _c.execute(
+                                    "SELECT DISTINCT ticker FROM trade_features WHERE ticker IS NOT NULL")]
+                                _c.close()
+                                from agora.ops.ticker_profile import build_profiles
+                                _bp = build_profiles(self._db_path, _tk)
+                                logger.info("ticker-profiles: %s", _bp.get("summary", _bp))
+                                self._weekly_mark("ticker_profiles")
+                            except Exception as _bpexc:
+                                logger.debug("ticker-profiles skipped: %s", _bpexc)
+                        # Per-ticker adaptive job (Phase 2, SHADOW): unify vol signature (profile) +
+                        # shrunk realized edge → per-ticker risk cap (min, down-only) — logged, NOT applied.
                         try:
                             from agora.ops.ticker_adapter import run_ticker_adapter
                             _ta = run_ticker_adapter(self._db_path)

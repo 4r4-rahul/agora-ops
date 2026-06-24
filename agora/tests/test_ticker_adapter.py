@@ -65,5 +65,31 @@ def test_winner_gets_no_override_down_only():
     assert not any(o["ticker"] == "WIN" for o in get_overrides(db))
 
 
+def test_vol_profile_alone_tightens_cap_even_without_edge():
+    # A high-vol ticker (cap_factor 0.6) with NO trades of its own still earns a vol-scaled shadow
+    # cap from its price-history profile — the Phase-A characterization path.
+    db = _db([("OK", 50.0)] * 20)               # global prior only; HOT has no closes
+    c = sqlite3.connect(db)
+    c.execute("CREATE TABLE ticker_profiles (ticker TEXT PRIMARY KEY, hv_annual REAL, cap_factor REAL)")
+    c.execute("INSERT INTO ticker_profiles (ticker, hv_annual, cap_factor) VALUES ('HOT', 0.5, 0.6)")
+    c.commit(); c.close()
+    run_ticker_adapter(db)
+    ov = [o for o in get_overrides(db) if o["ticker"] == "HOT"]
+    assert len(ov) == 1 and ov[0]["value"] == 240 and ov[0]["active"] == 0   # 400*0.6, shadow
+    assert "vol×0.6" in ov[0]["rationale"]
+
+
+def test_vol_and_edge_take_the_tighter_min():
+    # BAD is a proven loser (edge→0.5) AND high-vol (vol→0.6) → cap uses the MIN (0.5 → 200).
+    db = _db([("BAD", -400.0)] * 25 + [("OK", 50.0)] * 25)
+    c = sqlite3.connect(db)
+    c.execute("CREATE TABLE ticker_profiles (ticker TEXT PRIMARY KEY, hv_annual REAL, cap_factor REAL)")
+    c.execute("INSERT INTO ticker_profiles (ticker, hv_annual, cap_factor) VALUES ('BAD', 0.5, 0.6)")
+    c.commit(); c.close()
+    run_ticker_adapter(db)
+    bad = [o for o in get_overrides(db) if o["ticker"] == "BAD"][0]
+    assert bad["value"] == 200    # min(0.5 edge, 0.6 vol) → 0.5 → 400*0.5
+
+
 def test_error_safe():
     assert run_ticker_adapter("/nonexistent/x.db")["status"] in ("skipped", "error")

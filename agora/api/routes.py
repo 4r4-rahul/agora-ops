@@ -863,6 +863,7 @@ async def get_ticker_settings() -> JSONResponse:
     the dashboard can see what the engine learned per ticker and which settings regime is live."""
     import sqlite3
 
+    from agora.ops.ticker_profile import all_profiles
     from agora.ops.ticker_settings import get_overrides
     session = get_session()
     db = str(session._settings.db_path)
@@ -870,6 +871,7 @@ async def get_ticker_settings() -> JSONResponse:
         overrides = get_overrides(db)
         shadow = [o for o in overrides if not o["active"]]
         live = [o for o in overrides if o["active"]]
+        profiles = all_profiles(db)[:40]   # per-ticker market signatures (the characterization)
         versions = []
         try:
             conn = sqlite3.connect(db, timeout=8); conn.row_factory = sqlite3.Row
@@ -885,9 +887,12 @@ async def get_ticker_settings() -> JSONResponse:
             "shadow_overrides": shadow,
             "shadow_count": len(shadow),
             "live_count": len(live),
+            "profiles": profiles,
+            "profile_count": len(profiles),
             "config_versions": versions,
             "current_config_version": versions[0]["version"] if versions else 0,
-            "note": "Per-ticker overrides are SHADOW (logged, not applied) until board-promoted. "
+            "note": "Per-ticker profiles = each ticker's market signature (realized vol/trend/beta) "
+                    "from ~3y history. Overrides are SHADOW (logged, not applied) until board-promoted. "
                     "config_versions tags every trade so ML can segment outcomes by settings regime.",
         })
     except Exception as exc:

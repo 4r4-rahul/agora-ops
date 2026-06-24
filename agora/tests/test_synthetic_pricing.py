@@ -25,6 +25,36 @@ from agora.backtester.synthetic_pricing import (
 )
 
 
+# ── bs_price — extreme-boundary numerical stability (per-ticker training must not blow up) ──
+class TestBSPriceExtremes:
+    def test_huge_vol_call_bounded_by_spot(self):
+        # As sigma→∞ a call → S (never exceeds the underlying); must stay finite, no overflow.
+        p = bs_price(100, 100, 1.0, 0.05, 50.0, "call")
+        assert math.isfinite(p) and 0.0 <= p <= 100.0
+
+    def test_long_dated_deep_otm_put_finite_nonneg(self):
+        p = bs_price(100, 10, 5.0, 0.05, 0.30, "put")
+        assert math.isfinite(p) and p >= 0.0
+
+    def test_tiny_positive_T_converges_to_intrinsic(self):
+        # 1 second to expiry, deep ITM call ≈ intrinsic, finite.
+        p = bs_price(120, 100, 1e-7, 0.05, 0.30, "call")
+        assert p == pytest.approx(20.0, abs=0.1)
+
+    def test_price_monotonic_nondecreasing_in_spot_for_call(self):
+        prev = -1.0
+        for s in (80, 90, 100, 110, 120):
+            p = bs_price(s, 100, 0.25, 0.05, 0.3, "call")
+            assert p >= prev - 1e-9
+            prev = p
+
+    def test_put_call_parity_holds_at_extreme_vol(self):
+        S, K, T, r, sig = 100, 100, 0.5, 0.05, 2.5
+        c = bs_price(S, K, T, r, sig, "call")
+        p = bs_price(S, K, T, r, sig, "put")
+        assert (c - p) == pytest.approx(S - K * math.exp(-r * T), abs=0.5)
+
+
 # ── bs_price ──────────────────────────────────────────────────────────────────
 class TestBsPrice:
     def test_atm_call_positive(self):

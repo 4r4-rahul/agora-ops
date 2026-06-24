@@ -634,6 +634,7 @@ tr.pos-detail-row td { padding: 0; background: var(--bg1); }
     <div id="ticker-engine" style="margin:10px 0;padding:14px 18px;border:1px solid #2a3550;border-radius:10px;background:linear-gradient(90deg,#10141f,#161c2c)">
       <div style="font-size:11px;letter-spacing:.08em;color:#8aa;text-transform:uppercase">🎯 Per-Ticker Engine <span style="color:#789;text-transform:none;margin-left:8px">adaptive per-ticker settings (Phase 2 — SHADOW, not applied) + settings-regime provenance</span></div>
       <div id="te-cfg" style="margin-top:8px;font-size:11px;color:#789"></div>
+      <div id="te-profiles" style="margin-top:6px;font-size:11px;color:#9ab"></div>
       <div id="te-list" style="margin-top:6px;font-size:11px;color:#9ab"></div>
     </div>
 
@@ -2273,6 +2274,26 @@ async function fetchTickerEngine() {
         + (v ? ` <span style="color:#678">— ${(v.description||'').slice(0,80)}</span>` : '')
         + ` &nbsp;|&nbsp; live overrides: <b style="color:${d.live_count?'#d9a':'#5d9'}">${d.live_count||0}</b>`
         + ` &nbsp; shadow: <b style="color:#89a">${d.shadow_count||0}</b>`;
+    }
+    const prof = document.getElementById('te-profiles');
+    if (prof) {
+      const ps = d.profiles || [];
+      const pct = (x)=> x==null ? '—' : (x*100).toFixed(0)+'%';
+      prof.innerHTML = ps.length ? ('<div style="color:#678;margin-bottom:3px">📊 Per-ticker market signatures (from ~3y history — vol drives the shadow cap):</div>'
+        + '<table style="width:100%;border-collapse:collapse">'
+        + '<tr style="color:#678"><td style="padding:2px 6px">ticker</td><td style="padding:2px 6px">HV(annual)</td><td style="padding:2px 6px">trend</td><td style="padding:2px 6px">β-SPY</td><td style="padding:2px 6px">1m mom</td><td style="padding:2px 6px">cap×</td></tr>'
+        + ps.slice(0,12).map(p => {
+            const hv = p.hv_annual==null?'—':(p.hv_annual*100).toFixed(0)+'%';
+            const capc = p.cap_factor==null?'—':p.cap_factor;
+            const capcol = (p.cap_factor!=null && p.cap_factor<1)?'#d9a':'#5d9';
+            return `<tr><td style="padding:2px 6px"><b>${p.ticker}</b></td>`
+              + `<td style="padding:2px 6px">${hv}</td>`
+              + `<td style="padding:2px 6px;color:#789">${pct(p.trend_persistence)}</td>`
+              + `<td style="padding:2px 6px;color:#789">${p.beta_spy==null?'—':p.beta_spy}</td>`
+              + `<td style="padding:2px 6px;color:${(p.momentum_1m||0)>=0?'#5d9':'#e76'}">${pct(p.momentum_1m)}</td>`
+              + `<td style="padding:2px 6px;color:${capcol}">${capc}</td></tr>`;
+          }).join('') + '</table>')
+        : '<span style="color:#789">Profiles build daily from price history — none yet (first build pending).</span>';
     }
     const sh = d.shadow_overrides || [];
     list.innerHTML = sh.length ? ('<table style="width:100%;border-collapse:collapse">' +
