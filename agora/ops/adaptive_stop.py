@@ -113,7 +113,8 @@ def adaptive_credit_stop_mult(hv: float | None, dte: int | None, regime: str | N
 def size_factor(hv: float | None, cfg: AdaptiveStopConfig = DEFAULTS) -> float:
     """Risk-budgeted sizing companion: smaller position for higher vol so $ risk per trade is ~constant
     (the wider stop is offset by fewer contracts). 1.0 at/below baseline vol, down to size_floor.
-    SHADOW/advisory — exposed for the UI and the ledger; not wired into live sizing yet."""
+    LIVE since 2026-06-24 — consumed by StrategyRulesEngine._vol_size_factor for down-only entry sizing
+    (gated by adaptive_entry_sizing_enabled). Down-only: never returns > 1.0."""
     if not hv or hv <= 0:
         return 1.0
     return round(_clamp(cfg.base_hv / hv, cfg.size_floor, 1.0), 3)
