@@ -1061,12 +1061,24 @@ class ScheduledAttributor:
                                 return None if not r else (1.0 if r[0] > 0 else 0.0)
 
                             _ps = score_predictions(self._db_path, source="conviction", actual_resolver=_win)
+
+                            # news prediction → actual move direction (from the captured forward return)
+                            def _news_move(tkey: str, _pc=_pc) -> float | None:
+                                try:
+                                    eid = int(str(tkey).split(":")[-1])
+                                except (ValueError, IndexError):
+                                    return None
+                                r = _pc.execute("SELECT fwd_return FROM news_events WHERE id=? AND captured=1",
+                                                (eid,)).fetchone()
+                                return None if not r or r[0] is None else (1.0 if r[0] > 0 else 0.0)
+
+                            _psn = score_predictions(self._db_path, source="news", actual_resolver=_news_move)
                             _pc.close()
-                            logger.info("prediction-ledger: %s", _ps)
-                            # Fit a SHADOW calibration map from the scored pairs (logged, not applied) —
+                            logger.info("prediction-ledger: conviction=%s news=%s", _ps, _psn)
+                            # Fit SHADOW calibration maps from the scored pairs (logged, not applied) —
                             # the "recalibrate" half of the predicted→actual→recalibrate loop.
                             from agora.ops.ledger_calibration import run_ledger_recalibration
-                            _rc = run_ledger_recalibration(self._db_path, ["conviction"])
+                            _rc = run_ledger_recalibration(self._db_path, ["conviction", "news"])
                             logger.info("ledger-recalibration: %s", _rc.get("summary", _rc))
                         except Exception as _psexc:
                             logger.debug("prediction-ledger skipped: %s", _psexc)

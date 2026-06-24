@@ -152,6 +152,18 @@ def test_profile_includes_actionable_hint():
     assert prof[0]["hint"] == "predictable_reactor"
 
 
+# ── news → prediction ledger (unified predicted-vs-actual) ────────────────────────────
+def test_directional_news_records_a_ledger_prediction():
+    import sqlite3
+    db = _db()
+    record_news_event(db, "NVDA", "stock", "bullish", source="t")        # directional → predicted
+    record_news_event(db, "KO", "macro", "neutral", source="t")          # neutral → no prediction
+    c = sqlite3.connect(db)
+    preds = c.execute("SELECT source, predicted FROM prediction_ledger WHERE source='news'").fetchall()
+    assert len(preds) == 1                          # only the directional one
+    assert preds[0][1] == 1.0                       # bullish → P(up) = 0.5 + 1/2
+
+
 def test_error_safe():
     assert record_news_event("/nonexistent/x.db", "X", "stock", 1.0, source="t") is False
     assert news_response_profile("/nonexistent/x.db") == []

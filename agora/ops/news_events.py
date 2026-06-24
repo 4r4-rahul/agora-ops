@@ -56,17 +56,28 @@ def record_news_event(db_path: Any, ticker: str, category: str, sentiment: Any, 
     """Persist a news event AT INGESTION TIME (point-in-time). category is coerced to a known bucket;
     sentiment to a signed float. Returns True on success. Never raises."""
     cat = category if category in CATEGORIES else "stock"
+    sent = _norm_sentiment(sentiment)
     try:
         conn = sqlite3.connect(str(db_path), timeout=10)
         conn.executescript(_DDL)
-        conn.execute(
+        cur = conn.execute(
             "INSERT INTO news_events (ticker, category, sentiment, source, headline, event_ts_utc, "
             "spot_at_event, captured) VALUES (?,?,?,?,?,?,?,0)",
-            (str(ticker).upper(), cat, _norm_sentiment(sentiment), source, headline[:300],
+            (str(ticker).upper(), cat, sent, source, headline[:300],
              event_ts or datetime.now(UTC).isoformat(),
              float(spot) if spot and spot > 0 else None))
+        eid = cur.lastrowid
         conn.commit()
         conn.close()
+        # Unify into the predicted-vs-actual ledger: a DIRECTIONAL news event predicts the move
+        # direction → P(up) = 0.5 + sentiment/2. Scored later from the captured forward return.
+        if sent != 0:
+            try:
+                from agora.ops.prediction_ledger import record_prediction
+                record_prediction(db_path, source="news", target_key=f"news:{eid}",
+                                  target_type="news", predicted=0.5 + sent / 2.0)
+            except Exception:
+                pass
         return True
     except Exception:
         return False
