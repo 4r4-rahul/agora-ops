@@ -2366,7 +2366,7 @@ async function fetchTickerEngine() {
     const surv = document.getElementById('te-surv');
     if (surv) {
       const sv = d.surveillance || [];
-      surv.innerHTML = sv.length ? ('<div style="color:#678;margin:4px 0 3px">🛡️ Position surveillance (deterministic, every mark — blowout backstop LIVE, structure stops shadow):</div>'
+      surv.innerHTML = sv.length ? ('<div style="color:#678;margin:4px 0 3px">🛡️ Position surveillance (deterministic, every mark — blowout backstop + per-ticker adaptive structure stops LIVE):</div>'
         + '<table style="width:100%;border-collapse:collapse">'
         + sv.slice(0,8).map(s => {
             const acol = s.action=='EXIT'?'#e76':(s.action=='PARTIAL_TAKE'?'#5d9':'#d9a');

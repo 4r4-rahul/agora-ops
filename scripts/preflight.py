@@ -22,10 +22,14 @@ import socket
 import sqlite3
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agora.core.config import AgoraSettings
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-PASS_MARK = "  [PASS]"
+PASS_MARK = "  [PASS]"  # noqa: S105 — display label, not a credential
 FAIL_MARK = "  [FAIL]"
 WARN_MARK = "  [WARN]"
 INFO_MARK = "  [INFO]"
@@ -60,7 +64,7 @@ def chk_info(name: str, detail: str = "") -> None:
 
 # ── 1. Settings load ──────────────────────────────────────────────────────────
 
-def check_settings() -> "AgoraSettings | None":
+def check_settings() -> AgoraSettings | None:
     print("\n  Settings & Environment")
     print("  " + "─" * 50)
 
@@ -82,7 +86,7 @@ def check_settings() -> "AgoraSettings | None":
 
 # ── 2. API key ────────────────────────────────────────────────────────────────
 
-def check_api_key(s: "AgoraSettings") -> None:
+def check_api_key(s: AgoraSettings) -> None:
     print("\n  API Keys")
     print("  " + "─" * 50)
 
@@ -97,7 +101,7 @@ def check_api_key(s: "AgoraSettings") -> None:
 
 # ── 3. Mode / port alignment ──────────────────────────────────────────────────
 
-def check_mode_port(s: "AgoraSettings", mode_override: str | None) -> None:
+def check_mode_port(s: AgoraSettings, mode_override: str | None) -> None:
     print("\n  Trading Mode & IBKR Port")
     print("  " + "─" * 50)
 
@@ -123,7 +127,7 @@ def check_mode_port(s: "AgoraSettings", mode_override: str | None) -> None:
 
 # ── 4. Position sizing vs AUM ─────────────────────────────────────────────────
 
-def check_sizing(s: "AgoraSettings") -> None:
+def check_sizing(s: AgoraSettings) -> None:
     print("\n  Position Sizing vs AUM")
     print("  " + "─" * 50)
 
@@ -169,7 +173,7 @@ def check_sizing(s: "AgoraSettings") -> None:
 
 # ── 5. IBKR connectivity ──────────────────────────────────────────────────────
 
-def check_ibkr(s: "AgoraSettings") -> None:
+def check_ibkr(s: AgoraSettings) -> None:
     print("\n  IBKR TWS Connectivity")
     print("  " + "─" * 50)
 
@@ -178,9 +182,9 @@ def check_ibkr(s: "AgoraSettings") -> None:
     timeout = 3.0
 
     try:
-        with socket.create_connection((host, port), timeout=timeout) as sock:
+        with socket.create_connection((host, port), timeout=timeout):
             chk_pass(f"TWS reachable at {host}:{port}")
-    except socket.timeout:
+    except TimeoutError:
         chk_fail(f"TWS not reachable at {host}:{port}", f"Connection timed out after {timeout:.0f}s — is TWS running?")
     except ConnectionRefusedError:
         chk_fail(f"TWS not reachable at {host}:{port}", "Connection refused — TWS may not be running or API not enabled")
@@ -197,7 +201,7 @@ _REQUIRED_TABLES = [
 ]
 
 
-def check_database(s: "AgoraSettings") -> None:
+def check_database(s: AgoraSettings) -> None:
     print("\n  Database")
     print("  " + "─" * 50)
 
@@ -250,7 +254,7 @@ def check_database(s: "AgoraSettings") -> None:
 
 # ── 7. File system paths ──────────────────────────────────────────────────────
 
-def check_paths(s: "AgoraSettings") -> None:
+def check_paths(s: AgoraSettings) -> None:
     print("\n  File System Paths")
     print("  " + "─" * 50)
 
@@ -284,7 +288,7 @@ def _summary() -> int:
     passes   = [r for r in _results if r[0] == "PASS"]
 
     print("\n  " + "═" * 52)
-    print(f"  PREFLIGHT SUMMARY")
+    print("  PREFLIGHT SUMMARY")
     print(f"  {len(passes)} passed  |  {len(warnings)} warnings  |  {len(failures)} failed")
     print("  " + "═" * 52)
 

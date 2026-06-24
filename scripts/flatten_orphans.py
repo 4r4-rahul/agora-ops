@@ -9,7 +9,11 @@ no-ops only on BAG combos). Reads the orphan list live from /agora/reconcile.
 
 Usage:  python3 scripts/flatten_orphans.py [--dry]
 """
-import asyncio, json, sys, urllib.request
+import asyncio
+import json
+import sys
+import urllib.request
+
 from ib_insync import IB, Option, Order, TagValue
 
 DRY = "--dry" in sys.argv

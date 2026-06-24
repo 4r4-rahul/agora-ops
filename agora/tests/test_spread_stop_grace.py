@@ -20,7 +20,6 @@ from agora.lifecycle.position_manager import PositionManager
 def _pm():
     s = AgoraSettings()
     s.spread_stop_min_hold_days = 3
-    s.spread_stop_blowout_max_loss_frac = 0.85
     pm = PositionManager(settings=s)
     # Force the profit engine to HOLD so we deterministically reach the hard-stop block.
     pm._profit_engine.evaluate = lambda **k: SimpleNamespace(

@@ -14,7 +14,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import math
 import sys
 from datetime import date, timedelta
 from pathlib import Path
@@ -22,6 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pandas as pd
+
 from agora.backtester.synthetic_pricing import bs_greeks, bs_price, skewed_sigma
 
 
@@ -73,8 +73,9 @@ def run_comparison(
     target_delta: float = 0.20,
     delta_band: float = 0.05,
 ) -> None:
-    from agora.strategies.rules_engine import StrategyRulesEngine
     from unittest.mock import MagicMock
+
+    from agora.strategies.rules_engine import StrategyRulesEngine
 
     settings = MagicMock()
     settings.short_delta_target = target_delta

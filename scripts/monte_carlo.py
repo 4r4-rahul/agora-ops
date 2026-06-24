@@ -19,22 +19,21 @@ Usage:
     python scripts/monte_carlo.py SPY --start 2023-01-01 --end 2024-12-31 --balance 25000
 """
 
-import asyncio
-import sys
-import os
 import argparse
+import asyncio
+import os
+import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import numpy as np
-from typing import List, Tuple
 
+import numpy as np
 
 # ─────────────────────────────────────────────────────────────────
 #  Run walk-forward backtest once to get the actual trade PnL vector
 # ─────────────────────────────────────────────────────────────────
 
-async def _run_backtest(ticker: str, start: str, end: str, balance: float) -> Tuple[List[float], float]:
+async def _run_backtest(ticker: str, start: str, end: str, balance: float) -> tuple[list[float], float]:
     from trading_platform.backtester.engine import BacktestEngine
     engine = BacktestEngine(ticker=ticker, start=start, end=end, starting_balance=balance)
     result = await engine.run()
@@ -42,7 +41,7 @@ async def _run_backtest(ticker: str, start: str, end: str, balance: float) -> Tu
     return pnls, result.starting_balance
 
 
-def get_trade_pnls(ticker: str, start: str, end: str, balance: float) -> Tuple[List[float], float]:
+def get_trade_pnls(ticker: str, start: str, end: str, balance: float) -> tuple[list[float], float]:
     """Run walk-forward backtest and return (list_of_pnls, starting_balance)."""
     return asyncio.run(_run_backtest(ticker, start, end, balance))
 
@@ -62,7 +61,6 @@ def simulate(pnls: np.ndarray, starting_balance: float,
       - worst consecutive losing streak
     """
     rng = np.random.default_rng(seed)
-    n_trades = len(pnls)
 
     terminal_equity  = np.empty(n_sims)
     max_dd_dollars   = np.empty(n_sims)
@@ -129,7 +127,7 @@ def percentile_row(label: str, data: np.ndarray, fmt: str = "${:>+10,.0f}"):
           f" {f(p50):>12} │ {f(p75):>12} │ {f(p95):>12}")
 
 
-def report(pnls: List[float], starting_balance: float, results: dict,
+def report(pnls: list[float], starting_balance: float, results: dict,
            n_sims: int):
     """Print the Monte Carlo report."""
     te = results["terminal_equity"]
@@ -174,7 +172,7 @@ def report(pnls: List[float], starting_balance: float, results: dict,
     prob_profitable = (te > starting_balance).sum() / n_sims * 100
     prob_double = (te > starting_balance * 2).sum() / n_sims * 100
 
-    print(f"\n  📊 Key Risk Metrics:")
+    print("\n  📊 Key Risk Metrics:")
     print(f"     Ruin probability:          {ruin_pct:>6.2f}%  "
           f"{'✅ <1%' if ruin_pct < 1 else '⚠️  >1%' if ruin_pct < 5 else '🔴 >5%'}")
     print(f"     P(profitable):             {prob_profitable:>6.1f}%  "
@@ -193,7 +191,7 @@ def report(pnls: List[float], starting_balance: float, results: dict,
     expectancy = wr * avg_win - (1 - wr) * avg_loss
     edge_per_trade = expectancy
 
-    print(f"\n  📊 Trade Edge:")
+    print("\n  📊 Trade Edge:")
     print(f"     Avg winner:       ${avg_win:>+,.0f}")
     print(f"     Avg loser:        ${-avg_loss:>+,.0f}")
     print(f"     Win rate:          {wr*100:.1f}%")
@@ -206,13 +204,13 @@ def report(pnls: List[float], starting_balance: float, results: dict,
         q = 1 - wr
         # Approximate risk of ruin = ((q / (p*b))^N) simplified check
         kelly_f = wr - q / b if b > 0 else 0
-        print(f"\n  📊 Kelly Criterion:")
+        print("\n  📊 Kelly Criterion:")
         print(f"     Reward/Risk (b):  {b:.2f}")
         print(f"     Kelly fraction:   {kelly_f*100:.1f}%  "
               f"{'✅ >0 (edge exists)' if kelly_f > 0 else '🔴 ≤0 (no edge)'}")
 
     # ── Histogram summary ────────────────────────────────────────
-    print(f"\n  📊 Terminal Equity Distribution:")
+    print("\n  📊 Terminal Equity Distribution:")
     bins = [0, starting_balance * 0.5, starting_balance, starting_balance * 1.5,
             starting_balance * 2, starting_balance * 3, float("inf")]
     labels = ["Ruin (<50%)", "Losing (50-100%)", "Small gain (100-150%)",
@@ -232,7 +230,7 @@ def report(pnls: List[float], starting_balance: float, results: dict,
         and np.percentile(ddp, 95) < 50
     )
     if ok:
-        print(f"  ✅ PASS — Strategy is robust to trade-order randomization")
+        print("  ✅ PASS — Strategy is robust to trade-order randomization")
         print(f"           Ruin risk is negligible ({ruin_pct:.2f}%), "
               f"median DD {np.median(ddp):.1f}%")
     else:

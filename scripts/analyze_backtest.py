@@ -16,6 +16,7 @@ print()
 
 print("=== RE-ENTRY PROBLEM ===")
 from collections import Counter
+
 day_dir = Counter()
 for t in trades:
     key = f"{t['date']}_{t['direction']}"

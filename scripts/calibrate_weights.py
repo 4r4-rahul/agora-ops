@@ -13,7 +13,6 @@ REVIEW the output before touching any code. Never auto-apply.
 """
 
 import argparse
-import json
 import os
 import sys
 from pathlib import Path
@@ -21,7 +20,7 @@ from pathlib import Path
 # Allow running from repo root
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from agora.ops.conviction_calibrator import calibrate, MIN_TRADES_FOR_PROPOSAL
+from agora.ops.conviction_calibrator import MIN_TRADES_FOR_PROPOSAL, calibrate
 
 
 def main() -> None:

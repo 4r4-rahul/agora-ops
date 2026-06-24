@@ -38,7 +38,7 @@ async def main():
         try:
             fi = yf.Ticker(t).fast_info
             yf_px[t] = float(fi.get("lastPrice") or fi.get("previousClose") or 0)
-        except Exception as e:
+        except Exception:
             yf_px[t] = 0.0
 
     MDT = {1: "LIVE", 2: "frozen", 3: "DELAYED", 4: "delayed-frozen"}

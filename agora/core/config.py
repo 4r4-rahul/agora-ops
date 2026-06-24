@@ -219,20 +219,15 @@ class AgoraSettings(BaseSettings):
     # ── Credit-spread stop grace (THE expectancy lever) ─────────────────────────
     spread_stop_min_hold_days: int = Field(
         default=3, ge=0, le=10,
-        description="Grace window (days) before the 2x-credit HARD STOP may fire on a CREDIT spread. "
-                    "Root finding: credit spreads (the biggest cohort, 18 closes) won only 6% vs a "
-                    "~70% theta-trade norm — because the 2x-credit hard stop tripped on DAY-1 mark "
-                    "noise (bid-ask/natural mark, not real loss; 16/18 closed at exactly 1.0d at a "
-                    "loss, all entered at 38-42 DTE). Credit spreads are theta trades + DEFINED-RISK, "
-                    "so they must ride day-1 noise. Within the grace, the hard stop is suppressed "
-                    "UNLESS a genuine blowout (see spread_stop_blowout_max_loss_frac) — which is the "
-                    "only real defined risk. Mirrors spread_exit_llm_min_hold_days=3. THE highest-"
-                    "leverage expectancy fix; tune up if win rate is still suppressed.")
-    spread_stop_blowout_max_loss_frac: float = Field(
-        default=0.85, ge=0.5, le=1.0,
-        description="During the credit-spread stop grace, a loss at/under this fraction of max_loss "
-                    "still hard-stops immediately (a genuine adverse move, not mark noise). 0.85 = "
-                    "stop if within 15% of max defined loss; otherwise hold for theta.")
+        description="Grace window (days) before the per-ticker SURVEILLANCE structure stop may fire on a "
+                    "CREDIT spread (PositionManager._within_stop_grace). Root finding: credit spreads (the "
+                    "biggest cohort, 18 closes) won only 6% vs a ~70% theta-trade norm — because the stop "
+                    "tripped on DAY-1 mark noise (bid-ask/natural mark, not real loss; 16/18 closed at "
+                    "exactly 1.0d at a loss, all entered at 38-42 DTE). Credit spreads are theta trades + "
+                    "DEFINED-RISK, so they must ride day-1 noise. Within the grace, the structure stop is "
+                    "suppressed; a genuine blowout is still caught independently by the surveillance "
+                    "BLOWOUT backstop (85% of max loss), so tail risk is never masked. Mirrors "
+                    "spread_exit_llm_min_hold_days=3. THE highest-leverage expectancy fix.")
     # ── Edge-aware sizing (C-suite rank 12 — SHIPPED DARK) ───────────────────────
     edge_sizing_enabled: bool = Field(default=True, description="S2.4: scale position size by a (pillar,regime) cell's real-fill Sharpe (StrategyHealth). ONLY ever sizes DOWN (capped at 1.0) → purely protective. Enabled 2026-06-18 with Tier 2: exits are now fixed and down-only sizing carries no up-sizing risk; ramps with data (needs >=edge_min_sample closes/cell).")
     edge_size_up_max: float = Field(default=1.0, ge=1.0, le=2.0, description="Hard cap on the edge multiplier — PINNED at 1.0 so no subset is ever sized UP on unproven edge. Raise only with proven positive edge.")
