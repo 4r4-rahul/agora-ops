@@ -119,24 +119,22 @@ def test_credit_mult_scales_and_clamps():
 
 
 # ── size_factor (risk-budgeted companion) ─────────────────────────────────────────────
-def test_size_factor_smaller_for_higher_vol():
-    assert size_factor(DEFAULTS.base_hv) == 1.0          # baseline → full size
-    assert size_factor(0.15) == 1.0                      # calmer than baseline → capped at 1.0 (down-only)
-    assert size_factor(0.60) == pytest.approx(0.5)       # 2× vol → half size (constant $ risk)
-    assert size_factor(5.0) == DEFAULTS.size_floor       # absurd vol → size floor
+def test_size_factor_pure_vol_math_uncapped():
+    # PURE baseHV/HV — the machine decides the multiplier, NO floor/ceil clamp
+    assert size_factor(DEFAULTS.base_hv) == 1.0          # baseline → 1.0
+    assert size_factor(0.60) == pytest.approx(0.5)       # 2× vol → half size
+    assert size_factor(0.15) == pytest.approx(2.0)       # half vol → 2× (UNCAPPED up)
+    assert size_factor(0.06) == pytest.approx(5.0)       # very calm → 5× (no ceil — physical cap is downstream)
+    assert size_factor(1.20) == pytest.approx(0.25)      # very volatile → 0.25× (no floor — 1-contract min downstream)
 
 
-def test_size_factor_two_sided_ceil():
-    # ceil > 1.0 → a calm name is sized UP (risk parity), bounded by the ceil
-    assert size_factor(0.15, ceil=1.5) == 1.5            # 0.30/0.15 = 2.0 → clamped to ceil 1.5
-    assert size_factor(0.20, ceil=1.5) == 1.5            # 0.30/0.20 = 1.5 → exactly the ceil
-    assert size_factor(0.60, ceil=1.5) == pytest.approx(0.5)   # ceil never affects the DOWN side
-    assert size_factor(0.30, ceil=2.5) == 1.0            # baseline vol stays 1.0 regardless of ceil
+def test_size_factor_inverse_in_vol():
+    # strictly decreasing in vol (risk parity), unbounded both ways
+    assert size_factor(0.10) > size_factor(0.30) > size_factor(0.90)
 
 
 def test_size_factor_garbage_is_full():
-    assert size_factor(None) == 1.0 and size_factor(0.0) == 1.0
-    assert size_factor(None, ceil=2.0) == 1.0            # garbage → 1.0 even two-sided
+    assert size_factor(None) == 1.0 and size_factor(0.0) == 1.0 and size_factor(-0.5) == 1.0
 
 
 def test_stop_and_size_are_inverse_for_risk_parity():

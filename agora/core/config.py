@@ -541,21 +541,13 @@ class AgoraSettings(BaseSettings):
     adaptive_entry_sizing_enabled: bool = Field(
         default=True,
         description="PER-TICKER ADAPTIVE ENTRY SIZING (2026-06-24): scale each entry's contract count by "
-                    "the ticker's vol-based size factor (agora.ops.adaptive_stop.size_factor = "
-                    "clamp(baseHV/HV, 0.4, adaptive_size_ceil)) so a volatile name (TSLA HV58% → 0.52×) "
-                    "takes a SMALLER position and a calm name a LARGER one — risk-parity around the "
-                    "adaptive STOP for ~constant $ risk per trade (1R). Bounded by max_contracts_per_trade "
-                    "(hard 10) and the daily-loss breaker. Calm/unprofiled tickers ≥ 1.0×.",
-    )
-    adaptive_size_ceil: float = Field(
-        default=1.5, ge=1.0, le=2.5,
-        description="TWO-SIDED cap on the per-ticker vol size factor (2026-06-24). 1.0 = DOWN-ONLY "
-                    "(volatile names shrink, calm names unchanged — purely protective). >1.0 = TWO-SIDED "
-                    "RISK PARITY: a calm/low-vol name is sized UP (more contracts for the same $ risk, "
-                    "since its adaptive stop is tighter), bounded by this ceiling AND max_contracts_per_trade. "
-                    "Default 1.5 — testing full two-sided adaptivity on PAPER (the up-side is unproven, so "
-                    "it is bounded + breaker-backstopped; revert to 1.0 to make sizing down-only again). "
-                    "NB: this is vol RISK-PARITY, not edge-betting; edge_sizing stays strictly down-only.",
+                    "the ticker's PURE vol-math size factor (agora.ops.adaptive_stop.size_factor = "
+                    "baseHV/HV, NO artificial floor/ceil — the machine decides the multiplier from realized "
+                    "vol) so a volatile name (TSLA HV58% → 0.52×) takes a SMALLER position and a calm name "
+                    "(SPY HV16% → 1.9×) a LARGER one — risk-parity around the adaptive STOP for ~constant $ "
+                    "risk per trade (1R). The ONLY bound is PHYSICAL: max_contracts_per_trade (fillability / "
+                    "buying-power) + the 1-contract minimum + the daily-loss breaker — NOT an adaptivity cap. "
+                    "VOL sizing is two-sided; edge_sizing stays strictly down-only (no betting up on edge).",
     )
     surveillance_act_enabled: bool = Field(
         default=True,

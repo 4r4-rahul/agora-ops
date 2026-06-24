@@ -65,8 +65,9 @@ class StrategyRulesEngine:
     def _vol_size_factor(self, ticker: str) -> float:
         """Per-ticker RISK-PARITY entry-size factor from the ticker's realized vol (agora.ops.adaptive_stop):
         a volatile name takes a smaller position and a calm name a larger one, so each risks ~1R around its
-        adaptive stop. Two-sided up to adaptive_size_ceil (1.0 = down-only). Returns 1.0 when disabled or
-        for an unprofiled ticker. Bounded downstream by max_contracts_per_trade. Cached; never raises."""
+        adaptive stop. PURE vol-math (baseHV/HV) — no adaptivity cap; the machine decides the multiplier.
+        Returns 1.0 when disabled or for an unprofiled ticker. Bounded ONLY downstream by the physical
+        max_contracts_per_trade + the 1-contract minimum. Cached; never raises."""
         if not getattr(self._settings, "adaptive_entry_sizing_enabled", False):
             return 1.0
         tk = (ticker or "").upper()
@@ -79,7 +80,7 @@ class StrategyRulesEngine:
                 self._hv_cache[tk] = None
         try:
             from agora.ops.adaptive_stop import size_factor
-            return size_factor(self._hv_cache[tk], float(getattr(self._settings, "adaptive_size_ceil", 1.0)))
+            return size_factor(self._hv_cache[tk])   # pure vol-math; physical bound is max_contracts
         except Exception:
             return 1.0
 
@@ -966,8 +967,8 @@ class StrategyRulesEngine:
         base = max(1, int(settings.risk_per_trade_dollars / max_loss_per_contract))
         sized = max(1, round(base * size_multiplier))
         # Per-ticker ADAPTIVE entry sizing (risk parity): shrink a volatile name / enlarge a calm one so
-        # each risks ~1R around its adaptive stop. vol_size_factor is two-sided up to adaptive_size_ceil
-        # (already clamped by adaptive_stop.size_factor); the hard max_contracts cap below bounds any up-size.
+        # each risks ~1R around its adaptive stop. vol_size_factor is the PURE uncapped vol-math multiplier;
+        # the hard max_contracts cap below + the max(1,...) floor are the ONLY (physical) bounds.
         sized = max(1, round(sized * max(0.0, vol_size_factor)))
         sized = min(sized, settings.max_contracts_per_trade)
         # PAPER operational-effectiveness mode (2026-06-24): scale contracts UP so the full

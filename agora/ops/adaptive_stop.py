@@ -44,7 +44,6 @@ class AdaptiveStopConfig:
     near_dte: int = 7                 # within this many days to expiry, start tightening for theta
     theta_floor: float = 0.7          # at expiry the stop is 70% of its far-dated width (cut sooner)
     risk_off_tighten: float = 0.8     # risk_off multiplies the stop width by this (cut 20% sooner)
-    size_floor: float = 0.4           # never size below 40% of base even for very high vol
 
 
 DEFAULTS = AdaptiveStopConfig()
@@ -110,26 +109,24 @@ def adaptive_credit_stop_mult(hv: float | None, dte: int | None, regime: str | N
     return round(_clamp(raw, cfg.credit_mult_floor, cfg.credit_mult_ceil), 4)
 
 
-def size_factor(hv: float | None, ceil: float = 1.0, cfg: AdaptiveStopConfig = DEFAULTS) -> float:
+def size_factor(hv: float | None, cfg: AdaptiveStopConfig = DEFAULTS) -> float:
     """Risk-parity sizing companion: position scales INVERSELY with vol so $ risk per trade is ~constant
     around the adaptive stop (a volatile name's wider stop is offset by fewer contracts; a calm name's
-    tighter stop allows more). Returns clamp(baseHV/HV, size_floor, ceil).
-
-    LIVE since 2026-06-24 — consumed by StrategyRulesEngine._vol_size_factor (gated by
-    adaptive_entry_sizing_enabled). `ceil` = adaptive_size_ceil: 1.0 → DOWN-ONLY (calm names capped at
-    1.0, purely protective); >1.0 → TWO-SIDED (calm names sized UP to `ceil`, bounded). Never returns
-    above `ceil` or below size_floor."""
+    tighter stop allows more). PURE vol-math — NO artificial floor/ceil clamp (the machine decides the
+    multiplier from realized vol): a very calm name can scale up several×, a very volatile name down
+    toward zero. The ONLY bound is downstream and PHYSICAL — max_contracts_per_trade (fillability /
+    buying-power) and the 1-contract minimum in _size_contracts — NOT an adaptivity cap. Returns 1.0
+    only when vol is unknown/garbage (hv ≤ 0)."""
     if not hv or hv <= 0:
         return 1.0
-    return round(_clamp(cfg.base_hv / hv, cfg.size_floor, max(1.0, ceil)), 3)
+    return round(cfg.base_hv / hv, 3)
 
 
 def explain(ticker: str, hv: float | None, dte: int | None, regime: str | None, *,
-            iv_ratio: float | None = None, size_ceil: float = 1.0,
-            cfg: AdaptiveStopConfig = DEFAULTS) -> dict:
+            iv_ratio: float | None = None, cfg: AdaptiveStopConfig = DEFAULTS) -> dict:
     """One dict describing the full adaptive stop for a ticker/position — for the UI and shadow logging.
-    Exposes every factor so the decision is transparent (no black box). size_ceil = adaptive_size_ceil
-    (1.0 down-only / >1.0 two-sided) so the UI shows the same size factor entries actually use."""
+    Exposes every factor so the decision is transparent (no black box). size_factor is the PURE vol-math
+    multiplier (no adaptivity cap); the physical max_contracts bound is applied in _size_contracts."""
     return {
         "ticker": ticker,
         "hv": round(hv, 4) if hv else None,
@@ -137,7 +134,7 @@ def explain(ticker: str, hv: float | None, dte: int | None, regime: str | None, 
         "regime": regime,
         "debit_stop_pct": adaptive_debit_stop_pct(hv, dte, regime, iv_ratio=iv_ratio, cfg=cfg),
         "credit_stop_mult": adaptive_credit_stop_mult(hv, dte, regime, iv_ratio=iv_ratio, cfg=cfg),
-        "size_factor": size_factor(hv, size_ceil, cfg),
+        "size_factor": size_factor(hv, cfg),
         "vol_factor": round(vol_factor(hv, cfg), 3),
         "theta_factor": round(theta_factor(dte, cfg), 3),
         "regime_factor": round(regime_factor(regime, cfg), 3),
