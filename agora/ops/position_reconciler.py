@@ -302,9 +302,21 @@ def _adopt_group(position_mgr, sym, expiry, legs, detailed, OpenPosition, Spread
         notes="ADOPTED by position reconciler (broker leg untracked in DB)")
     position_mgr.add_position(pos)
     import logging
-    logging.getLogger(__name__).warning(
+    _log = logging.getLogger(__name__)
+    _log.warning(
         "PositionHealer ADOPTED %s %s %dx (%s) — was an untracked broker position",
         sym, strat.value, contracts, expiry)
+    # SIZE-SANITY ALERT (2026-06-25): the engine NEVER opens more than max_contracts_per_trade, so an
+    # adopted broker position larger than that is an anomaly — accumulated/legacy paper-account state or
+    # a leg-quantity mismatch — and must NOT masquerade as a routine adoption. Surface it distinctly. We
+    # still adopt it (an untracked real position is worse than a flagged one) — this is observability so
+    # an oversized position (e.g. a 59-contract DIA = 44% of a $10k AUM) is visible, not silent.
+    _cap = int(getattr(getattr(position_mgr, "_settings", None), "max_contracts_per_trade", 10) or 10)
+    if contracts > _cap:
+        _log.warning(
+            "ADOPTED OVERSIZED: %s %s %dx EXCEEDS engine cap %d — broker position is larger than the "
+            "engine would ever open (accumulated/legacy paper state or leg mismatch); review/clear",
+            sym, strat.value, contracts, _cap)
     return True
 
 

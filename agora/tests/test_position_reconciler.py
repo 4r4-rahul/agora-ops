@@ -231,3 +231,49 @@ def test_end_to_end_db_vs_ibkr_partial_fill():
     assert not rep.clean
     assert rep.qty_mismatch[0]["db_qty"] == -2
     assert rep.qty_mismatch[0]["ibkr_qty"] == -1
+
+
+# ── adopted-position SIZE-SANITY ALERT (2026-06-25) ────────────────────────────
+# The contract "leak" (DIA 59, NOK 12 = 44% of AUM) was NOT engine sizing — it was the reconciler
+# adopting large LEGACY broker positions silently. These assert the oversized-adoption alert fires
+# distinctly while still tracking the position (untracked is worse than flagged).
+def _do_adopt(qty: int, sym: str = "DIA", cap: int = 10):
+    import types as _t
+
+    from agora.core.models import (
+        OpenPosition,
+        PositionStatus,
+        SpreadLeg,
+        StrategyPillar,
+        StrategyType,
+    )
+    from agora.ops.position_reconciler import _adopt_group
+    adopted = []
+    pm = _t.SimpleNamespace(add_position=lambda pos: adopted.append(pos),
+                            _settings=_t.SimpleNamespace(max_contracts_per_trade=cap))
+    legs = [{"right": "C", "strike": 440.0, "ibkr_qty": qty}]
+    detailed = {(sym, "C", 440.0, "20260724"): (qty, 250.0)}
+    ok = _adopt_group(pm, sym, "20260724", legs, detailed,
+                      OpenPosition, SpreadLeg, StrategyType, StrategyPillar, PositionStatus)
+    return ok, adopted
+
+
+class TestAdoptOversizedAlert:
+    def test_oversized_adoption_is_flagged(self, caplog):
+        import logging
+        with caplog.at_level(logging.WARNING):
+            ok, _ = _do_adopt(59)
+        assert ok is True
+        assert "ADOPTED OVERSIZED" in caplog.text and "59" in caplog.text
+
+    def test_normal_adoption_not_flagged(self, caplog):
+        import logging
+        with caplog.at_level(logging.WARNING):
+            ok, _ = _do_adopt(3)
+        assert ok is True
+        assert "ADOPTED OVERSIZED" not in caplog.text   # routine size → no anomaly alert
+
+    def test_still_adopts_at_real_size_when_oversized(self, caplog):
+        # observability ONLY — the oversized position must still be tracked, at its real broker size
+        _ok, adopted = _do_adopt(40)
+        assert len(adopted) == 1 and adopted[0].contracts == 40
