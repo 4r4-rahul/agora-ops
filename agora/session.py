@@ -2032,6 +2032,7 @@ class AgoraSession:
                 volume = raw["Volume"] if "Volume" in raw else raw.xs("Volume", axis=1, level=0)
 
                 promoted = []
+                _funnel_evals = []   # entry-funnel observability (read-only; zero trade impact)
                 for ticker in universe:
                     if ticker not in close.columns:
                         continue
@@ -2054,6 +2055,14 @@ class AgoraSession:
                         trigger = f"move {signed_pct:+.1f}% in 30m"
                     elif vol_spike:
                         trigger = f"vol spike {latest_vol/avg_vol:.1f}× avg"
+
+                    # Entry-funnel: record THIS ticker's move/vol + whether it tripped a trigger, so we
+                    # can later see why a swinging name never surfaces (its real move vs the 1.5% bar).
+                    _funnel_evals.append({
+                        "ticker": ticker, "move_pct": signed_pct,
+                        "vol_ratio": (latest_vol / avg_vol) if avg_vol > 0 else 0.0,
+                        "promoted": trigger is not None, "trigger": trigger,
+                    })
 
                     if trigger and ticker not in self._tier1:
                         # S1: live path = enqueue URGENT into the engine; the _priority_queue
@@ -2093,6 +2102,13 @@ class AgoraSession:
 
                 if promoted:
                     logger.info("Price monitor promoted: %s", ", ".join(promoted))
+                # Entry-funnel observability — persist every evaluated ticker's move/vol/promotion this
+                # cycle (read-only; record_monitor_evals never raises, so it can't disturb the monitor).
+                try:
+                    from agora.ops.entry_funnel import record_monitor_evals
+                    record_monitor_evals(self._settings.db_path, _funnel_evals)
+                except Exception:
+                    pass
 
                 # ── Intraday macro refresh check ───────────────────
                 await self._check_macro_refresh(close)

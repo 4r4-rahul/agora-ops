@@ -639,6 +639,7 @@ tr.pos-detail-row td { padding: 0; background: var(--bg1); }
       <div id="te-stops" style="margin-top:6px;font-size:11px;color:#9ab"></div>
       <div id="te-surv" style="margin-top:6px;font-size:11px;color:#9ab"></div>
       <div id="te-calib" style="margin-top:6px;font-size:11px;color:#9ab"></div>
+      <div id="te-funnel" style="margin-top:6px;font-size:11px;color:#9ab"></div>
       <div id="te-list" style="margin-top:6px;font-size:11px;color:#9ab"></div>
     </div>
 
@@ -2266,6 +2267,31 @@ async function fetchModels() {
   } catch(e) {}
 }
 
+async function fetchEntryFunnel() {
+  const el = document.getElementById('te-funnel');
+  if (!el) return;
+  try {
+    const d = await (await fetch('/agora/entry-funnel')).json();
+    const f = d.funnel || [];
+    if (!f.length) { el.innerHTML = '<span style="color:#789">🔬 Entry funnel: monitor warming — no evaluations recorded yet today.</span>'; return; }
+    const st = d.stages || {}; const hiNever = d.high_vol_never_promoted || [];
+    el.innerHTML = '<div style="color:#678;margin:4px 0 3px">🔬 Entry funnel — why each ticker does/doesn\'t trade (read-only): '
+      + `never-promoted ${st.never_promoted||0} | promoted ${st.promoted_only||0} | reached gates ${st.reached_gates||0}</div>`
+      + (hiNever.length ? `<div style="color:#e76;margin-bottom:3px">⚠️ high-vol MISSED (moved, never tripped the 1.5% bar): ${hiNever.join(', ')}</div>` : '')
+      + '<table style="width:100%;border-collapse:collapse">'
+      + '<tr style="color:#678"><td style="padding:1px 6px">ticker</td><td style="padding:1px 6px">HV</td><td style="padding:1px 6px">maxMove</td><td style="padding:1px 6px">evals</td><td style="padding:1px 6px">stage</td><td style="padding:1px 6px">gate</td></tr>'
+      + f.slice(0,12).map(x => {
+          const scol = x.stage==='reached_gates'?'#5d9':(x.stage==='promoted_only'?'#d9a':'#e76');
+          return `<tr><td style="padding:2px 6px"><b>${x.ticker}</b></td>`
+            + `<td style="padding:2px 6px;color:#9ab">${x.hv?Math.round(x.hv*100)+'%':'—'}</td>`
+            + `<td style="padding:2px 6px;color:${(x.max_move_pct||0)>=1.5?'#5d9':'#9ab'}">${(x.max_move_pct||0).toFixed(1)}%</td>`
+            + `<td style="padding:2px 6px;color:#789">${x.evaluated_n||0}</td>`
+            + `<td style="padding:2px 6px;color:${scol}">${x.stage}</td>`
+            + `<td style="padding:2px 6px;color:#9ab">${(x.gate_outcome||'—').slice(0,40)}</td></tr>`;
+        }).join('') + '</table>';
+  } catch(e) { el.innerHTML = '<span style="color:#789">🔬 Entry funnel: —</span>'; }
+}
+
 async function fetchTickerEngine() {
   try {
     const r = await fetch('/agora/ticker-settings');
@@ -3366,7 +3392,7 @@ async function fetchToday() {
   await Promise.all([
     fetchHealth(), fetchOrders(), fetchPositions(), fetchAttribution(), fetchSignals(),
     fetchMarket(), fetchReadiness(), fetchCsuite(), fetchToday(), fetchLong(), fetchExits(), fetchCosts(), fetchFactCheck(),
-    fetchPerformance(), fetchExpectancy(), fetchLifecycle(), fetchModels(), fetchRecs(), fetchShadow(), fetchTickerEngine(),
+    fetchPerformance(), fetchExpectancy(), fetchLifecycle(), fetchModels(), fetchRecs(), fetchShadow(), fetchTickerEngine(), fetchEntryFunnel(),
   ]);
 
   // TWS live data — fetch once on load then every 30s (makes a real IBKR connection)
@@ -3378,6 +3404,7 @@ async function fetchToday() {
   setInterval(fetchRecs,        60_000);  // model analyst recommendations
   setInterval(fetchShadow,      60_000);  // shadow validation (Rung 2)
   setInterval(fetchTickerEngine, 60_000); // per-ticker adaptive engine (Phase 2 shadow)
+  setInterval(fetchEntryFunnel, 60_000);  // entry-funnel observability (read-only)
   setInterval(fetchHealth,      10_000);
   setInterval(fetchOrders,       8_000);  // orders refresh every 8s — catches fills fast
   setInterval(fetchPositions,   15_000);

@@ -84,6 +84,15 @@ class StrategyRulesEngine:
         except Exception:
             return 1.0
 
+    def _record_gate(self, ticker: str, outcome: str) -> None:
+        """Entry-funnel observability: record a (promoted) ticker's entry-gate outcome so the funnel shows
+        WHERE each name falls out. Read-only; never raises → can't disturb the entry path."""
+        try:
+            from agora.ops.entry_funnel import record_gate_outcome
+            record_gate_outcome(self._settings.db_path, ticker, outcome)
+        except Exception:
+            pass
+
     @staticmethod
     def _dynamic_rr_floor(iv_rank: float | None, vix: float | None) -> float:
         """Scale R/R floor with IV environment — low IV accepts leaner setups."""
@@ -199,6 +208,7 @@ class StrategyRulesEngine:
                 f"{vix:.1f}" if vix is not None else "n/a",
                 max_gain, max_loss, width,
             )
+            self._record_gate(conviction.ticker, f"rejected: R/R {rr_ratio:.2f}<{rr_floor:.2f} floor")
             return None
 
         # Minimum absolute credit floor — thin credits cause IBKR leg rejections in live;
@@ -257,6 +267,7 @@ class StrategyRulesEngine:
                 "RISK CAP: %s — 1 contract max-loss $%.0f exceeds per-trade cap $%.0f — skip",
                 conviction.ticker, max_loss, _risk_cap,
             )
+            self._record_gate(conviction.ticker, f"rejected: risk cap (max_loss ${max_loss:.0f}>${_risk_cap:.0f})")
             return None
         # Edge-aware sizing (LIVE since 2026-06-18, edge_sizing_enabled=True). Only ever sizes DOWN
         # a proven negative-edge (pillar, regime) cell by its real-fill Sharpe; never up. A cell
@@ -270,6 +281,7 @@ class StrategyRulesEngine:
         except Exception:
             pass
 
+        self._record_gate(conviction.ticker, f"passed→order ({contracts}x)")
         return TradeRecommendation(
             session_id=conviction.session_id,
             ticker=conviction.ticker,

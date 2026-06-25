@@ -948,6 +948,45 @@ async def get_ticker_settings() -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+@router.get("/entry-funnel")
+async def get_entry_funnel() -> JSONResponse:
+    """Per-ticker ENTRY FUNNEL (read-only observability). Shows WHERE each ticker falls out of the entry
+    path each day: evaluated by the price monitor → promoted (tripped a ≥1.5% move / 2× volume trigger) →
+    entry gates (passed / rejected, with reason). Surfaces the missed-mover gap — high-vol names that move
+    but never trip the trigger (the AAOI symptom): max_move_pct vs the 1.5% bar shows exactly why."""
+    import sqlite3
+
+    from agora.ops.entry_funnel import funnel_summary
+    session = get_session()
+    db = str(session._settings.db_path)
+    try:
+        rows = funnel_summary(db)
+        hv = {}
+        try:
+            _c = sqlite3.connect(db, timeout=8)
+            hv = {r[0]: r[1] for r in _c.execute(
+                "SELECT ticker, hv_annual FROM ticker_profiles WHERE hv_annual IS NOT NULL")}
+            _c.close()
+        except Exception:
+            pass
+        for r in rows:
+            r["hv"] = hv.get(r["ticker"])
+        stages = {s: sum(1 for r in rows if r["stage"] == s)
+                  for s in ("never_promoted", "promoted_only", "reached_gates")}
+        hi_never = [r["ticker"] for r in rows
+                    if r["stage"] == "never_promoted" and (r.get("hv") or 0) >= 0.5]
+        return JSONResponse({
+            "funnel": rows,
+            "total": len(rows),
+            "stages": stages,
+            "high_vol_never_promoted": hi_never[:25],
+            "note": "A high-vol name that's evaluated but never promoted (max_move_pct below the 1.5% "
+                    "bar) is a missed mover. Promoted-but-rejected shows the gate that killed it.",
+        })
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 @router.get("/health")
 async def get_health() -> JSONResponse:
     """
