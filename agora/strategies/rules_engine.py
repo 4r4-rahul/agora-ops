@@ -128,6 +128,7 @@ class StrategyRulesEngine:
         returns None, and the caller falls back to the engine's own recommendation.
         """
         if conviction.gate == "no_trade":
+            self._record_gate(conviction.ticker, "no_trade (conviction gate)")
             return None
         if spot <= 0:
             return None
@@ -159,6 +160,7 @@ class StrategyRulesEngine:
         expiry, chain_slice = self._select_expiry(options_chain, target_dte)
         if expiry is None or chain_slice is None:
             logger.debug("No suitable expiry found for %s at %d DTE", conviction.ticker, target_dte)
+            self._record_gate(conviction.ticker, f"rejected: no suitable expiry at {target_dte}DTE")
             return None
 
         # Build legs — use dynamic delta if provided
@@ -167,6 +169,7 @@ class StrategyRulesEngine:
         if not legs:
             logger.info("No legs built for %s | strategy=%s expiry=%s spot=%.2f",
                         conviction.ticker, strategy_type.value, expiry, spot)
+            self._record_gate(conviction.ticker, "rejected: no legs built")
             return None
 
         # Liquidity guard: a leg with mid_price<=0 has no bid AND no ask — it distorts the net
@@ -176,6 +179,7 @@ class StrategyRulesEngine:
         if _bad:
             logger.info("Rejecting %s %s: %d leg(s) with no quote (mid<=0) — illiquid strike",
                         conviction.ticker, strategy_type.value, len(_bad))
+            self._record_gate(conviction.ticker, f"rejected: illiquid strike ({len(_bad)} leg(s) no quote)")
             return None
 
         # Compute P&L metrics
@@ -219,6 +223,7 @@ class StrategyRulesEngine:
             if credit_per_share < credit_floor:
                 logger.info("MIN CREDIT gate: %s credit=%.2f/sh < $%.2f floor — skip",
                             conviction.ticker, credit_per_share, credit_floor)
+                self._record_gate(conviction.ticker, f"rejected: min credit {credit_per_share:.2f}<${credit_floor:.2f}")
                 return None
 
             # CREDIT/WIDTH gate (binding edge check for credit verticals). A genuine ~20-delta
@@ -235,6 +240,7 @@ class StrategyRulesEngine:
                 if cr_w < cr_floor:
                     logger.info("CREDIT/WIDTH gate: %s cr_w=%.2f < %.2f — negative-EV credit "
                                 "spread, skip", conviction.ticker, cr_w, cr_floor)
+                    self._record_gate(conviction.ticker, f"rejected: credit/width {cr_w:.2f}<{cr_floor:.2f}")
                     return None
 
         # Cost-to-width gate: debit spreads where the premium exceeds the max allowed
@@ -249,6 +255,7 @@ class StrategyRulesEngine:
                     conviction.ticker, debit_per_contract, width * 100,
                     ratio * 100, self._settings.max_debit_to_width_ratio * 100,
                 )
+                self._record_gate(conviction.ticker, f"rejected: cost/width {ratio*100:.0f}%>max")
                 return None
 
         # Per-ticker risk cap (Phase 1 wiring): the ticker's LIVE override if one exists, else the
