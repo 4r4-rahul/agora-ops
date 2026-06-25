@@ -196,12 +196,16 @@ class TestVolSizeFactor:
         return StrategyRulesEngine(settings=s)
 
     def test_volatile_ticker_sizes_down(self):
-        # PURE vol-math, no floor: TSLA HV 0.58 → 0.30/0.58 ≈ 0.52
-        assert self._engine()._vol_size_factor("TSLA") == pytest.approx(0.52, abs=0.01)
+        # PURE vol-math, no floor: volatile TSLA (HV 0.58) sized DOWN below 1.0× (base_hv-relative)
+        from agora.ops.adaptive_stop import DEFAULTS
+        sf = self._engine()._vol_size_factor("TSLA")
+        assert sf == pytest.approx(DEFAULTS.base_hv / 0.58, abs=0.01) and sf < 1.0
 
     def test_calm_ticker_sizes_up_uncapped(self):
-        # PURE vol-math, no ceil: calm KO (HV 0.16 → 0.30/0.16 = 1.875) sized UP, machine decides
-        assert self._engine()._vol_size_factor("KO") == pytest.approx(1.875, abs=0.01)
+        # PURE vol-math, no ceil: calm KO (HV 0.16) sized UP, machine decides (base_hv-relative)
+        from agora.ops.adaptive_stop import DEFAULTS
+        sf = self._engine()._vol_size_factor("KO")
+        assert sf == pytest.approx(DEFAULTS.base_hv / 0.16, abs=0.01) and sf > 1.0
 
     def test_unprofiled_ticker_is_full_size(self):
         assert self._engine()._vol_size_factor("NOPROFILE") == 1.0

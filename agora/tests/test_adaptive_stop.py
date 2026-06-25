@@ -30,8 +30,9 @@ def test_vol_factor_baseline_is_one():
 
 
 def test_vol_factor_scales_linearly():
-    assert vol_factor(0.60) == pytest.approx(2.0)        # 2× baseline (0.30)
-    assert vol_factor(0.15) == pytest.approx(0.5)        # ½ baseline
+    # base_hv-relative so the formula test survives recalibration of the baseline
+    assert vol_factor(2 * DEFAULTS.base_hv) == pytest.approx(2.0)     # 2× baseline
+    assert vol_factor(0.5 * DEFAULTS.base_hv) == pytest.approx(0.5)   # ½ baseline
 
 
 def test_vol_factor_garbage_hv_is_neutral():
@@ -84,8 +85,8 @@ def test_iv_factor_crush_widens_spike_tightens_bounded():
 
 # ── adaptive_debit_stop_pct (composition + clamps) ────────────────────────────────────
 def test_debit_stop_grounded_in_real_hv():
-    # TSLA HV ~0.58 far-dated neutral → hits the ceil (wide, needs room); KO HV ~0.16 → tight
-    assert adaptive_debit_stop_pct(0.58, 30, "neutral") == DEFAULTS.stop_ceil
+    # a high-vol name (HV ~0.90) far-dated neutral → hits the ceil (wide, needs room); KO HV ~0.16 → tight
+    assert adaptive_debit_stop_pct(0.90, 30, "neutral") == DEFAULTS.stop_ceil
     ko = adaptive_debit_stop_pct(0.16, 30, "neutral")
     assert DEFAULTS.stop_floor <= ko < 0.35              # calm name → tight stop
 
@@ -120,12 +121,12 @@ def test_credit_mult_scales_and_clamps():
 
 # ── size_factor (risk-budgeted companion) ─────────────────────────────────────────────
 def test_size_factor_pure_vol_math_uncapped():
-    # PURE baseHV/HV — the machine decides the multiplier, NO floor/ceil clamp
-    assert size_factor(DEFAULTS.base_hv) == 1.0          # baseline → 1.0
-    assert size_factor(0.60) == pytest.approx(0.5)       # 2× vol → half size
-    assert size_factor(0.15) == pytest.approx(2.0)       # half vol → 2× (UNCAPPED up)
-    assert size_factor(0.06) == pytest.approx(5.0)       # very calm → 5× (no ceil — physical cap is downstream)
-    assert size_factor(1.20) == pytest.approx(0.25)      # very volatile → 0.25× (no floor — 1-contract min downstream)
+    # PURE baseHV/HV — the machine decides the multiplier, NO floor/ceil clamp (base_hv-relative)
+    assert size_factor(DEFAULTS.base_hv) == 1.0               # baseline → 1.0
+    assert size_factor(2 * DEFAULTS.base_hv) == pytest.approx(0.5)    # 2× vol → half size
+    assert size_factor(0.5 * DEFAULTS.base_hv) == pytest.approx(2.0)  # half vol → 2× (UNCAPPED up)
+    assert size_factor(0.2 * DEFAULTS.base_hv) == pytest.approx(5.0)  # very calm → 5× (no ceil — physical cap downstream)
+    assert size_factor(4 * DEFAULTS.base_hv) == pytest.approx(0.25)   # very volatile → 0.25× (no floor — 1-contract min downstream)
 
 
 def test_size_factor_inverse_in_vol():
@@ -155,6 +156,15 @@ def test_explain_exposes_every_factor():
 def test_explain_handles_missing_hv():
     e = explain("XYZ", None, None, None)
     assert e["hv"] is None and DEFAULTS.stop_floor <= e["debit_stop_pct"] <= DEFAULTS.stop_ceil
+
+
+# ── base_hv calibration (the deliberate 2026-06-25 recenter) ──────────────────────────
+def test_base_hv_centered_on_universe_median():
+    # base_hv is the MEASURED universe median (0.46); a typical name must size ~1.0× and stop ~50%,
+    # NOT be systematically down-sized/widened. Pins the calibration so an accidental drift is caught.
+    assert DEFAULTS.base_hv == 0.46
+    assert size_factor(0.46) == pytest.approx(1.0, abs=0.02)
+    assert adaptive_debit_stop_pct(0.46, 30, "neutral") == pytest.approx(0.50, abs=0.01)
 
 
 # ── custom config plumbs through ──────────────────────────────────────────────────────

@@ -169,6 +169,15 @@ class LongOptionsAgent:
         self._dte_min  = int(getattr(self._settings, "long_options_min_dte", _DTE_MIN))
         self._dte_max  = int(getattr(self._settings, "long_options_max_dte", _DTE_MAX))
 
+    def _vol_size_factor(self, ticker: str) -> float:
+        """Per-ticker risk-parity entry-size factor — the SAME shared resolver the spread rules-engine uses
+        (agora.ops.ticker_profile.resolve_size_factor), so long options size adaptively and identically to
+        spreads. 1.0 when disabled / unprofiled; never raises. Bounded downstream by max_contracts."""
+        from agora.ops.ticker_profile import resolve_size_factor
+        return resolve_size_factor(
+            self._db_path, ticker,
+            enabled=getattr(self._settings, "adaptive_entry_sizing_enabled", False))
+
     # ── Signal calibration (deterministic learning loop) ───────────────────────
     # signal_stats is written on every position close (update_signal_stats). Here we
     # read it back so the live scorer self-adjusts: a signal that has historically lost
@@ -627,6 +636,13 @@ class LongOptionsAgent:
             contracts = min(max_contracts, 2)
         else:
             contracts = 1
+
+        # Per-ticker ADAPTIVE risk-parity sizing (2026-06-25): scale the quality-tier base by the ticker's
+        # realized vol so a volatile name takes fewer contracts and a calm one more — each risks ~1R around
+        # its adaptive stop. Uses the SAME shared resolver as the spread path, so long options finally size
+        # adaptively like spreads (they were the gap — the majority of trades sized only by quality tier).
+        # Guarded by adaptive_entry_sizing_enabled; bounded [1, max_contracts].
+        contracts = max(1, min(max_contracts, round(contracts * self._vol_size_factor(ticker))))
 
         # ── Per-trade dollar risk cap (v2) ────────────────────────────────────
         # No single directional long trade may risk more than max_premium_pct of the

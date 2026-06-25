@@ -11,12 +11,15 @@ import math
 import sqlite3
 import tempfile
 
+import pytest
+
 from agora.ops.ticker_profile import (
     _MIN_DAYS,
     all_profiles,
     build_profiles,
     characterize,
     get_profile,
+    resolve_size_factor,
     vol_scaled_cap_factor,
 )
 
@@ -127,3 +130,42 @@ def test_get_profile_missing_and_error_safe():
     assert get_profile(_db(), "NONE") is None
     assert get_profile("/nonexistent/x.db", "NVDA") is None
     assert all_profiles("/nonexistent/x.db") == []
+
+
+# ── resolve_size_factor: the SHARED adaptive entry-size brain (both entry paths) ──────
+def _profiles_db(rows):
+    """temp DB with a ticker_profiles table (ticker, hv_annual)."""
+    db = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
+    c = sqlite3.connect(db)
+    c.execute("CREATE TABLE ticker_profiles (ticker TEXT, hv_annual REAL)")
+    c.executemany("INSERT INTO ticker_profiles VALUES (?,?)", rows)
+    c.commit(); c.close()
+    return db
+
+
+def test_resolve_size_factor_calm_up_volatile_down():
+    from agora.ops.adaptive_stop import DEFAULTS
+    db = _profiles_db([("CALM", 0.16), ("WILD", 0.92)])
+    assert resolve_size_factor(db, "CALM") == pytest.approx(DEFAULTS.base_hv / 0.16, abs=0.01)  # >1 (up)
+    assert resolve_size_factor(db, "WILD") == pytest.approx(DEFAULTS.base_hv / 0.92, abs=0.01)  # <1 (down)
+    assert resolve_size_factor(db, "CALM") > 1.0 > resolve_size_factor(db, "WILD")
+
+
+def test_resolve_size_factor_disabled_unprofiled_and_garbage_are_neutral():
+    db = _profiles_db([("OK", 0.46), ("ZERO", 0.0)])
+    assert resolve_size_factor(db, "OK", enabled=False) == 1.0   # gate off → neutral
+    assert resolve_size_factor(db, "MISSING") == 1.0             # unprofiled → neutral
+    assert resolve_size_factor(db, "ZERO") == 1.0               # garbage HV → neutral
+    assert resolve_size_factor("/nonexistent/x.db", "OK") == 1.0 # bad db → neutral, never raises
+
+
+def test_resolve_size_factor_median_name_is_full_size():
+    # the calibration payoff: a universe-median name (HV ≈ base_hv) sizes ~1.0× (full risk budget)
+    from agora.ops.adaptive_stop import DEFAULTS
+    db = _profiles_db([("MED", DEFAULTS.base_hv)])
+    assert resolve_size_factor(db, "MED") == pytest.approx(1.0, abs=0.02)
+
+
+def test_resolve_size_factor_is_case_insensitive():
+    db = _profiles_db([("AAPL", 0.30)])
+    assert resolve_size_factor(db, "aapl") == resolve_size_factor(db, "AAPL")

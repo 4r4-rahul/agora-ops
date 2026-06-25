@@ -60,29 +60,20 @@ class StrategyRulesEngine:
         # resolve() returns the global default otherwise, so behaviour is unchanged today.
         from agora.ops.ticker_settings import TickerSettingsResolver
         self._ticker_resolver = TickerSettingsResolver(self._settings.db_path)
-        self._hv_cache: dict[str, float | None] = {}
+        self._hv_cache: dict[str, float] = {}   # ticker → resolved vol size-factor (per-cycle cache)
 
     def _vol_size_factor(self, ticker: str) -> float:
-        """Per-ticker RISK-PARITY entry-size factor from the ticker's realized vol (agora.ops.adaptive_stop):
-        a volatile name takes a smaller position and a calm name a larger one, so each risks ~1R around its
-        adaptive stop. PURE vol-math (baseHV/HV) — no adaptivity cap; the machine decides the multiplier.
-        Returns 1.0 when disabled or for an unprofiled ticker. Bounded ONLY downstream by the physical
-        max_contracts_per_trade + the 1-contract minimum. Cached; never raises."""
-        if not getattr(self._settings, "adaptive_entry_sizing_enabled", False):
-            return 1.0
+        """Per-ticker RISK-PARITY entry-size factor — the SHARED resolver (agora.ops.ticker_profile), the
+        SAME one the long-options agent uses, so a name sizes identically across strategies. PURE vol-math
+        (baseHV/HV); 1.0 when disabled or unprofiled. Bounded ONLY downstream by max_contracts_per_trade +
+        the 1-contract floor. Cached per ticker (per price-monitor cycle); never raises."""
         tk = (ticker or "").upper()
         if tk not in self._hv_cache:
-            try:
-                from agora.ops.ticker_profile import get_profile
-                prof = get_profile(self._settings.db_path, tk)
-                self._hv_cache[tk] = (prof or {}).get("hv_annual")
-            except Exception:
-                self._hv_cache[tk] = None
-        try:
-            from agora.ops.adaptive_stop import size_factor
-            return size_factor(self._hv_cache[tk])   # pure vol-math; physical bound is max_contracts
-        except Exception:
-            return 1.0
+            from agora.ops.ticker_profile import resolve_size_factor
+            self._hv_cache[tk] = resolve_size_factor(
+                self._settings.db_path, tk,
+                enabled=getattr(self._settings, "adaptive_entry_sizing_enabled", False))
+        return self._hv_cache[tk]
 
     def _record_gate(self, ticker: str, outcome: str) -> None:
         """Entry-funnel observability: record a (promoted) ticker's entry-gate outcome so the funnel shows

@@ -36,7 +36,12 @@ _RISK_OFF = {"risk_off", "high_volatility", "crisis"}
 class AdaptiveStopConfig:
     base_stop_pct: float = 0.50       # debit stop (fraction of premium) at baseline vol
     base_credit_mult: float = 1.5     # credit stop (× credit received) at baseline vol
-    base_hv: float = 0.30             # the "normal" annualized HV the base stop is calibrated to
+    base_hv: float = 0.46             # the "normal" annualized HV the base is calibrated to — the MEASURED
+    #                                   universe median (120 profiled names, 2026-06-25; mean 0.51). Was
+    #                                   0.30, which sat below the typical name, so size_factor centered at
+    #                                   0.66× (systematic down-sizing) and 61% of names pegged the 65% stop
+    #                                   ceiling. Centering on the median makes the typical name 1.0× size /
+    #                                   ~50% stop, with vol adjusting symmetrically around it (true 1R parity).
     stop_floor: float = 0.25          # never tighter than −25% of premium (avoid noise whipsaw)
     stop_ceil: float = 0.65           # never wider than −65% (past this a debit is a near-blowout)
     credit_mult_floor: float = 0.9

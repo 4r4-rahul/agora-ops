@@ -209,6 +209,22 @@ def get_profile(db_path: Any, ticker: str) -> dict | None:
         return None
 
 
+def resolve_size_factor(db_path: Any, ticker: str, *, enabled: bool = True) -> float:
+    """Per-ticker RISK-PARITY entry-size multiplier (pure vol-math baseHV/HV) resolved from the ticker's
+    stored realized-vol profile. This is the SINGLE shared factor both entry paths use — the spread
+    rules-engine AND the long-options agent — so a name sizes identically no matter which strategy fires.
+    Returns 1.0 when disabled or for an unprofiled ticker. PURE downstream math; the physical bound
+    (max_contracts_per_trade + the 1-contract floor) is applied by each caller. Never raises."""
+    if not enabled:
+        return 1.0
+    try:
+        from agora.ops.adaptive_stop import size_factor
+        prof = get_profile(db_path, (ticker or "").upper())
+        return size_factor((prof or {}).get("hv_annual"))
+    except Exception:
+        return 1.0
+
+
 def all_profiles(db_path: Any) -> list[dict]:
     """All stored profiles (dashboard). Never raises."""
     try:
