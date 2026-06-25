@@ -264,13 +264,18 @@ def _adopt_group(position_mgr, sym, expiry, legs, detailed, OpenPosition, Spread
     from datetime import date as _date
     from datetime import timedelta as _td
     exp_d = _date(int(expiry[:4]), int(expiry[4:6]), int(expiry[6:8]))
-    spread_legs, debit = [], 0.0
+    spread_legs, net_per_share = [], 0.0
     for o in legs:
         key = (sym, o["right"], float(o["strike"]), expiry)
         qty, avg_cost = detailed.get(key, (o["ibkr_qty"], 0.0))
         action = "buy" if qty > 0 else "sell"
-        per_contract = (avg_cost / 100.0) if avg_cost else 0.0   # IBKR avgCost is per-share×100
-        debit += (per_contract if action == "buy" else -per_contract) * abs(qty)
+        per_contract = (avg_cost / 100.0) if avg_cost else 0.0   # IBKR avgCost is per-share×100 → per share
+        # SIGNED PER-SHARE net of the structure. CRITICAL: do NOT weight by qty here. entry_price is a
+        # per-share figure (pnl.py convention) and realized_pnl multiplies by `contracts` itself, so a
+        # qty-weighted entry_price is scaled by contracts TWICE — a contracts² blow-up. THIS was the
+        # 2026-06-25 corruption: DIA 59x got entry_price=115.49 (=1.9575×59) and booked −$808k realized
+        # on an $11.5k defined risk. Keep entry per-share; carry the size in `contracts` only.
+        net_per_share += (per_contract if action == "buy" else -per_contract)
         spread_legs.append(SpreadLeg(
             option_type="call" if o["right"] == "C" else "put",
             strike=float(o["strike"]), expiration=exp_d, action=action,
@@ -287,14 +292,17 @@ def _adopt_group(position_mgr, sym, expiry, legs, detailed, OpenPosition, Spread
         strat = StrategyType.IRON_CONDOR if len(spread_legs) >= 4 else StrategyType.BULL_CALL_SPREAD
         direction = "neutral"
     contracts = max((l.contracts for l in spread_legs), default=1)
-    entry_debit = round(abs(debit) * 100, 2) or 1.0
+    # entry_price = per-share net; defined risk in dollars = per-share × 100 × contracts. This keeps the
+    # invariant realized_pnl ∈ [−max_loss, +max_gain] structurally true, so pnl_within_bounds can never trip.
+    entry_per_share = round(abs(net_per_share), 4) or 0.01
+    total_risk = round(abs(net_per_share) * 100 * contracts, 2) or 1.0
     pos = OpenPosition(
         position_id=f"adopt-{uuid.uuid4().hex[:12]}", ticker=sym, strategy=strat,
         pillar=StrategyPillar.DIRECTIONAL, direction=direction, status=PositionStatus.OPEN,
-        legs=spread_legs, contracts=contracts, entry_price=round(abs(debit), 2),
+        legs=spread_legs, contracts=contracts, entry_price=entry_per_share,
         entry_date=_date.today(), expiry_date=exp_d,
         target_close_date=min(exp_d, _date.today() + _td(days=21)),
-        max_loss_dollars=entry_debit, max_gain_dollars=entry_debit * 3,
+        max_loss_dollars=total_risk, max_gain_dollars=total_risk * 3,
         # Explicit provenance marker: these were never scored by the entry gates, so audits/alerts/UI
         # must NOT read their conviction_at_entry=0 / blank regime as a "zero-conviction gate failure"
         # (the mid-morning check + the R&D calibration audit were doing exactly that). 2026-06-22 fix.
