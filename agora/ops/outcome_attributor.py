@@ -1012,9 +1012,14 @@ class ScheduledAttributor:
                             try:
                                 import sqlite3 as _sq
                                 _c = _sq.connect(self._db_path, timeout=8)
-                                _tk = [r[0] for r in _c.execute(
+                                _traded = [r[0] for r in _c.execute(
                                     "SELECT DISTINCT ticker FROM trade_features WHERE ticker IS NOT NULL")]
                                 _c.close()
+                                # Profile the FULL tradeable universe (not just already-traded tickers), so
+                                # EVERY ticker has an adaptivity profile — otherwise a first-ever entry in a
+                                # universe ticker sizes non-adaptively at 1.0× until its second trade.
+                                _tk = list(dict.fromkeys(
+                                    _traded + list(getattr(self._settings, "etf_universe", []) or [])))
                                 from agora.ops.ticker_profile import build_profiles
                                 _bp = build_profiles(self._db_path, _tk)
                                 logger.info("ticker-profiles: %s", _bp.get("summary", _bp))
