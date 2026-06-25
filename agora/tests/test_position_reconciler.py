@@ -28,8 +28,9 @@ def _db(rows: list[tuple]) -> str:
     """rows: (ticker, status, legs_json)."""
     p = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
     with sqlite3.connect(p) as c:
-        c.execute("CREATE TABLE positions (ticker TEXT, status TEXT, legs_json TEXT)")
-        c.executemany("INSERT INTO positions VALUES (?,?,?)", rows)
+        c.execute("CREATE TABLE positions (ticker TEXT, status TEXT, legs_json TEXT, "
+                  "regime_at_entry TEXT DEFAULT 'neutral')")
+        c.executemany("INSERT INTO positions (ticker, status, legs_json) VALUES (?,?,?)", rows)
     return p
 
 

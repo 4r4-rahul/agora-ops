@@ -7,10 +7,10 @@ Tests the extracted decision helper directly (no AgoraSession construction neede
 from __future__ import annotations
 
 import types
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
-from agora.session import AgoraSession
 from agora.scan import ScanPriority
+from agora.session import AgoraSession
 
 
 def _fake(cooldown_secs: int, urgent_secs: int = 180):
@@ -46,7 +46,7 @@ def test_expired_cooldown_proceeds_again():
     obj = _fake(900)
     _skip(obj, "NVDA", ScanPriority.BACKGROUND)
     # force the last-eval timestamp past the BACKGROUND gap
-    obj._eval_cooldowns["NVDA"] = datetime.now(tz=timezone.utc) - timedelta(seconds=901)
+    obj._eval_cooldowns["NVDA"] = datetime.now(tz=UTC) - timedelta(seconds=901)
     assert _skip(obj, "NVDA", ScanPriority.BACKGROUND) is False
 
 
@@ -65,7 +65,7 @@ def test_urgent_and_normal_get_lighter_cooldown():
     assert _skip(obj, "NVDA", ScanPriority.URGENT) is True    # immediate re-fire → throttled
     assert _skip(obj, "NVDA", ScanPriority.NORMAL) is True    # NORMAL shares the lighter gap
     # past the urgent gap → proceeds again
-    obj._eval_cooldowns["NVDA"] = datetime.now(tz=timezone.utc) - timedelta(seconds=181)
+    obj._eval_cooldowns["NVDA"] = datetime.now(tz=UTC) - timedelta(seconds=181)
     assert _skip(obj, "NVDA", ScanPriority.URGENT) is False
 
 

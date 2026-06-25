@@ -123,8 +123,10 @@ def test_backfill_conviction_from_history():
     db = _db()
     c = sqlite3.connect(db)
     c.execute("""CREATE TABLE positions (position_id TEXT, conviction_at_entry REAL, realized_pnl REAL,
-        status TEXT, close_date TEXT, close_source TEXT, config_version_at_entry INTEGER)""")
-    c.executemany("INSERT INTO positions VALUES (?,?,?,?,?,?,?)", [
+        status TEXT, close_date TEXT, close_source TEXT, config_version_at_entry INTEGER,
+        regime_at_entry TEXT DEFAULT 'neutral')""")
+    c.executemany("""INSERT INTO positions (position_id, conviction_at_entry, realized_pnl,
+        status, close_date, close_source, config_version_at_entry) VALUES (?,?,?,?,?,?,?)""", [
         ("p1", 70.0, 50.0, "closed", "2026-06-20", "thesis_exit", 1),     # high conv, WON
         ("p2", 75.0, -80.0, "closed", "2026-06-20", "stop_loss", 1),      # high conv, LOST (inverted)
         ("p3", 40.0, 30.0, "closed", "2026-06-20", "trailing_stop", 1),   # low conv, won

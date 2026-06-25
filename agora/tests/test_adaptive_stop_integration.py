@@ -25,7 +25,8 @@ def _conn():
     c = sqlite3.connect(db)
     c.execute("CREATE TABLE ticker_profiles (ticker TEXT, hv_annual REAL)")
     c.executemany("INSERT INTO ticker_profiles VALUES (?,?)", [("KO", 0.16), ("TSLA", 0.58)])
-    c.execute("CREATE TABLE positions (position_id TEXT, peak_unrealized_pnl REAL)")
+    c.execute("CREATE TABLE positions (position_id TEXT, peak_unrealized_pnl REAL, "
+              "regime_at_entry TEXT DEFAULT 'neutral')")
     c.commit()
     return c
 
@@ -62,7 +63,7 @@ def test_calm_ticker_stops_tighter_than_fixed():
     fake = _self(c, adaptive=True)
     # KO (HV 0.16) debit down −30% of a $1000 premium → adaptive ~−27% stop fires EXIT
     pos = _pos("KO", unrealized_pnl=-300.0)
-    fake._db.execute("INSERT INTO positions VALUES ('KO-1', NULL)")
+    fake._db.execute("INSERT INTO positions (position_id, peak_unrealized_pnl) VALUES ('KO-1', NULL)")
     v = PositionManager._log_surveillance(fake, pos)
     assert v is not None and v.action == "EXIT" and "debit stop" in v.reason
     # logged with adaptive inputs
@@ -75,7 +76,7 @@ def test_volatile_ticker_holds_where_calm_would_stop():
     fake = _self(c, adaptive=True)
     # TSLA (HV 0.58) at the SAME −30% → wide adaptive stop (~−65%) still HOLDS (needs room)
     pos = _pos("TSLA", unrealized_pnl=-300.0)
-    fake._db.execute("INSERT INTO positions VALUES ('TSLA-1', NULL)")
+    fake._db.execute("INSERT INTO positions (position_id, peak_unrealized_pnl) VALUES ('TSLA-1', NULL)")
     v = PositionManager._log_surveillance(fake, pos)
     assert v is not None and v.action == "HOLD"
 
@@ -85,7 +86,7 @@ def test_disabled_flag_uses_fixed_stop():
     fake = _self(c, adaptive=False)
     # adaptive OFF → KO uses the fixed −55%, so −30% is NOT a stop → HOLD
     pos = _pos("KO", unrealized_pnl=-300.0)
-    fake._db.execute("INSERT INTO positions VALUES ('KO-1', NULL)")
+    fake._db.execute("INSERT INTO positions (position_id, peak_unrealized_pnl) VALUES ('KO-1', NULL)")
     v = PositionManager._log_surveillance(fake, pos)
     assert v is not None and v.action == "HOLD"
 
@@ -94,6 +95,6 @@ def test_blowout_still_fires_regardless_of_adaptive():
     c = _conn()
     fake = _self(c, adaptive=True)
     pos = _pos("TSLA", unrealized_pnl=-900.0)             # 90% of max loss → blowout backstop
-    fake._db.execute("INSERT INTO positions VALUES ('TSLA-1', NULL)")
+    fake._db.execute("INSERT INTO positions (position_id, peak_unrealized_pnl) VALUES ('TSLA-1', NULL)")
     v = PositionManager._log_surveillance(fake, pos)
     assert v is not None and v.action == "EXIT" and v.is_backstop is True

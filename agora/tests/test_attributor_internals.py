@@ -112,7 +112,8 @@ def _purge_db(with_shadow=False):
         decision_id TEXT, trade_taken INTEGER, realized_pnl REAL, advocate_was_right INTEGER)""")
     c.execute("CREATE TABLE decision_chains (chain_id TEXT, position_id TEXT)")
     c.execute("""CREATE TABLE positions (
-        position_id TEXT, status TEXT, close_date TEXT, close_source TEXT)""")
+        position_id TEXT, status TEXT, close_date TEXT, close_source TEXT,
+        regime_at_entry TEXT DEFAULT 'neutral')""")
     if with_shadow:
         c.execute("""CREATE TABLE shadow_book (
             decision_id TEXT, evaluated INTEGER, hypothetical_win INTEGER)""")
@@ -122,7 +123,8 @@ def _purge_db(with_shadow=False):
 def _real_close(c, chain_id, position_id):
     """Link a decision_id to a genuinely-closed position so _REAL_CLOSED_CHAINS includes it."""
     c.execute("INSERT INTO decision_chains VALUES (?,?)", (chain_id, position_id))
-    c.execute("INSERT INTO positions VALUES (?, 'closed', '2026-01-02', 'thesis_exit')",
+    c.execute("INSERT INTO positions (position_id, status, close_date, close_source) "
+              "VALUES (?, 'closed', '2026-01-02', 'thesis_exit')",
               (position_id,))
 
 
@@ -150,14 +152,16 @@ class TestPurgeFabricatedAttribution:
         c = _purge_db()
         # chain links to a position that is OPEN (not a real close) → attribution must be purged
         c.execute("INSERT INTO decision_chains VALUES ('c2', 'pos-open')")
-        c.execute("INSERT INTO positions VALUES ('pos-open', 'open', NULL, NULL)")
+        c.execute("INSERT INTO positions (position_id, status, close_date, close_source) "
+                  "VALUES ('pos-open', 'open', NULL, NULL)")
         c.execute("INSERT INTO analyst_journal VALUES ('c2', 1, 5.0, 0)")
         assert _purge_fabricated_attribution(c)["analyst"] == 1
 
     def test_sync_artifact_not_a_real_close(self):
         c = _purge_db()
         c.execute("INSERT INTO decision_chains VALUES ('c3', 'pos-sync')")
-        c.execute("INSERT INTO positions VALUES ('pos-sync', 'closed', '2026-01-02', 'tws_startup_sync')")
+        c.execute("INSERT INTO positions (position_id, status, close_date, close_source) "
+                  "VALUES ('pos-sync', 'closed', '2026-01-02', 'tws_startup_sync')")
         c.execute("INSERT INTO analyst_journal VALUES ('c3', 1, 5.0, 0)")
         assert _purge_fabricated_attribution(c)["analyst"] == 1
 

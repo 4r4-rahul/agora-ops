@@ -21,8 +21,9 @@ def _seed_db():
     p = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
     c = sqlite3.connect(p)
     c.execute("""CREATE TABLE positions (strategy TEXT, status TEXT, close_date TEXT,
-                 close_source TEXT, realized_pnl REAL)""")
-    c.executemany("INSERT INTO positions VALUES ('bull_put_spread','closed',?,'thesis_exit',?)",
+                 close_source TEXT, realized_pnl REAL, regime_at_entry TEXT DEFAULT 'neutral')""")
+    c.executemany("INSERT INTO positions (strategy, status, close_date, close_source, realized_pnl) "
+                  "VALUES ('bull_put_spread','closed',?,'thesis_exit',?)",
                   [("2026-06-01", -200.0), ("2026-06-20", 30.0), ("2026-06-21", 20.0)])
     c.commit(); c.close()
     return p

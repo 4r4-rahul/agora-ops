@@ -19,9 +19,10 @@ def _db(rows):
     p = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
     c = sqlite3.connect(p)
     c.execute("""CREATE TABLE positions (strategy TEXT, status TEXT, close_date TEXT,
-                 close_source TEXT, realized_pnl REAL)""")
+                 close_source TEXT, realized_pnl REAL, regime_at_entry TEXT DEFAULT 'neutral')""")
     c.executemany(
-        "INSERT INTO positions VALUES ('bull_put_spread','closed',?,'thesis_exit',?)", rows)
+        "INSERT INTO positions (strategy, status, close_date, close_source, realized_pnl) "
+        "VALUES ('bull_put_spread','closed',?,'thesis_exit',?)", rows)
     # the metrics ledger also reads daily_pnl in reconcile (not used here) — keep schema minimal
     c.commit(); c.close()
     return p
@@ -131,8 +132,9 @@ def _cs_db(rows):
     p = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
     c = sqlite3.connect(p)
     c.execute("""CREATE TABLE positions (strategy TEXT, entry_date TEXT, status TEXT,
-                 close_date TEXT, realized_pnl REAL)""")
-    c.executemany("INSERT INTO positions VALUES (?,?,?,?,?)", rows)
+                 close_date TEXT, realized_pnl REAL, regime_at_entry TEXT DEFAULT 'neutral')""")
+    c.executemany("INSERT INTO positions (strategy, entry_date, status, close_date, realized_pnl) "
+                  "VALUES (?,?,?,?,?)", rows)
     c.commit(); c.close()
     return p
 

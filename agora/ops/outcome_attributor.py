@@ -78,7 +78,10 @@ _REAL_CLOSE_SOURCES = ("lifecycle", "thesis_exit", "trailing_stop", "stop_loss")
 _REAL_CLOSE = (
     "p.status='closed' AND p.close_date IS NOT NULL AND p.close_date<>'' "
     "AND (p.close_source IN ('lifecycle','thesis_exit','trailing_stop','stop_loss') "
-    "     OR p.close_source LIKE 'session:%')"
+    "     OR p.close_source LIKE 'session:%') "
+    # EXCLUDE adopted positions — reconstructed cost basis = unreliable P&L, never an engine decision
+    # (see edge_dashboard._REAL_CLOSE; the 2026-06-25 −$1.17M corruption was all adopted closes).
+    "AND COALESCE(p.regime_at_entry,'') <> 'adopted'"
 )
 # Sub-select of chain_ids whose position genuinely closed — used both to gate attribution
 # writes and to detect (and purge) attribution written against anything else.

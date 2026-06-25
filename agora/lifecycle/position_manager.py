@@ -1213,6 +1213,27 @@ class PositionManager:
                 _row = None
             _real_pnl = float(_row[0]) if _row and _row[0] is not None else round(position.unrealized_pnl, 2)
             _real_cp  = float(_row[1]) if _row and _row[1] is not None else round(position.current_price, 4)
+            # NEVER-AGAIN GUARD (2026-06-25): a realized P&L outside the position's own defined-risk bounds
+            # is mathematically impossible (the adopted-position corruption booked −$808k on a $16k-max-loss
+            # spread). Refuse to propagate fiction downstream — clamp to the bound, correct the stored
+            # value, and alert. Pairs with the _REAL_CLOSE adopted-exclusion so corruption can neither be
+            # booked nor counted.
+            try:
+                from agora.core.pnl import pnl_within_bounds
+                _ml = abs(getattr(position, "max_loss_dollars", 0.0) or 0.0)
+                _mg = abs(getattr(position, "max_gain_dollars", 0.0) or 0.0)
+                if not pnl_within_bounds(_real_pnl, _ml, _mg):
+                    _clamped = max(-_ml, min(_real_pnl, _mg)) if (_ml or _mg) else 0.0
+                    logger.critical(
+                        "IMPOSSIBLE P&L GUARD: %s realized $%.0f outside bounds (max_loss $%.0f / "
+                        "max_gain $%.0f) — corrupted cost basis; clamping to $%.0f",
+                        position.ticker, _real_pnl, _ml, _mg, _clamped)
+                    _real_pnl = round(_clamped, 2)
+                    self._db.execute("UPDATE positions SET realized_pnl=? WHERE position_id=?",
+                                     (_real_pnl, position.position_id))
+                    self._db.commit()
+            except Exception:
+                pass
             _now_ts = datetime.now(tz=UTC).isoformat()
             self._db.execute(
                 # keep the precise broker exit-fill time if mark_position_closed already set it,
@@ -1583,11 +1604,14 @@ class PositionManager:
         return None
 
     def get_realized_pnl_today(self) -> float:
-        """Sum of realized_pnl for positions closed today. Used by kill switch reset logic."""
+        """Sum of realized_pnl for positions closed today — feeds the DAILY-LOSS BREAKER. EXCLUDES
+        adopted positions: their reconstructed cost basis books fictional P&L (the 2026-06-25 −$1.17M
+        'day' was entirely adopted closes — −$808k on a single $16k-max-loss DIA spread), which would
+        falsely trip (or, as it did, distort) the breaker. The breaker must see only real engine P&L."""
         today = date.today().isoformat()
         row = self._db.execute(
             "SELECT COALESCE(SUM(realized_pnl), 0) FROM positions "
-            "WHERE close_date=? AND status='closed'",
+            "WHERE close_date=? AND status='closed' AND COALESCE(regime_at_entry,'') <> 'adopted'",
             (today,),
         ).fetchone()
         return float(row[0]) if row else 0.0

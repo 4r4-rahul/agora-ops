@@ -11,7 +11,6 @@ All tests are pure-unit: SQLite uses temp files, no network, no Claude API.
 from __future__ import annotations
 
 import json
-import math
 import sqlite3
 import tempfile
 from datetime import date, timedelta
@@ -21,21 +20,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-
 # ══════════════════════════════════════════════════════════════════════════════
 # StrategyHealthAgent
 # ══════════════════════════════════════════════════════════════════════════════
-
 from agora.ops.strategy_health import (
+    MIN_TRADES,
+    SHARPE_PAUSE_THRESH,
+    StrategyHealthAgent,
     _compute_sharpe,
     compute_health,
     ensure_table,
-    get_paused_cells,
     is_pillar_paused,
-    MIN_TRADES,
-    SHARPE_PAUSE_THRESH,
-    SHARPE_RECOVERY,
-    StrategyHealthAgent,
 )
 
 
@@ -340,12 +335,14 @@ class TestStrategyHealthPatrol:
 # ══════════════════════════════════════════════════════════════════════════════
 
 from agora.ops.devils_advocate import (
+    _CONVICTION_FLOOR,
     _check_conviction_floor,
     _check_duplicate_ticker,
     _check_earnings_spans_expiry,
     _check_macro_opposing,
     _check_vol_selling_ok,
-    _CONVICTION_FLOOR,
+)
+from agora.ops.devils_advocate import (
     run as da_run,
 )
 
@@ -603,14 +600,13 @@ class TestDevilsAdvocateRun:
 # ══════════════════════════════════════════════════════════════════════════════
 
 from agora.ops.conviction_calibrator import (
-    _profit_factor,
+    _CURRENT_WEIGHTS,
+    MIN_TRADES_FOR_PROPOSAL,
     _cell_stats,
     _conviction_quintile_analysis,
-    _per_pillar_analysis,
+    _profit_factor,
     _propose_weights,
-    _CURRENT_WEIGHTS,
     calibrate,
-    MIN_TRADES_FOR_PROPOSAL,
 )
 
 

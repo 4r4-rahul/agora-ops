@@ -9,16 +9,15 @@ input (no free-text JSON to parse, no fail-closed-on-prose). These tests prove:
 """
 from __future__ import annotations
 
-import sys
 import types
 from datetime import date, timedelta
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
 import agora.agents.advocate_agent as adv
-from agora.agents.advocate_agent import AdvocateAgent, _ADVOCATE_VERDICT_TOOL, _compute_verdict
+from agora.agents.advocate_agent import _ADVOCATE_VERDICT_TOOL, AdvocateAgent, _compute_verdict
 
 
 # ── fakes ────────────────────────────────────────────────────────────────────

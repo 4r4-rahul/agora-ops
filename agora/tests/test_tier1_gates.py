@@ -24,8 +24,10 @@ def _db(rows):
     p = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
     c = sqlite3.connect(p)
     c.execute("""CREATE TABLE positions (strategy TEXT, pillar TEXT, status TEXT,
-                 close_date TEXT, close_source TEXT, realized_pnl REAL)""")
-    c.executemany("INSERT INTO positions VALUES (?,?,'closed',?,'thesis_exit',?)", rows)
+                 close_date TEXT, close_source TEXT, realized_pnl REAL,
+                 regime_at_entry TEXT DEFAULT 'neutral')""")
+    c.executemany("INSERT INTO positions (strategy, pillar, status, close_date, close_source, "
+                  "realized_pnl) VALUES (?,?,'closed',?,'thesis_exit',?)", rows)
     c.commit(); c.close()
     return p
 

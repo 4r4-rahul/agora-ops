@@ -90,8 +90,10 @@ def _perf_db(rows):
     c = sqlite3.connect(path)
     c.execute("""CREATE TABLE positions (
         strategy TEXT, status TEXT, contracts INT, entry_price REAL, entry_date TEXT,
-        close_date TEXT, realized_pnl REAL, close_source TEXT)""")
-    c.executemany("INSERT INTO positions VALUES (?,?,?,?,?,?,?,?)", rows)
+        close_date TEXT, realized_pnl REAL, close_source TEXT,
+        regime_at_entry TEXT DEFAULT 'neutral')""")
+    c.executemany("""INSERT INTO positions (strategy, status, contracts, entry_price, entry_date,
+        close_date, realized_pnl, close_source) VALUES (?,?,?,?,?,?,?,?)""", rows)
     c.commit(); c.close()
     return path
 

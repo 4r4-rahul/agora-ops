@@ -23,7 +23,11 @@ from typing import Any
 MIN_SAMPLE = 20          # below this a cut is UNVALIDATED, never treated as edge
 
 # Provenance we trust as a real, agent-driven fill. Mirrors outcome_attributor._REAL_CLOSE_SOURCES
-# plus the session: planned-close family; explicitly EXCLUDES fabricated/sync/reset artifacts.
+# plus the session: planned-close family; explicitly EXCLUDES fabricated/sync/reset artifacts AND
+# ADOPTED positions. Adopted positions (position_id 'adopt-%' / regime_at_entry='adopted') are legacy
+# broker positions the reconciler ingested with a RECONSTRUCTED cost basis the engine never priced — so
+# their realized P&L is unreliable (the 2026-06-25 corruption: −$808k booked on a $16k-max-loss DIA
+# spread). They are NOT engine decisions and MUST NOT contaminate P&L books, ML training, or attribution.
 _REAL_CLOSE = (
     "status='closed' AND close_date IS NOT NULL AND close_date<>'' "
     "AND (close_source IN ('lifecycle','thesis_exit','trailing_stop','stop_loss','pre_earnings') "
@@ -32,6 +36,7 @@ _REAL_CLOSE = (
     "AND close_source NOT LIKE '%tws_startup_sync%' "
     "AND close_source NOT LIKE '%reconcile%' "
     "AND close_source NOT LIKE '%duplicate%' "
+    "AND COALESCE(regime_at_entry,'') <> 'adopted' "   # JOIN-safe adopted marker (positions-only col)
     "AND status<>'reset'"
 )
 

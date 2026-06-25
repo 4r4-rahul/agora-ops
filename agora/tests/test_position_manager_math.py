@@ -108,8 +108,9 @@ class TestPortfolioGreeks:
 class TestRealizedPnlToday:
     def _pm_with_rows(self, rows):
         conn = sqlite3.connect(":memory:")
-        conn.execute("CREATE TABLE positions (realized_pnl REAL, close_date TEXT, status TEXT)")
-        conn.executemany("INSERT INTO positions VALUES (?,?,?)", rows)
+        conn.execute("CREATE TABLE positions (realized_pnl REAL, close_date TEXT, status TEXT, "
+                     "regime_at_entry TEXT DEFAULT 'neutral')")
+        conn.executemany("INSERT INTO positions (realized_pnl, close_date, status) VALUES (?,?,?)", rows)
         return types.SimpleNamespace(_db=conn)
 
     def test_sums_only_today_closed(self):

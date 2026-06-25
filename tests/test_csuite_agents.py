@@ -9,20 +9,15 @@ Validates:
   5. CIO receives pillar_health in __init__ and correctly gates on it
 """
 
-import collections
-import os
-import sqlite3
-import tempfile
 import pytest
 
-from agora.c_suite.cro import CROAgent
-from agora.c_suite.coo import COOAgent
-from agora.c_suite.cio import CIOAgent
-from agora.c_suite.cto import CTOAgent
 from agora.c_suite.cfo import CFOAgent
-from agora.c_suite.rnd import RNDAgent
+from agora.c_suite.cio import CIOAgent
+from agora.c_suite.coo import COOAgent
+from agora.c_suite.cro import CROAgent
 from agora.c_suite.ctech import CTechAgent
-
+from agora.c_suite.cto import CTOAgent
+from agora.c_suite.rnd import RNDAgent
 
 # ── Minimal settings stub ──────────────────────────────────────────────────────
 

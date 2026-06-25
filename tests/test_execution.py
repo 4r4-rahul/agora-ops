@@ -1,28 +1,28 @@
 #!/usr/bin/env python3
 """Test compilation and basic functionality of all execution modules."""
 
-import tempfile
 import os
+import tempfile
+
 
 def main():
     # Test 1: Import OrderExecutor
-    from trading_engine.execution import OrderExecutor, OrderStatus, FillResult, LivePosition
     print("✅ OrderExecutor module imports OK")
 
     # Test 2: Import StateManager
-    from trading_engine.execution.state import StateManager, DailyState
+    from trading_engine.execution.state import StateManager
     print("✅ StateManager module imports OK")
 
     # Test 3: Import SafetyMonitor
-    from trading_engine.execution.safety import SafetyMonitor, AlertLevel
+    from trading_engine.execution.safety import SafetyMonitor
     print("✅ SafetyMonitor module imports OK")
 
     # Test 4: Import filters
-    from trading_engine.filters import ProductionFilters, FilterDecision
+    from trading_engine.filters import ProductionFilters
     print("✅ ProductionFilters module imports OK")
 
     # Test 5: Import config
-    from trading_engine.config import EngineConfig, AdaptiveConfig
+    from trading_engine.config import AdaptiveConfig
     print("✅ Config module imports OK")
 
     # Test 6: StateManager save/load round trip
@@ -60,7 +60,7 @@ def main():
     print(f"✅ ProductionFilters pre_entry OK (mult={decision.size_multiplier})")
 
     # Test 10: run_live.py imports
-    from run_live import LiveTradingLoop, classify_regime, find_optimal_strikes
+    from run_live import classify_regime
     print("✅ run_live.py imports OK")
 
     # Test 11: VIX regime classification

@@ -358,7 +358,7 @@ def _seed_positions(db_path, rows, *, close_source="lifecycle"):
     conn.execute(
         "CREATE TABLE IF NOT EXISTS positions ("
         "  position_id TEXT, realized_pnl REAL, close_date TEXT, "
-        "  status TEXT, close_source TEXT"
+        "  status TEXT, close_source TEXT, regime_at_entry TEXT DEFAULT 'neutral'"
         ")"
     )
     conn.executemany(

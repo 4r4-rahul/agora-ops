@@ -13,22 +13,17 @@ No LLM calls. LessonsGenerator.generate_all() is not called (avoids API spend).
 
 from __future__ import annotations
 
-import json
 import sqlite3
 import tempfile
-from datetime import date, datetime, timedelta, timezone
-from pathlib import Path
-
-import pytest
+from datetime import UTC, date, datetime, timedelta
 
 from agora.ops.outcome_attributor import (
+    _brier_score,
+    _calibrated,
     attribute_closed_trades,
     get_analyst_stats,
     get_promotion_readiness,
-    _calibrated,
-    _brier_score,
 )
-
 
 # ── DB factory ────────────────────────────────────────────────────────────────
 
@@ -55,7 +50,8 @@ def _make_db() -> str:
                 max_loss_dollars REAL,
                 max_gain_dollars REAL,
                 strategy TEXT,
-                legs_json TEXT DEFAULT '[]'
+                legs_json TEXT DEFAULT '[]',
+                regime_at_entry TEXT DEFAULT 'neutral'
             );
             -- Production keys analyst/strategy/advocate attribution on the EXACT decision_id via
             -- decision_chains.chain_id -> positions.position_id (created by position_manager in prod).
@@ -203,7 +199,7 @@ def _make_db() -> str:
 
 
 def _now_iso(delta_hours: float = 0.0) -> str:
-    return (datetime.now(tz=timezone.utc) - timedelta(hours=delta_hours)).isoformat()
+    return (datetime.now(tz=UTC) - timedelta(hours=delta_hours)).isoformat()
 
 
 def _entry_date(delta_days: int = 5) -> str:

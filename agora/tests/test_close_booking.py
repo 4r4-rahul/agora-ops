@@ -17,7 +17,7 @@ def _stub(tmp_path, on_close, prewrite=None):
     db.execute(
         "CREATE TABLE positions (position_id TEXT, status TEXT, close_date TEXT, "
         "close_price REAL, close_source TEXT, realized_pnl REAL, last_reviewed TEXT, "
-        "entry_ts_utc TEXT, exit_ts_utc TEXT)"   # prod schema (migration m008) — close paths stamp exit_ts_utc
+        "entry_ts_utc TEXT, exit_ts_utc TEXT, regime_at_entry TEXT DEFAULT 'neutral')"   # prod schema (migration m008) — close paths stamp exit_ts_utc
     )
     db.execute(
         "INSERT INTO positions (position_id, status, realized_pnl, close_price) VALUES (?,?,?,?)",

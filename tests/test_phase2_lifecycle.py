@@ -27,7 +27,7 @@ import json
 import sqlite3
 import tempfile
 import uuid
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
@@ -39,7 +39,6 @@ from agora.ops.decision_chains import (
     recent_chains,
     start_chain,
 )
-
 
 # ── Schema bootstrap ──────────────────────────────────────────────────────────
 
@@ -105,7 +104,8 @@ CREATE TABLE IF NOT EXISTS positions (
     entry_date       TEXT NOT NULL,
     close_date       TEXT,
     status           TEXT DEFAULT 'open',
-    realized_pnl     REAL
+    realized_pnl     REAL,
+    regime_at_entry  TEXT DEFAULT 'neutral'
 );
 """
 
@@ -154,7 +154,7 @@ def _insert_analyst_journal(conn: sqlite3.Connection, decision_id: str, ticker: 
            VALUES (?,?,?,?,?,?,?,?,?)""",
         (
             decision_id, ticker,
-            datetime.now(tz=timezone.utc).isoformat(),
+            datetime.now(tz=UTC).isoformat(),
             "1.0.0", "claude-sonnet-4-6",
             json.dumps({"ticker": ticker}),
             decision,
@@ -434,7 +434,7 @@ class TestAgentLessonsGating:
             """INSERT INTO agent_lessons
                (agent_name, lesson_text, created_at_utc, human_approved)
                VALUES (?,?,?,?)""",
-            (agent, text, datetime.now(tz=timezone.utc).isoformat(), approved),
+            (agent, text, datetime.now(tz=UTC).isoformat(), approved),
         )
         self.conn.commit()
         return cur.lastrowid

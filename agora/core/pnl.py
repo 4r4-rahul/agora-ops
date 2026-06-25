@@ -19,6 +19,23 @@ def realized_pnl(entry_price_signed: float, net_close_signed: float, contracts: 
     return round(-(entry_price_signed + net_close_signed) * 100 * contracts, 2)
 
 
+def pnl_within_bounds(pnl: float, max_loss_dollars: float, max_gain_dollars: float,
+                      *, tol: float = 1.2) -> bool:
+    """INVARIANT — the 'never again' guard. A defined-risk position's realized P&L can NEVER exceed its
+    own max-loss (downside) or max-gain (upside), times `tol` for slippage. A value outside these bounds
+    is mathematically IMPOSSIBLE and signals a corrupted cost basis — the 2026-06-25 adopted-position
+    units bug booked −$808k on a $16k-max-loss spread and poisoned the books, the ML labels, and the
+    daily breaker. Booking code MUST refuse to book a P&L that fails this. Pure; generalises the one-sided
+    startup_sync_close guard to BOTH sides for every booking path. With no bound info (ml=mg=0) → True."""
+    ml = abs(max_loss_dollars or 0.0)
+    mg = abs(max_gain_dollars or 0.0)
+    if ml > 0 and pnl < -ml * tol:
+        return False
+    if mg > 0 and pnl > mg * tol:
+        return False
+    return True
+
+
 def signed_mid_from_total(entry_debit_credit: float, contracts: int) -> float:
     """The intended SIGNED per-share net from the total credit/debit dollars."""
     return entry_debit_credit / max(1, contracts * 100)

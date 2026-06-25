@@ -20,10 +20,11 @@ def _make_db(path, defender_rows, chain_rows, position_rows):
               "confidence REAL, go_recommendation INTEGER)")
     c.execute("CREATE TABLE decision_chains (chain_id TEXT, position_id TEXT)")
     c.execute("CREATE TABLE positions (position_id TEXT, realized_pnl REAL, status TEXT, "
-              "close_date TEXT, close_source TEXT)")
+              "close_date TEXT, close_source TEXT, regime_at_entry TEXT DEFAULT 'neutral')")
     c.executemany("INSERT INTO defender_journal VALUES (?,?,?,?)", defender_rows)
     c.executemany("INSERT INTO decision_chains VALUES (?,?)", chain_rows)
-    c.executemany("INSERT INTO positions VALUES (?,?,?,?,?)", position_rows)
+    c.executemany("INSERT INTO positions (position_id, realized_pnl, status, close_date, close_source) "
+                  "VALUES (?,?,?,?,?)", position_rows)
     c.commit()
     c.close()
 

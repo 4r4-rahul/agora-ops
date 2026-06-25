@@ -151,7 +151,8 @@ def _targets_stub(closed: list, long_routed: list, *, with_surveillance: bool = 
 
         from agora.lifecycle.position_manager import PositionManager
         conn = sqlite3.connect(":memory:")
-        conn.execute("CREATE TABLE positions (position_id TEXT, peak_unrealized_pnl REAL)")
+        conn.execute("CREATE TABLE positions (position_id TEXT, peak_unrealized_pnl REAL, "
+                     "regime_at_entry TEXT DEFAULT 'neutral')")
         conn.execute("CREATE TABLE ticker_profiles (ticker TEXT, hv_annual REAL)")
         conn.commit()
         stub._db = conn

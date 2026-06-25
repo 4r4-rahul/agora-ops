@@ -19,11 +19,11 @@ def _db(ghost_fills=(), positions=()):
     path = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
     c = sqlite3.connect(path)
     c.execute("CREATE TABLE execution_quality (ticker TEXT, fill_price REAL, attempt_date TEXT, outcome TEXT)")
-    c.execute("CREATE TABLE positions (ticker TEXT)")
+    c.execute("CREATE TABLE positions (ticker TEXT, regime_at_entry TEXT DEFAULT 'neutral')")
     for t in ghost_fills:
         c.execute("INSERT INTO execution_quality VALUES (?,1.5,date('now'),'fill')", (t,))
     for t in positions:
-        c.execute("INSERT INTO positions VALUES (?)", (t,))
+        c.execute("INSERT INTO positions (ticker) VALUES (?)", (t,))
     c.commit(); c.close()
     return path
 

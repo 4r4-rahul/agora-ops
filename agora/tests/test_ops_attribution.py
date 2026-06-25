@@ -173,7 +173,8 @@ class TestRealCloseFilter:
                    status       TEXT,
                    close_date   TEXT,
                    close_source TEXT,
-                   realized_pnl REAL NOT NULL DEFAULT 0
+                   realized_pnl REAL NOT NULL DEFAULT 0,
+                   regime_at_entry TEXT DEFAULT 'neutral'
                )"""
         )
         rows = [
@@ -241,10 +242,12 @@ class TestRealCloseFilter:
         conn = sqlite3.connect(str(db))
         conn.execute(
             "CREATE TABLE positions (position_id TEXT, status TEXT, close_date TEXT, "
-            "close_source TEXT, realized_pnl REAL NOT NULL DEFAULT 0)"
+            "close_source TEXT, realized_pnl REAL NOT NULL DEFAULT 0, "
+            "regime_at_entry TEXT DEFAULT 'neutral')"
         )
         conn.executemany(
-            "INSERT INTO positions VALUES (?,?,?,?,0)",
+            "INSERT INTO positions (position_id, status, close_date, close_source, realized_pnl) "
+            "VALUES (?,?,?,?,0)",
             [
                 ("good", "closed", "2026-06-10", "session:ceo_flatten"),
                 ("bad",  "closed", "2026-06-10", "ended_session:foo"),
