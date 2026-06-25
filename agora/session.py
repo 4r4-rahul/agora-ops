@@ -1808,6 +1808,18 @@ class AgoraSession:
                     if not _gok:
                         logger.info("LongOptions [%s] BLOCKED by %s — skip", ticker, _greason)
                         return
+                    # GUARD PARITY (2026-06-25): the long path goes through _entry_gate (shared kill/
+                    # compliance/risk/macro-block) but previously SKIPPED the post-gate SIZE reductions the
+                    # spread path applies in _submit_recommendation_inner — so long options traded full size
+                    # on macro-caution / VIX-stress days. Mirror them here (then the contract cap below).
+                    _msz = get_macro_calendar().position_size_multiplier()
+                    if _msz < 1.0:
+                        rec.contracts = max(1, int(rec.contracts * _msz))
+                        logger.info("Macro calendar caution (long): %s size → %.0f%% (%d contracts)",
+                                    ticker, _msz * 100, rec.contracts)
+                    if getattr(self._circuit_breaker, "vix_stress_mode", False):
+                        rec.contracts = max(1, int(rec.contracts * self._circuit_breaker.size_multiplier_override))
+                        logger.info("VIX stress mode (long): %s size → %d contracts", ticker, rec.contracts)
                     # HARD CONTRACT-CAP GUARD (long-options path) — mirrors the spread-path guard in
                     # _submit_recommendation_inner. Long options submit via their own lock, so they need
                     # the same final clamp; no builder/override may breach long_options_max_contracts.
