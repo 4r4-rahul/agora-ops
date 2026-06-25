@@ -2952,6 +2952,16 @@ class AgoraSession:
                             logger.info("No trade for %s: %s (IVR=%s)",
                                         ticker, resolution["reason"],
                                         f"{snap.iv_rank:.0f}" if snap.iv_rank else "n/a")
+                        # Entry-funnel: this promoted name reached the conviction/evaluate stage but the
+                        # conviction/IVR/vol gate dropped it BEFORE generate — record why (read-only).
+                        try:
+                            from agora.ops.entry_funnel import record_conviction
+                            _rsn = (resolution.get("reason", "vol/conviction gate")
+                                    if isinstance(resolution, dict) else "vol/conviction gate")
+                            record_conviction(self._settings.db_path, ticker,
+                                               f"no-trade: conv {conviction.total_score:.0f} ({str(_rsn)[:50]})")
+                        except Exception:
+                            pass
                         return
                 # Override gate for vol-premium play — ONLY when vol-selling was approved
                 # (vol_selling_ok guarantees iv_rank is not None). If we instead arrived

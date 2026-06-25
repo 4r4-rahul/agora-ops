@@ -10,7 +10,12 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 
-from agora.ops.entry_funnel import funnel_summary, record_gate_outcome, record_monitor_evals
+from agora.ops.entry_funnel import (
+    funnel_summary,
+    record_conviction,
+    record_gate_outcome,
+    record_monitor_evals,
+)
 
 DAY = "2026-06-25"
 
@@ -114,6 +119,51 @@ def test_summary_limit_and_day_isolation():
     record_monitor_evals(db, [{"ticker": "B", "move_pct": 1.0, "vol_ratio": 1.0, "promoted": False}], day=DAY)
     assert [r["ticker"] for r in funnel_summary(db, day=DAY)] == ["B"]   # only today's bucket
     assert len(funnel_summary(db, day=DAY, limit=0)) == 0
+
+
+# ── conviction stage ────────────────────────────────────────────────────────────────────
+def test_conviction_records_and_stages():
+    db = _db()
+    # promoted → scored conviction → dropped (never reached gates) = reached_conviction
+    record_monitor_evals(db, [{"ticker": "SNDK", "move_pct": 1.9, "vol_ratio": 1.0,
+                               "promoted": True, "trigger": "t"}], day=DAY)
+    assert record_conviction(db, "SNDK", "no-trade: conv 28 < floor", day=DAY)
+    r = _row(db, "SNDK")
+    assert r["conviction_n"] == 1 and "no-trade" in r["conviction_outcome"]
+    s = {x["ticker"]: x for x in funnel_summary(db, day=DAY)}
+    assert s["SNDK"]["stage"] == "reached_conviction"
+
+
+def test_promoted_only_when_no_conviction():
+    db = _db()
+    record_monitor_evals(db, [{"ticker": "X", "move_pct": 2.0, "vol_ratio": 1.0,
+                               "promoted": True, "trigger": "t"}], day=DAY)
+    assert funnel_summary(db, day=DAY)[0]["stage"] == "promoted_only"   # promoted, never scored
+
+
+def test_gate_outranks_conviction_in_stage():
+    db = _db()
+    record_monitor_evals(db, [{"ticker": "ARM", "move_pct": 2.3, "vol_ratio": 1.0,
+                               "promoted": True, "trigger": "t"}], day=DAY)
+    record_conviction(db, "ARM", "scored 61", day=DAY)
+    record_gate_outcome(db, "ARM", "passed→order (3x)", day=DAY)
+    assert {x["ticker"]: x for x in funnel_summary(db, day=DAY)}["ARM"]["stage"] == "reached_gates"
+
+
+def test_migration_adds_columns_to_old_schema():
+    # the ORIGINAL shipped table (no conviction cols) must get them ALTERed in (CREATE IF NOT EXISTS
+    # never adds a column to a pre-existing table — the silent-failure trap).
+    db = _db()
+    c = sqlite3.connect(db)
+    c.execute("CREATE TABLE entry_funnel (day TEXT NOT NULL, ticker TEXT NOT NULL, "
+              "evaluated_n INTEGER NOT NULL DEFAULT 0, max_move_pct REAL, max_vol_ratio REAL, "
+              "promoted_n INTEGER NOT NULL DEFAULT 0, last_trigger TEXT, gate_outcome TEXT, "
+              "gate_n INTEGER NOT NULL DEFAULT 0, updated_at TEXT, PRIMARY KEY(day,ticker))")
+    c.commit(); c.close()
+    assert record_conviction(db, "AAA", "scored 50", day=DAY)   # would fail without the ALTER
+    assert _row(db, "AAA")["conviction_outcome"] == "scored 50"
+    # and the existing recorders still work against the migrated table
+    assert record_monitor_evals(db, [{"ticker": "AAA", "move_pct": 1.0, "promoted": False}], day=DAY) == 1
 
 
 # ── error safety ────────────────────────────────────────────────────────────────────────

@@ -35,12 +35,18 @@ CREATE TABLE IF NOT EXISTS entry_funnel (
     max_vol_ratio REAL,                 -- largest volume spike ratio (latest/avg) seen
     promoted_n    INTEGER NOT NULL DEFAULT 0,   -- times it tripped a trigger and was promoted
     last_trigger  TEXT,                 -- the most recent promotion trigger string
+    conviction_n  INTEGER NOT NULL DEFAULT 0,   -- times it reached the conviction/evaluate stage
+    conviction_outcome TEXT,            -- conviction result (scored N / no-trade reason)
     gate_outcome  TEXT,                 -- most recent entry-gate result (passed / a rejection reason)
     gate_n        INTEGER NOT NULL DEFAULT 0,   -- times it reached the entry gates
     updated_at    TEXT,
     PRIMARY KEY (day, ticker)
 );
 """
+
+# Columns added after the table first shipped — _connect ALTERs them in (CREATE IF NOT EXISTS never adds
+# a column to a pre-existing table, the silent-failure trap; see the feature-store fix).
+_MIGRATIONS = (("conviction_n", "INTEGER NOT NULL DEFAULT 0"), ("conviction_outcome", "TEXT"))
 
 
 def _today(day: str | None) -> str:
@@ -50,6 +56,10 @@ def _today(day: str | None) -> str:
 def _connect(db_path: Any) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path), timeout=10)
     conn.executescript(_DDL)
+    have = {r[1] for r in conn.execute("PRAGMA table_info(entry_funnel)")}
+    for col, decl in _MIGRATIONS:
+        if col not in have:
+            conn.execute(f"ALTER TABLE entry_funnel ADD COLUMN {col} {decl}")
     return conn
 
 
@@ -117,6 +127,33 @@ def record_gate_outcome(db_path: Any, ticker: str, outcome: str, *, day: str | N
         return False
 
 
+def record_conviction(db_path: Any, ticker: str, outcome: str, *, day: str | None = None) -> bool:
+    """Record a promoted ticker reaching the CONVICTION/evaluate stage with its result — 'scored N' when
+    it proceeds toward an order, or a 'no-trade: <reason>' when the conviction/IVR/vol gate drops it. This
+    lights the stage BETWEEN promotion and the rules-engine gates (where the 31 promoted-but-untraded
+    names fall out). UPSERTs the latest outcome + bumps conviction_n. Never raises."""
+    d = _today(day)
+    now = datetime.now(UTC).isoformat()
+    tk = str(ticker or "").upper()
+    if not tk:
+        return False
+    try:
+        conn = _connect(db_path)
+        conn.execute(
+            """INSERT INTO entry_funnel (day, ticker, conviction_outcome, conviction_n, updated_at)
+               VALUES (?,?,?,1,?)
+               ON CONFLICT(day, ticker) DO UPDATE SET
+                   conviction_outcome = excluded.conviction_outcome,
+                   conviction_n       = conviction_n + 1,
+                   updated_at         = excluded.updated_at""",
+            (d, tk, str(outcome)[:160], now))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception:
+        return False
+
+
 def funnel_summary(db_path: Any, *, day: str | None = None, limit: int = 60) -> list[dict]:
     """Per-ticker funnel for the day, for the dashboard/analysis. Adds a derived `stage` (where the ticker
     fell out) and sorts to surface the DIAGNOSTIC case first: names that moved hard but were never promoted
@@ -133,16 +170,19 @@ def funnel_summary(db_path: Any, *, day: str | None = None, limit: int = 60) -> 
     out = []
     for r in rows:
         promoted = (r.get("promoted_n") or 0) > 0
+        convicted = (r.get("conviction_n") or 0) > 0
         gated = (r.get("gate_n") or 0) > 0
         if gated:
-            stage = "reached_gates"
+            stage = "reached_gates"      # reached rules-engine generate (gate_outcome has the result)
+        elif convicted:
+            stage = "reached_conviction"  # scored but the conviction/IVR/vol gate dropped it before generate
         elif promoted:
-            stage = "promoted_only"      # surfaced but never reached an entry decision
+            stage = "promoted_only"      # surfaced but never reached the conviction stage
         else:
             stage = "never_promoted"     # evaluated but never tripped a trigger
         r["stage"] = stage
         out.append(r)
-    # diagnostic ordering: never-promoted-but-high-move first (the missed-mover symptom)
-    _rank = {"never_promoted": 0, "promoted_only": 1, "reached_gates": 2}
+    # diagnostic ordering: earliest-fallout-but-highest-move first (where the funnel leaks most)
+    _rank = {"never_promoted": 0, "promoted_only": 1, "reached_conviction": 2, "reached_gates": 3}
     out.sort(key=lambda x: (_rank[x["stage"]], -(x.get("max_move_pct") or 0)))
     return out[:limit]

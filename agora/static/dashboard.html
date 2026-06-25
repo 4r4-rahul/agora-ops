@@ -2276,7 +2276,7 @@ async function fetchEntryFunnel() {
     if (!f.length) { el.innerHTML = '<span style="color:#789">🔬 Entry funnel: monitor warming — no evaluations recorded yet today.</span>'; return; }
     const st = d.stages || {}; const hiNever = d.high_vol_never_promoted || [];
     el.innerHTML = '<div style="color:#678;margin:4px 0 3px">🔬 Entry funnel — why each ticker does/doesn\'t trade (read-only): '
-      + `never-promoted ${st.never_promoted||0} | promoted ${st.promoted_only||0} | reached gates ${st.reached_gates||0}</div>`
+      + `never-promoted ${st.never_promoted||0} | promoted ${st.promoted_only||0} | conviction-dropped ${st.reached_conviction||0} | reached gates ${st.reached_gates||0}</div>`
       + (hiNever.length ? `<div style="color:#e76;margin-bottom:3px">⚠️ high-vol MISSED (moved, never tripped the 1.5% bar): ${hiNever.join(', ')}</div>` : '')
       + '<table style="width:100%;border-collapse:collapse">'
       + '<tr style="color:#678"><td style="padding:1px 6px">ticker</td><td style="padding:1px 6px">HV</td><td style="padding:1px 6px">maxMove</td><td style="padding:1px 6px">evals</td><td style="padding:1px 6px">stage</td><td style="padding:1px 6px">gate</td></tr>'
@@ -2287,7 +2287,7 @@ async function fetchEntryFunnel() {
             + `<td style="padding:2px 6px;color:${(x.max_move_pct||0)>=1.5?'#5d9':'#9ab'}">${(x.max_move_pct||0).toFixed(1)}%</td>`
             + `<td style="padding:2px 6px;color:#789">${x.evaluated_n||0}</td>`
             + `<td style="padding:2px 6px;color:${scol}">${x.stage}</td>`
-            + `<td style="padding:2px 6px;color:#9ab">${(x.gate_outcome||'—').slice(0,40)}</td></tr>`;
+            + `<td style="padding:2px 6px;color:#9ab">${(x.gate_outcome||x.conviction_outcome||'—').slice(0,44)}</td></tr>`;
         }).join('') + '</table>';
   } catch(e) { el.innerHTML = '<span style="color:#789">🔬 Entry funnel: —</span>'; }
 }

@@ -972,7 +972,7 @@ async def get_entry_funnel() -> JSONResponse:
         for r in rows:
             r["hv"] = hv.get(r["ticker"])
         stages = {s: sum(1 for r in rows if r["stage"] == s)
-                  for s in ("never_promoted", "promoted_only", "reached_gates")}
+                  for s in ("never_promoted", "promoted_only", "reached_conviction", "reached_gates")}
         hi_never = [r["ticker"] for r in rows
                     if r["stage"] == "never_promoted" and (r.get("hv") or 0) >= 0.5]
         return JSONResponse({
