@@ -1808,6 +1808,16 @@ class AgoraSession:
                     if not _gok:
                         logger.info("LongOptions [%s] BLOCKED by %s — skip", ticker, _greason)
                         return
+                    # HARD CONTRACT-CAP GUARD (long-options path) — mirrors the spread-path guard in
+                    # _submit_recommendation_inner. Long options submit via their own lock, so they need
+                    # the same final clamp; no builder/override may breach long_options_max_contracts.
+                    # WARN-logs the pre-clamp count so the oversizing source upstream is visible.
+                    _lcap = int(self._settings.long_options_max_contracts)
+                    if int(getattr(rec, "contracts", 0) or 0) > _lcap:
+                        logger.warning(
+                            "CONTRACT-CAP GUARD: %s %s sized %d > cap %d — clamping (source upstream)",
+                            ticker, decision.strategy, rec.contracts, _lcap)
+                        rec.contracts = _lcap
                     logger.info(
                         "LongOptions SUBMITTING [%s] %s strike=%.0f exp=%s prem=$%.2f "
                         "contracts=%d conviction=%d ptIVR=%.0f",
@@ -4006,6 +4016,22 @@ class AgoraSession:
         strategy_str = getattr(recommendation, "strategy", "unknown")
         if hasattr(strategy_str, "value"):
             strategy_str = strategy_str.value
+
+        # ── HARD CONTRACT-CAP GUARD (defense-in-depth, 2026-06-25) ──────────────────────────
+        # The per-builder caps (rules_engine max_contracts_per_trade=10, long_options
+        # long_options_max_contracts=5) clamp internally, but a builder/override path emitted
+        # OVERSIZED counts that breached both (DIA 21, NOK 12 — up to 44% of AUM in one trade). This is
+        # the single authoritative FINAL clamp every recommendation passes through before execution. It
+        # WARN-logs the pre-clamp count so the oversizing source upstream is visible and fixable.
+        _is_long = strategy_str in ("long_call", "long_put")
+        _hard_cap = int(self._settings.long_options_max_contracts if _is_long
+                        else self._settings.max_contracts_per_trade)
+        if int(getattr(recommendation, "contracts", 0) or 0) > _hard_cap:
+            logger.warning(
+                "CONTRACT-CAP GUARD: %s %s sized %d > cap %d — clamping (oversizing source is upstream)",
+                ticker, strategy_str, recommendation.contracts, _hard_cap)
+            recommendation.contracts = _hard_cap
+
         mid_price = abs(recommendation.entry_debit_credit / max(1, recommendation.contracts * 100))
 
         # Execution cooldown — block re-submission of a ticker that recently failed to fill.

@@ -17,15 +17,13 @@ All external I/O is mocked: no network, no IBKR, no Claude API, no real SQLite w
 
 from __future__ import annotations
 
-import asyncio
 import tempfile
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -100,6 +98,8 @@ def _make_session() -> Any:
     s._settings.high_conviction_score     = 80.0
     s._settings.db_path                   = Path(tempfile.NamedTemporaryFile(suffix=".db").name)
     s._settings.max_open_positions        = 10
+    s._settings.max_contracts_per_trade   = 10   # hard contract-cap guard (spreads)
+    s._settings.long_options_max_contracts = 5   # hard contract-cap guard (long options)
     s._settings.max_portfolio_delta       = 100.0
     s._settings.max_portfolio_vega        = 5000.0
     s._settings.max_daily_theta_dollars   = 500.0
@@ -267,6 +267,24 @@ class TestSubmitRecommendationGateSequence:
         mock_submit.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_hard_contract_cap_guard_clamps_oversized(self):
+        """An oversized recommendation (any builder/override) is clamped to max_contracts_per_trade
+        before submit — the defense-in-depth guard for the DIA-21/NOK-12 cap breach."""
+        s   = _make_session()
+        rec = _make_recommendation(contracts=21)   # bull_put_spread → spread cap (10)
+        order = {"status": "Filled", "order_id": 9, "fills": [{"price": 1.5}]}
+        s._record_position = MagicMock()
+        with patch("agora.session.get_macro_calendar") as mock_cal, \
+             patch("agora.session.submit_trade", new_callable=AsyncMock, return_value=order) as mock_submit, \
+             patch("agora.session._log_chain", return_value="chain-009"):
+            mock_cal.return_value.should_trade.return_value           = (True, "")
+            mock_cal.return_value.position_size_multiplier.return_value = 1.0
+            await s._submit_recommendation(rec, "AAPL", 150.0)
+
+        assert rec.contracts == 10        # clamped from 21 to the spread cap
+        mock_submit.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_compliance_blocks(self):
         """Compliance gate failure → submit_trade never called."""
         s   = _make_session()
@@ -310,7 +328,7 @@ class TestSubmitRecommendationGateSequence:
         s   = _make_session()
         rec = _make_recommendation()
         # Set cooldown to 90 minutes from now
-        s._exec_cooldowns["AAPL"] = datetime.now(tz=timezone.utc) + timedelta(minutes=90)
+        s._exec_cooldowns["AAPL"] = datetime.now(tz=UTC) + timedelta(minutes=90)
 
         with patch("agora.session.get_macro_calendar") as mock_cal, \
              patch("agora.session.submit_trade", new_callable=AsyncMock) as mock_submit:
@@ -326,7 +344,7 @@ class TestSubmitRecommendationGateSequence:
         s   = _make_session()
         rec = _make_recommendation()
         # Cooldown expired 1 minute ago
-        s._exec_cooldowns["AAPL"] = datetime.now(tz=timezone.utc) - timedelta(minutes=1)
+        s._exec_cooldowns["AAPL"] = datetime.now(tz=UTC) - timedelta(minutes=1)
         order = {"status": "Filled", "order_id": 4, "fills": [{"price": 1.5}]}
 
         s._record_position = MagicMock()
@@ -431,7 +449,7 @@ class TestSubmitRecommendationGateSequence:
 
         # Cooldown should now be set
         assert "AAPL" in s._exec_cooldowns
-        assert s._exec_cooldowns["AAPL"] > datetime.now(tz=timezone.utc)
+        assert s._exec_cooldowns["AAPL"] > datetime.now(tz=UTC)
 
     @pytest.mark.asyncio
     async def test_gate_ordering_timing_before_compliance(self):
