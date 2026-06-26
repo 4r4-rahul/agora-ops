@@ -205,6 +205,14 @@ def snapshot_daily(db_path: str) -> dict[str, Any]:
     """Persist today's metrics as first-class learning data (idempotent per day). Called EOD by
     the ScheduledAttributor so the learning loop can see the expectancy trend."""
     try:
+        # SELF-HEAL the ledger first: re-derive daily_pnl from the authoritative positions so the
+        # reconciliation below can NEVER carry stale drift after a book correction (the −$425 /
+        # recon_ok=0 that persisted for days). daily_pnl is a derived projection, not a 2nd writer.
+        try:
+            from agora.ops.book_manager import rebuild_daily_pnl
+            rebuild_daily_pnl(db_path)
+        except Exception:
+            pass   # snapshot must still run even if the rebuild hiccups
         full = compute_metrics(db_path)
         o = full.get("overall", {})
         recon = reconcile_books(db_path)
