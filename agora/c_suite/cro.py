@@ -371,10 +371,15 @@ class CROAgent(ExecutiveAgent):
         try:
             if self._position_mgr:
                 import sqlite3 as _sql
+
+                from ..ops.edge_dashboard import _REAL_CLOSE
                 db_path = str(self._settings.db_path)
                 conn = _sql.connect(db_path, check_same_thread=False)
+                # REAL fills only — an adopted/fiction close today must NOT corrupt the CRO's daily-loss
+                # read (the risk officer's loss assessment feeds halt/alert decisions).
                 realized = conn.execute(
-                    "SELECT COALESCE(SUM(realized_pnl),0) FROM positions WHERE close_date=date('now')"
+                    f"SELECT COALESCE(SUM(realized_pnl),0) FROM positions "
+                    f"WHERE {_REAL_CLOSE} AND close_date=date('now')"
                 ).fetchone()[0]
                 conn.close()
                 unrealized = sum(

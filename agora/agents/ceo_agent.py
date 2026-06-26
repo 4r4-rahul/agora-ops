@@ -1103,9 +1103,11 @@ Be direct. Flag anything that needs Rahul's attention with 🚨.
             ).fetchall()
             state["ghost_fills"] = [r[0] for r in ghost]
 
-            # Realized P&L today
+            # Realized P&L today — REAL fills only (the CEO's headline number must never include an
+            # adopted/fiction close; that is the −$22,494-vs-−$5,358 class of contamination).
+            from agora.ops.edge_dashboard import _REAL_CLOSE
             realized = conn.execute(
-                "SELECT SUM(realized_pnl) FROM positions WHERE close_date=date('now')"
+                f"SELECT SUM(realized_pnl) FROM positions WHERE {_REAL_CLOSE} AND close_date=date('now')"
             ).fetchone()[0]
             state["realized_pnl_today"] = round(realized or 0.0, 2)
 

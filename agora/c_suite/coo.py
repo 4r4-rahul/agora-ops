@@ -462,8 +462,12 @@ class COOAgent(ExecutiveAgent):
         try:
             db_path = str(self._settings.db_path)
             conn = _sql.connect(db_path, check_same_thread=False)
+            # REAL fills only — the COO's realized_pnl + its loss-alert (below) must not fire on an
+            # adopted/fiction close (which carries reconstructed cost basis, not a real outcome).
+            from ..ops.edge_dashboard import _REAL_CLOSE
             rows = conn.execute(
-                "SELECT ticker, realized_pnl, close_source FROM positions WHERE close_date=date('now')"
+                f"SELECT ticker, realized_pnl, close_source FROM positions "
+                f"WHERE {_REAL_CLOSE} AND close_date=date('now')"
             ).fetchall()
             conn.close()
             realized_total = sum(r[1] or 0 for r in rows)

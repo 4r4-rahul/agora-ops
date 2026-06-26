@@ -273,9 +273,11 @@ class CFOAgent(ExecutiveAgent):
             from ..ops.edge_dashboard import MIN_SAMPLE as _MIN_SAMPLE
             _cutoff = getattr(self._settings, "expectancy_legacy_cutoff_date", "2026-06-12")
 
-            # Today's realized P&L vs daily loss limit
+            # Today's realized P&L vs daily loss limit — REAL fills only (the comment above applies
+            # here too: an adopted/fiction close today would otherwise corrupt the daily-loss check).
             today_rows = conn.execute(
-                "SELECT COALESCE(SUM(realized_pnl), 0) FROM positions WHERE close_date = date('now')"
+                f"SELECT COALESCE(SUM(realized_pnl), 0) FROM positions "
+                f"WHERE {_REAL_CLOSE} AND close_date = date('now')"
             ).fetchone()
             today_pnl = today_rows[0] if today_rows else 0.0
 
