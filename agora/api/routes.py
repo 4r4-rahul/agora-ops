@@ -509,21 +509,26 @@ async def get_performance() -> JSONResponse:
         conn = _sql.connect(str(db_path), check_same_thread=False)
         rows = conn.execute(
             "SELECT strategy, status, contracts, entry_price, entry_date, "
-            "close_date, realized_pnl, close_source FROM positions"
+            "close_date, realized_pnl, close_source, regime_at_entry FROM positions"
         ).fetchall()
         conn.close()
     except Exception as exc:
         return JSONResponse({"error": f"db read failed: {exc}"}, status_code=500)
 
     # Column indices
-    STRAT, STATUS, QTY, ENTRY_PX, ENTRY_D, CLOSE_D, RPNL, CLOSE_SRC = range(8)
+    STRAT, STATUS, QTY, ENTRY_PX, ENTRY_D, CLOSE_D, RPNL, CLOSE_SRC, REGIME = range(9)
 
     _REAL_SRC = {"lifecycle", "thesis_exit", "trailing_stop", "stop_loss", "pre_earnings"}
 
     def _is_real_close(r) -> bool:
-        """Real broker fill only — excludes fabricated_unfilled / tws_startup_sync / reconcile /
-        reset so the headline win-rate/expectancy can NEVER show model-mark fiction."""
+        """Real broker fill only. MUST mirror book_manager._REAL_CLOSE (the single source of truth):
+        excludes fabricated / tws_startup_sync / reconcile / duplicate / reset AND adopted-legacy
+        positions. The missing `adopted` exclusion here was the bug that made the dashboard headline
+        read −$22,494 (fiction-contaminated) vs the real −$5,358 — adopted DIA legs carry a real
+        close_source ('lifecycle') but reconstructed/fictional cost basis."""
         if (r[STATUS] or "") != "closed" or r[RPNL] is None:
+            return False
+        if (r[REGIME] or "") == "adopted":   # legacy adopted fiction — NEVER real strategy P&L
             return False
         src = (r[CLOSE_SRC] or "")
         if any(k in src for k in ("fabricated", "sync", "reconcile", "duplicate")):
