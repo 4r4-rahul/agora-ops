@@ -526,17 +526,21 @@ class AgoraSettings(BaseSettings):
         description="Hard cap on contracts per trade regardless of size_multiplier",
     )
     paper_min_contracts: int = Field(
-        default=3, ge=1, le=20,
-        description="PAPER-ONLY (2026-06-24): floor on contracts per trade in paper mode so the full "
-                    "multi-contract operational machinery (partial closes, scaling out, surveillance) "
-                    "is exercised — 63/81 trades were 1-contract, which can't partial-close. This is "
-                    "operational-effectiveness testing, NOT a profitability choice; the #4 live risk "
-                    "cap is bypassed in paper. Live mode is unaffected (keeps the conservative cap).",
+        default=1, ge=1, le=20,
+        description="PAPER-ONLY minimum contracts per trade. RECALIBRATED 2026-06-26 from 3→1: a floor of "
+                    "3 INVERTED risk parity — it forced the most-volatile names (which adaptive sizing "
+                    "puts at the FEWEST contracts) up to the same size as calm names, so a volatile name "
+                    "with the widest stop carried the largest $risk, and every spread collapsed to a "
+                    "constant 3 (no adaptive signal). Multi-contract management is now exercised via "
+                    "paper_contract_multiplier (which PRESERVES the adaptive ordering), not a flat floor.",
     )
     paper_contract_multiplier: float = Field(
-        default=1.0, ge=1.0, le=10.0,
-        description="PAPER-ONLY: scales contracts above the floor to stress-test scaling/partial-close "
-                    "logic at realistic size. Daily-loss breaker still applies. Tune via .env.",
+        default=3.0, ge=1.0, le=10.0,
+        description="PAPER-ONLY: scales the float risk-parity base UP so multi-contract management "
+                    "(partial closes, scaling out, surveillance) is exercised at realistic size while "
+                    "KEEPING the adaptive ordering (volatile→fewer, calm→more). RECALIBRATED 2026-06-26 "
+                    "1.0→3.0 (median name → ~2-3 contracts; calm scales up; volatile stays ~1). "
+                    "Daily-loss breaker still applies. Tune via .env.",
     )
     adaptive_entry_sizing_enabled: bool = Field(
         default=True,

@@ -974,25 +974,29 @@ class StrategyRulesEngine:
     ) -> int:
         if max_loss_per_contract <= 0:
             return 1
-        base = max(1, int(settings.risk_per_trade_dollars / max_loss_per_contract))
+        # Risk-parity base in CONTRACTS (risk budget / per-contract max-loss) — kept as a FLOAT here so the
+        # per-ticker adaptive vol factor keeps its resolution. conviction × vol scale it; round ONCE.
+        base_f = settings.risk_per_trade_dollars / max_loss_per_contract
+        if getattr(settings, "trading_mode", "live") == "paper":
+            # PAPER operational-effectiveness: scale UP so multi-contract management (partial closes,
+            # scaling out, surveillance) is exercised — but WITHOUT a flat floor. A flat
+            # paper_min_contracts=3 floor INVERTED risk parity: it forced the most-volatile names (which
+            # adaptive sizing puts at the FEWEST contracts) up to the same size as calm names, so a
+            # volatile name — carrying the WIDEST adaptive stop — ended up with the LARGEST $risk. Instead
+            # recompute from the FLOAT base (the integer base used live rounds 0.43→1 and erases the
+            # volatile/median distinction BEFORE the vol factor) and scale by paper_contract_multiplier,
+            # which PRESERVES the adaptive ordering (volatile small, calm large). PAPER-ONLY; live unchanged.
+            mult = float(getattr(settings, "paper_contract_multiplier", 1.0) or 1.0)
+            sized_f = base_f * max(0.0, size_multiplier) * max(0.0, vol_size_factor) * mult
+            floor = int(getattr(settings, "paper_min_contracts", 1) or 1)
+            return max(floor, min(int(round(sized_f)), settings.max_contracts_per_trade))
+        # LIVE — integer base, conviction × adaptive vol factor, then the #4 hard per-trade risk ceiling.
+        # Positions >=$400 risk had -$134 EV; the max(1,...) floor let a single wide contract blow the
+        # budget, so trim to the (per-ticker-resolved) cap — a single contract over it returns 0 → skip.
+        base = max(1, int(base_f))
         sized = max(1, round(base * size_multiplier))
-        # Per-ticker ADAPTIVE entry sizing (risk parity): shrink a volatile name / enlarge a calm one so
-        # each risks ~1R around its adaptive stop. vol_size_factor is the PURE uncapped vol-math multiplier;
-        # the hard max_contracts cap below + the max(1,...) floor are the ONLY (physical) bounds.
         sized = max(1, round(sized * max(0.0, vol_size_factor)))
         sized = min(sized, settings.max_contracts_per_trade)
-        # PAPER operational-effectiveness mode (2026-06-24): scale contracts UP so the full
-        # multi-contract management machinery (partial closes, scaling out, surveillance) is actually
-        # exercised — 63/81 trades were 1-contract and could never partial-close. Deliberate
-        # operational testing, PAPER-ONLY; the #4 live risk cap is bypassed here. Live is unchanged.
-        if getattr(settings, "trading_mode", "live") == "paper":
-            floor = getattr(settings, "paper_min_contracts", 1)
-            mult = getattr(settings, "paper_contract_multiplier", 1.0)
-            return max(1, min(int(round(max(sized, floor) * mult)), settings.max_contracts_per_trade))
-        # LIVE — #4 hard per-trade risk ceiling. Positions >=$400 risk had -$134 EV; the max(1,...)
-        # floor above let a single wide contract blow the budget. Trim to the cap; if a single
-        # contract already exceeds it, return 0 — the caller skips (too wide to size safely).
-        # risk_cap is the per-ticker-resolved ceiling (falls back to the global setting).
         cap = risk_cap if risk_cap is not None else getattr(settings, "max_risk_per_trade_dollars", 0.0)
         if cap and cap > 0:
             sized = min(sized, int(cap / max_loss_per_contract))

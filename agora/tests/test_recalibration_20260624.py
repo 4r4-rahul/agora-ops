@@ -151,9 +151,11 @@ def _paper_sized(max_loss, floor=2, mult=2.0, size_mult=1.0):
 
 
 def test_paper_floors_and_scales_contracts():
-    # a normally-1-contract wide structure ($779) → floor 2 × mult 2 = 4 contracts (multi-contract ops)
-    assert _paper_sized(779.0) == 4
-    # base sizing already > floor still gets the multiplier: $50 max_loss → base 3 → ×2 = 6
+    # REDESIGNED 2026-06-26: float-resolution paper sizing — sized = round(base_f × conviction × vol ×
+    # mult), floored at paper_min_contracts (no flat floor that would invert risk parity). base_f =
+    # 150/max_loss. A wide $779 structure: base 0.19 × mult 2 ≈ 0.39 → floored to 2.
+    assert _paper_sized(779.0) == 2
+    # a cheap $50 structure: base 3.0 × mult 2 = 6 (multi-contract management exercised, proportionally)
     assert _paper_sized(50.0) == 6
 
 
@@ -164,8 +166,8 @@ def test_paper_bypasses_the_live_risk_cap():
 
 
 def test_paper_respects_max_contracts_hard_cap():
-    # floor 8 × mult 2 = 16 → clamped to max_contracts_per_trade (10)
-    assert _paper_sized(50.0, floor=8, mult=2.0) == 10
+    # base 3.0 ($50 max_loss) × mult 4 = 12 → clamped to max_contracts_per_trade (10)
+    assert _paper_sized(50.0, floor=1, mult=4.0) == 10
 
 
 def test_live_mode_unchanged_when_mode_absent_or_live():

@@ -182,6 +182,51 @@ class TestSizeContracts:
                                                    vol_size_factor=0.0) == 1
 
 
+# ── _size_contracts PAPER branch (float-resolution, no inverting floor — 2026-06-26) ──
+class TestSizeContractsPaper:
+    def _paper(self, risk=100.0, cap=10, mult=2.0, floor=1):
+        return types.SimpleNamespace(
+            risk_per_trade_dollars=risk, max_contracts_per_trade=cap,
+            trading_mode="paper", paper_min_contracts=floor, paper_contract_multiplier=mult)
+
+    def _n(self, vf, *, risk=100.0, max_loss=100.0, mult=2.0, floor=1):
+        return StrategyRulesEngine._size_contracts(
+            None, 1.0, max_loss, self._paper(risk=risk, mult=mult, floor=floor), vol_size_factor=vf)
+
+    def test_paper_preserves_adaptive_ordering_no_inversion(self):
+        # base 1.0, mult 2 → volatile 1, median 2, calm 4, very-calm 8: monotone in vol, NEVER inverted
+        assert self._n(0.25) == 1
+        assert self._n(1.0) == 2
+        assert self._n(2.0) == 4
+        assert self._n(4.0) == 8
+
+    def test_paper_volatile_not_floored_up(self):
+        # REGRESSION: the old flat floor of 3 forced volatile names to 3 (inverting risk parity).
+        # With the float-resolution branch a volatile name stays small, never floored up to the old 3.
+        s = types.SimpleNamespace(risk_per_trade_dollars=150.0, max_contracts_per_trade=10,
+                                  trading_mode="paper", paper_min_contracts=1, paper_contract_multiplier=3.0)
+        assert StrategyRulesEngine._size_contracts(None, 1.0, 347.0, s, vol_size_factor=0.25) == 1
+
+    def test_paper_float_base_resolves_subunit_budget(self):
+        # the resolution fix: at a sub-1 base (150/347 ≈ 0.43) the vol factor still differentiates names
+        s = types.SimpleNamespace(risk_per_trade_dollars=150.0, max_contracts_per_trade=10,
+                                  trading_mode="paper", paper_min_contracts=1, paper_contract_multiplier=3.0)
+        vol = StrategyRulesEngine._size_contracts(None, 1.0, 347.0, s, vol_size_factor=0.25)
+        calm = StrategyRulesEngine._size_contracts(None, 1.0, 347.0, s, vol_size_factor=3.21)
+        assert vol < calm   # NOT both collapsed to the same integer (the old bug)
+
+    def test_paper_multiplier_scales_for_management_testing(self):
+        assert self._n(1.0, mult=4.0) > self._n(1.0, mult=2.0)   # bigger multiplier → more contracts
+
+    def test_paper_capped_at_max_contracts(self):
+        assert self._n(5.0, mult=3.0) <= 10                       # bounded by the physical cap
+
+    def test_paper_floor_lifts_tail_without_inverting(self):
+        # an explicit floor of 2 lifts the volatile tail to 2 but a calm name still sizes strictly higher
+        assert self._n(0.01, floor=2) == 2
+        assert self._n(4.0, floor=2) > self._n(0.01, floor=2)
+
+
 # ── _vol_size_factor (per-ticker resolver) ────────────────────────────────────
 class TestVolSizeFactor:
     def _engine(self, *, enabled=True, profiles=(("TSLA", 0.58), ("KO", 0.16))):
