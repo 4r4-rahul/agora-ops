@@ -279,6 +279,18 @@ def _flatten_overfill(ib: Any, plan: list[dict], max_flatten: int) -> dict:
     return out
 
 
+def safe_to_ghost_close(snap_a: dict, snap_b: dict, leg_keys: list) -> bool:
+    """A DB position is a TRUE ghost (safe to close) only if BOTH broker snapshots agree (the
+    position stream has settled — no leg still arriving) AND every one of its legs is absent in
+    BOTH snapshots. This is the guard the 2026-06-26 false ghost-close lacked: a single half-
+    streamed snapshot made the adopted DIA/NOW legs look gone, so the rows were closed and the
+    over-fill turned into untracked orphans. Closing DB state on incomplete broker data is never
+    safe — when in doubt, defer to the next cycle."""
+    if snap_a != snap_b:
+        return False   # stream not settled — defer
+    return all(snap_a.get(k, 0) == 0 and snap_b.get(k, 0) == 0 for k in leg_keys)
+
+
 def heal(db_path: str, position_mgr: Any, host: str = "127.0.0.1", port: int = 7497,
          client_id: int = 73, adopt_orphans: bool = True, close_ghosts: bool = True,
          ghost_min_age_min: float = 3.0,
@@ -312,11 +324,16 @@ def heal(db_path: str, position_mgr: Any, host: str = "127.0.0.1", port: int = 7
         ib.connect(host, port, clientId=client_id, timeout=15)
         ib.reqPositions()
         # A large position (e.g. the 659-contract DIA over-fill) streams as hundreds of position
-        # messages; a 1.2s settle truncated it on the 2026-06-26 restart and the adopted row was
-        # falsely ghost-closed. 3s gives a big book time to arrive before we diff/ghost-close.
+        # messages; a single short settle truncated it on the 2026-06-26 restart and the adopted row
+        # was falsely ghost-closed. Take TWO snapshots a beat apart: if they disagree the stream is
+        # still arriving and ghost-closing (which DESTROYS DB state) must wait. The later snapshot is
+        # the more complete one, so it is authoritative for the diff.
         ib.sleep(3.0)
-        ibk = ibkr_legs(ib)                    # signed qty per leg
+        ibk_a = ibkr_legs(ib)                  # first snapshot
+        ib.sleep(1.5)
+        ibk = ibkr_legs(ib)                    # later snapshot → authoritative
         detailed = ibkr_positions_detailed(ib) # qty + avgCost per leg
+        positions_stable = (ibk == ibk_a)      # stream settled?
     except Exception as exc:
         out["errors"].append(f"connect/positions: {exc}")
         try: ib.disconnect()
@@ -347,7 +364,15 @@ def heal(db_path: str, position_mgr: Any, host: str = "127.0.0.1", port: int = 7
                     ib, overfill_plan, overfill_max_flatten)
 
         # ── GHOSTS: close DB positions whose legs are entirely absent at the broker ──
-        if close_ghosts:
+        # DEFERRED when the broker snapshot is unstable: ghost-closing destroys DB state, and a
+        # half-streamed snapshot made adopted DIA/NOW look "gone" on 2026-06-26, falsely closing
+        # them (which then turned the over-fill into orphans). Never close on incomplete data.
+        if close_ghosts and not positions_stable:
+            out["ghost_close_deferred"] = True
+            logger.warning(
+                "Ghost-close DEFERRED — broker positions still streaming (snapshot changed between "
+                "reads); NOT closing DB positions on incomplete data. Will retry next cycle.")
+        elif close_ghosts:
             try:
                 for pos in position_mgr.get_open_positions():
                     keys = []
@@ -355,12 +380,8 @@ def heal(db_path: str, position_mgr: Any, host: str = "127.0.0.1", port: int = 7
                         right = "C" if str(lg.option_type).lower().startswith("c") else "P"
                         keys.append((pos.ticker, right, float(lg.strike),
                                      _norm_expiry(lg.expiration.isoformat())))
-                    if any(ibk.get(k, 0) != 0 for k in keys):
-                        continue  # at least one leg still live at broker → not a ghost
-                    # Safety against closing a just-filled entry whose IBKR position stream hasn't
-                    # arrived: reqPositions + the 1.2s settle above means a real fill is already in
-                    # `ibk`; combined with the periodic (not per-fill) cadence, a position absent
-                    # here is genuinely gone from the broker. Close it so the DB mirrors TWS.
+                    if not safe_to_ghost_close(ibk_a, ibk, keys):
+                        continue  # legs still live in EITHER snapshot → not a confirmed ghost
                     position_mgr.mark_position_closed(
                         position_id=pos.position_id, realized_pnl=0.0, close_price=0.0,
                         source="reconcile_ghost")

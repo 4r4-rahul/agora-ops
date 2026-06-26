@@ -434,3 +434,91 @@ class TestLegRatioVsAbsolute:
         out = db_legs(db)
         assert out[("XYZ", "C", 100.0, "20260821")] == +4
         assert out[("XYZ", "C", 110.0, "20260821")] == -8
+
+
+# ── ghost-close stability guard (the 2026-06-26 false-close root) ───────────────
+class TestSafeToGhostClose:
+    K = ("DIA", "P", 505.0, "20260717")
+
+    def test_unstable_snapshots_never_close(self):
+        from agora.ops.position_reconciler import safe_to_ghost_close
+        # leg absent in snap_a but present in snap_b → stream still arriving → must NOT close
+        assert safe_to_ghost_close({}, {self.K: -59}, [self.K]) is False
+
+    def test_stable_and_absent_in_both_closes(self):
+        from agora.ops.position_reconciler import safe_to_ghost_close
+        assert safe_to_ghost_close({}, {}, [self.K]) is True
+
+    def test_stable_but_present_does_not_close(self):
+        from agora.ops.position_reconciler import safe_to_ghost_close
+        assert safe_to_ghost_close({self.K: -59}, {self.K: -59}, [self.K]) is False
+
+
+class _FakeContract:
+    def __init__(self, symbol, right, strike, expiry):
+        self.symbol, self.right, self.strike = symbol, right, strike
+        self.lastTradeDateOrContractMonth, self.secType = expiry, "OPT"
+
+
+class _FakeBrokerPos:
+    def __init__(self, symbol, right, strike, expiry, qty):
+        self.contract = _FakeContract(symbol, right, strike, expiry)
+        self.position, self.avgCost = qty, 1.0
+
+
+class _StreamingIB:
+    """Returns successive position() snapshots to simulate a large book still streaming."""
+    def __init__(self, snapshots):
+        self._snaps, self._i = snapshots, 0
+    def connect(self, *a, **k): pass
+    def reqPositions(self): pass
+    def sleep(self, _s): pass
+    def positions(self):
+        snap = self._snaps[min(self._i, len(self._snaps) - 1)]
+        self._i += 1
+        return snap
+    def disconnect(self): pass
+
+
+def _dia_position():
+    leg = types.SimpleNamespace(option_type="put", strike=505.0,
+                                expiration=types.SimpleNamespace(isoformat=lambda: "2026-07-17"))
+    return types.SimpleNamespace(position_id="adopt-dia", ticker="DIA", legs=[leg])
+
+
+def _mgr_with(pos):
+    closed = []
+    mgr = types.SimpleNamespace(
+        get_open_positions=lambda: [pos],
+        mark_position_closed=lambda **kw: closed.append(kw),
+    )
+    return mgr, closed
+
+
+class TestHealGhostCloseStability:
+    def test_does_not_ghost_close_while_streaming(self, monkeypatch):
+        from agora.ops import position_reconciler as pr
+        dia = _FakeBrokerPos("DIA", "P", 505.0, "20260717", -59)
+        # snap1: DIA not yet streamed (absent); snap2 & detailed: DIA present
+        ib = _StreamingIB([[], [dia], [dia]])
+        monkeypatch.setattr("ib_insync.IB", lambda: ib)
+        mgr, closed = _mgr_with(_dia_position())
+        db = _db([("DIA", "open", json.dumps([_leg(option_type="put", strike=505,
+                                                    expiration="2026-07-17", contracts=59)]))])
+        out = pr.heal(db, mgr, overfill_flatten_enabled=False)
+        assert out.get("ghost_close_deferred") is True
+        assert out["ghosts_closed"] == 0
+        assert closed == [], "must NOT ghost-close a position whose legs are mid-stream"
+
+    def test_ghost_closes_when_genuinely_absent_and_stable(self, monkeypatch):
+        from agora.ops import position_reconciler as pr
+        # all three snapshots agree the broker is flat → the DB position is a true ghost
+        ib = _StreamingIB([[], [], []])
+        monkeypatch.setattr("ib_insync.IB", lambda: ib)
+        mgr, closed = _mgr_with(_dia_position())
+        db = _db([("DIA", "open", json.dumps([_leg(option_type="put", strike=505,
+                                                    expiration="2026-07-17", contracts=59)]))])
+        out = pr.heal(db, mgr, overfill_flatten_enabled=False)
+        assert out.get("ghost_close_deferred") is not True
+        assert out["ghosts_closed"] == 1
+        assert len(closed) == 1 and closed[0]["position_id"] == "adopt-dia"
