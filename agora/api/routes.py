@@ -482,6 +482,31 @@ async def get_attribution(days: int = 30) -> JSONResponse:
     })
 
 
+@router.get("/book")
+async def get_book() -> JSONResponse:
+    """THE canonical money snapshot — the single source of truth every surface must agree with:
+    real strategy P&L (the honest headline) + win-rate/expectancy/PF, EXCLUDED fiction partitioned
+    by cause (adopted/reconcile/fabricated/other) with the every-penny-accounted invariant, and the
+    DB-internal reconciliation status. Built by agora.ops.book_manager."""
+    session = get_session()
+    if session is None:
+        return JSONResponse({"error": "session not ready"}, status_code=503)
+    from agora.ops.book_manager import canonical_book
+    return JSONResponse(canonical_book(str(session._settings.db_path)))
+
+
+@router.get("/book/bugs")
+async def get_book_bugs() -> JSONResponse:
+    """Execution-bug episode ledger: real strategy P&L vs quarantined fiction, every excluded dollar
+    tagged to a dated incident + root cause + fix commit. The bugs did NOT lose real strategy money —
+    they made phantom book entries, now cleanly separated out."""
+    session = get_session()
+    if session is None:
+        return JSONResponse({"error": "session not ready"}, status_code=503)
+    from agora.ops.book_manager import execution_bug_ledger
+    return JSONResponse(execution_bug_ledger(str(session._settings.db_path)))
+
+
 @router.get("/performance")
 async def get_performance() -> JSONResponse:
     """
