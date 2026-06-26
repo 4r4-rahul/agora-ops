@@ -119,3 +119,27 @@ class TestEmptyAndErrorSafety:
     def test_reads_never_raise_on_bad_path(self):
         assert reconcile("/nonexistent/x.db").get("status") == "ERROR"
         assert "error" in canonical_book("/nonexistent/x.db")
+
+
+class TestExecutionBugLedger:
+    """The honest bug accounting: real strategy P&L separated from quarantined fiction, episodes tagged."""
+
+    def test_ledger_separates_real_from_fiction(self, tmp_path):
+        from agora.ops.book_manager import execution_bug_ledger
+        db = _db(tmp_path, [_REAL_A, _REAL_B, _ADOPTED, _RECON])  # real=50, adopted=-800, reconcile=-10
+        L = execution_bug_ledger(db)
+        assert L["real_strategy_pnl"] == 50.0 and L["real_strategy_closes"] == 2
+        assert L["total_excluded_fiction"] == -810.0   # -800 adopted + -10 reconcile
+        assert L["by_cause"]["adopted_legacy"]["pnl"] == -800.0
+        assert L["by_cause"]["reconcile_artifact"]["pnl"] == -10.0
+        # every episode carries date + root_cause + fix_commit + its bucket's current book P&L
+        assert L["episodes"], "registry must list the known incidents"
+        for e in L["episodes"]:
+            assert e["date"] and e["root_cause"] and e["fix_commit"]
+            assert "current_book_bucket_pnl" in e
+        # reconciliation status travels with the ledger
+        assert "reconciliation" in L
+
+    def test_ledger_safe_on_bad_path(self):
+        from agora.ops.book_manager import execution_bug_ledger
+        assert "error" in execution_bug_ledger("/nonexistent/x.db")

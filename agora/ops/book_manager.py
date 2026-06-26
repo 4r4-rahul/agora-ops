@@ -149,6 +149,72 @@ def excluded_attribution(conn: sqlite3.Connection) -> dict[str, Any]:
     return out
 
 
+# ── Execution-bug episode registry ──────────────────────────────────────────────────────────────
+# Dated incidents where an EXECUTION bug (not a strategy decision) created PHANTOM book entries —
+# over-fills, mis-reconstructed cost basis. Each is quarantined from real strategy P&L (it lands in
+# an `excluded` bucket). This registry is the NARRATIVE behind the excluded dollars: what happened,
+# the root cause, and the fix commit — so every fiction dollar is tagged with a reason, and real
+# strategy P&L is cleanly separable. Append new incidents here as they are found + fixed.
+EXECUTION_BUG_EPISODES: list[dict[str, Any]] = [
+    {
+        "date": "2026-06-26", "name": "close-stacking runaway",
+        "bucket": "reconcile_artifact",
+        "phantom_peak": "DIA 59→659 contracts (~$105k phantom notional), NOW→131",
+        "root_cause": "close orderRef was session-scoped with NO idempotency guard on the exit path; "
+                      "IBKR paper fill-lag made _execute_close re-fire a full-size close every cycle — "
+                      "~17 stacked and all filled.",
+        "fix_commit": "c14a161",
+    },
+    {
+        "date": "2026-06-25", "name": "adopted-position fiction (contracts² cost basis)",
+        "bucket": "adopted_legacy",
+        "phantom_peak": "book showed −$1.18M from legacy adopted positions",
+        "root_cause": "the reconciler reconstructed entry_price as max_loss/contracts (carrying the "
+                      "contract count), so realized P&L scaled by contracts TWICE.",
+        "fix_commit": "956f352 / 27d66d7",
+    },
+    {
+        "date": "2026-06-25", "name": "contract-cap breach",
+        "bucket": "adopted_legacy",
+        "phantom_peak": "positions over the 10-contract cap (DIA 21→59, NOK 12→25)",
+        "root_cause": "the entry-path contract cap had no equivalent on the exit/adoption paths.",
+        "fix_commit": "6de6204",
+    },
+]
+
+
+def execution_bug_ledger(db_path: str) -> dict[str, Any]:
+    """The honest execution-bug accounting: real strategy P&L vs bug/legacy FICTION impact, with
+    every excluded dollar tagged to a dated incident + root cause + fix commit.
+
+    KEY TRUTH the owner asked to surface: the bugs did NOT lose real strategy money — they created
+    PHANTOM book entries (over-fills, mis-reconstructed cost basis) that are quarantined into the
+    `excluded` buckets. Real strategy P&L stands alone, unaffected."""
+    book = canonical_book(db_path)
+    if "error" in book:
+        return book
+    excl = book["excluded"]
+    episodes = []
+    for ep in EXECUTION_BUG_EPISODES:
+        b = excl.get(ep["bucket"], {})
+        episodes.append({**ep, "current_book_bucket_pnl": b.get("pnl", 0.0), "bucket_n": b.get("n", 0)})
+    rs = book["real_strategy"]
+    return {
+        "real_strategy_pnl": rs["net_realized"],
+        "real_strategy_closes": rs["n_closed"],
+        "total_excluded_fiction": excl.get("total", 0.0),
+        "by_cause": {k: v for k, v in excl.items() if k != "total"},
+        "episodes": episodes,
+        "summary": (
+            f"Real strategy P&L is {rs['net_realized']:+.0f} over {rs['n_closed']} closes. Separately, "
+            f"{excl.get('total', 0.0):+.0f} of execution-bug/legacy FICTION is quarantined (phantom "
+            f"book entries, NOT strategy outcomes) — see episodes for the cause of each."
+        ),
+        "reconciliation": book["reconciliation"],
+        "computed_at_utc": book["computed_at_utc"],
+    }
+
+
 def canonical_book(db_path: str) -> dict[str, Any]:
     """THE authoritative money snapshot every surface must read. Real strategy P&L is the headline;
     excluded/fiction is shown separately and attributed; reconciliation status is always included."""
