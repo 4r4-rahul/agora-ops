@@ -89,3 +89,16 @@ class TestSourceDisciplineGuards:
         assert "mark_position_closed" not in src, \
             "news-halt must not mark closed directly — _execute_close owns that (only on fill)"
         assert "if await self._execute_close" in src
+
+
+class TestOverfillAutoHalt:
+    """2026-06-26: a 659-contract over-fill went undetected by any automation — a human tripped
+    the kill switch. The heal cycle must now auto-trip it the instant an over-fill is detected."""
+
+    def test_run_position_heal_auto_trips_on_overfill(self):
+        src = inspect.getsource(session.AgoraSession._run_position_heal)
+        assert 'res.get("overfill_plan")' in src, "heal must inspect the over-fill plan"
+        assert "trip_kill_switch" in src, "heal must auto-trip the kill switch on over-fill"
+        assert 'tripped_by="overfill_autoheal"' in src
+        # trips once, not every cycle
+        assert "is_kill_switch_active" in src, "must guard so it trips once, not every cycle"

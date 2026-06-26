@@ -4682,6 +4682,31 @@ class AgoraSession:
                                res["orphans_adopted"], res["qty_mismatch"])
             elif res.get("errors"):
                 logger.warning("PositionHeal[%s] errors: %s", reason, res["errors"])
+
+            # AUTO-HALT: a broker leg massively over the book (the 2026-06-26 659-contract DIA
+            # signature) is an anomaly the engine never intended. On 06-26 NO automated detector
+            # caught it — a human tripped the kill switch by hand. Now the engine halts ITSELF the
+            # instant the heal cycle detects an over-fill (the flattener, already invoked inside
+            # heal(), unwinds it). Reset stays deliberate: the engine protects itself but does not
+            # blindly resume trading after an anomaly.
+            overfill = res.get("overfill_plan") or []
+            if overfill:
+                try:
+                    if not self._risk.is_kill_switch_active():
+                        flat = res.get("overfill_flatten") or {}
+                        legs = ", ".join(
+                            f"{p['symbol']} {p['ibkr_qty']:+d}(book {p['target_qty']:+d})"
+                            for p in overfill[:4]
+                        )
+                        msg = (f"AUTO-HALT: broker over-fill on {len(overfill)} leg(s) [{legs}] — "
+                               f"flatten placed={flat.get('placed', 0)} skipped={flat.get('skipped', 0)}; "
+                               f"entries halted until flat + manual reset")
+                        self._risk.trip_kill_switch(reason=msg, tripped_by="overfill_autoheal")
+                        logger.critical("🚨 %s", msg)
+                        if getattr(self, "_cro", None):
+                            await self._cro.receive_alert("PositionHealer", "critical", msg)
+                except Exception as trip_exc:
+                    logger.error("Over-fill auto-halt trip failed: %s", trip_exc)
         except Exception as exc:
             logger.warning("PositionHeal[%s] failed: %s", reason, exc)
 
