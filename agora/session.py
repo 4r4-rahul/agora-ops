@@ -1954,7 +1954,6 @@ class AgoraSession:
         Runs even when uw_alerts table is empty — get_news_context() returns
         an empty NewsContext silently in that case.
         """
-        from agora.execution.ibkr_bridge import close_trade as _close_trade
         from agora.services.news_signals import get_news_context
 
         _alerted_halts:  set[str] = set()   # suppress repeated Discord alerts per halt
@@ -1978,13 +1977,15 @@ class AgoraSession:
                             pos.ticker, pos.position_id,
                         )
                         try:
-                            await asyncio.wait_for(
-                                _close_trade(pos, self._settings, self._session_id), timeout=30.0
-                            )
-                            self._position_mgr.mark_position_closed(
-                                pos.position_id, realized_pnl=pos.unrealized_pnl, source="news_halt"
-                            )
-                            _alerted_halts.add(pos.ticker)
+                            # Route through _execute_close: it marks the position closed ONLY on a
+                            # real fill (booking the actual fill P&L, not the assumed mark), retries,
+                            # and escalates on failure. The OLD path marked closed unconditionally —
+                            # a paper close that hadn't filled became a GHOST (DB closed, broker still
+                            # holding a live, now-unmanaged position). Only suppress re-alerting once
+                            # the close actually confirmed; otherwise next cycle retries (the close
+                            # idempotency guard makes that safe — it won't stack).
+                            if await self._execute_close(pos, "news_halt: trading halted"):
+                                _alerted_halts.add(pos.ticker)
                         except Exception as ce:
                             logger.error("News halt close error [%s]: %s", pos.ticker, ce)
                 else:
@@ -4990,9 +4991,20 @@ class AgoraSession:
     async def _execute_roll(self, position: Any, new_expiry: Any) -> None:
         logger.info("Rolling %s → expiry %s", position.ticker, new_expiry)
         try:
-            await close_trade(position, self._settings, self._session_id)
+            close_result = await close_trade(position, self._settings, self._session_id)
         except Exception as exc:
             logger.error("Roll-close failed for %s: %s", position.ticker, exc)
+            return
+        # A roll is close-THEN-reopen. Only reopen if the close ACTUALLY flattened — otherwise the
+        # old position is still live at the broker (paper fills lag; or the close was AlreadyWorking
+        # / Cancelled / partial) and reopening would DOUBLE the exposure. Leave OPEN; the close keeps
+        # working (idempotency-guarded, no stacking) and the roll retries next cycle once flat.
+        close_status = (close_result or {}).get("status", "")
+        if close_status != "Filled":
+            logger.warning(
+                "Roll ABORTED for %s — close did not fill (status=%s); leaving OPEN, not reopening "
+                "(would double exposure). Will retry next cycle.", position.ticker, close_status,
+            )
             return
 
         # Reopen with same direction / pillar but new expiry
