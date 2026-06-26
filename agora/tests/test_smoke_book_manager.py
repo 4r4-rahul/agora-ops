@@ -11,5 +11,10 @@ def test_book_manager_invariants_hold():
     spec = importlib.util.spec_from_file_location("smoke_book_manager", _S)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    assert mod.main() == 0, "a book-manager invariant failed — see smoke output"
-    assert all(ok for _, ok in mod._results) and len(mod._results) >= 10
+    # Run ONLY the hermetic MOCK half here: the live half (PART B) reads .agora/agora.db, which in a
+    # test session may be a side-effect artifact created by another test, not the real book. Manual
+    # `python scripts/smoke_book_manager.py` runs both halves against the real DB.
+    mod._results.clear()
+    mod.part_a_mock()
+    assert all(ok for _, ok in mod._results), "a book-manager mock invariant failed"
+    assert len(mod._results) >= 10
