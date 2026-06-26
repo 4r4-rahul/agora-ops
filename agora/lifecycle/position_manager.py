@@ -1243,13 +1243,30 @@ class PositionManager:
             # downstream off the REAL realized P&L.
             try:
                 _row = self._db.execute(
-                    "SELECT realized_pnl, close_price FROM positions WHERE position_id=?",
+                    "SELECT realized_pnl, close_price, regime_at_entry FROM positions WHERE position_id=?",
                     (position.position_id,),
                 ).fetchone()
             except Exception:
                 _row = None
             _real_pnl = float(_row[0]) if _row and _row[0] is not None else round(position.unrealized_pnl, 2)
             _real_cp  = float(_row[1]) if _row and _row[1] is not None else round(position.current_price, 4)
+            _regime   = (_row[2] if _row and len(_row) > 2 else None) or \
+                        str(getattr(position, "regime_at_entry", "") or "")
+            # ADOPTED-POSITION GUARD (2026-06-26): an adopted position's ENTRY cost basis is
+            # RECONSTRUCTED (guessed from max_loss/contracts), so its realized P&L is FICTION. The AMD
+            # adopt-… close booked −$11,159 (= its fictional max_loss) and alarmed the owner on the
+            # closed-today view. We do NOT know the real entry, so we book $0 — the honest value
+            # (consistent with clean_book_fiction zeroing adopted marks). _REAL_CLOSE already excludes
+            # adopted from strategy P&L; this stops the fiction being WRITTEN at all, at the source.
+            if str(_regime) == "adopted":
+                if _real_pnl != 0.0:
+                    logger.warning(
+                        "ADOPTED close %s: realized $%.0f is fiction (reconstructed cost basis) — "
+                        "booking $0 (no real entry basis)", position.ticker, _real_pnl)
+                _real_pnl = 0.0
+                self._db.execute("UPDATE positions SET realized_pnl=0, close_price=0 WHERE position_id=?",
+                                 (position.position_id,))
+                self._db.commit()
             # NEVER-AGAIN GUARD (2026-06-25): a realized P&L outside the position's own defined-risk bounds
             # is mathematically impossible (the adopted-position corruption booked −$808k on a $16k-max-loss
             # spread). Refuse to propagate fiction downstream — clamp to the bound, correct the stored

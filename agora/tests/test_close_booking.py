@@ -113,3 +113,35 @@ async def test_pure_sim_path_books_the_mark(tmp_path):
     assert row[1] == 120.0
     assert row[2] == 0.55
     assert len(rec["trade_records"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_adopted_close_books_zero_not_fiction(tmp_path):
+    """An ADOPTED position's entry cost basis is RECONSTRUCTED fiction, so its realized P&L is
+    unknowable. The AMD adopt-… close booked −$11,159 (= its fictional max_loss) and alarmed the
+    owner on the closed-today view. _close_position must book $0 for adopted, not the fiction."""
+    async def on_close(pos, reason):
+        return True
+    stub, db, rec = _stub(tmp_path, on_close, prewrite=(-11159.0, 13.95))
+    db.execute("UPDATE positions SET regime_at_entry='adopted' WHERE position_id='p1'")
+    db.commit()
+    pos = types.SimpleNamespace(position_id="p1", ticker="AMD", regime_at_entry="adopted",
+                                unrealized_pnl=-11159.0, current_price=0.0, contracts=8,
+                                max_loss_dollars=11159.0, max_gain_dollars=0.0)
+    await PositionManager._close_position(stub, pos, "lifecycle", source="lifecycle")
+    row = db.execute("SELECT realized_pnl, close_price FROM positions WHERE position_id='p1'").fetchone()
+    assert row[0] == 0.0, "adopted close must book $0, not the reconstructed fiction"
+    assert rec["trade_records"][0]["realized_pnl"] == 0.0   # downstream got $0
+
+
+@pytest.mark.asyncio
+async def test_non_adopted_real_pnl_still_booked(tmp_path):
+    """Control: a NORMAL (non-adopted) close still books its real fill P&L unchanged."""
+    async def on_close(pos, reason):
+        return True
+    stub, db, rec = _stub(tmp_path, on_close, prewrite=(-235.0, 6.20))  # regime defaults to 'neutral'
+    pos = types.SimpleNamespace(position_id="p1", ticker="MKSI", regime_at_entry="neutral",
+                                unrealized_pnl=0.0, current_price=0.0, contracts=1,
+                                max_loss_dollars=500.0, max_gain_dollars=500.0)
+    await PositionManager._close_position(stub, pos, "thesis_exit", source="thesis_exit")
+    assert db.execute("SELECT realized_pnl FROM positions WHERE position_id='p1'").fetchone()[0] == -235.0
