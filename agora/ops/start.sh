@@ -82,7 +82,15 @@ ulimit -n 10240 2>/dev/null || ulimit -n 4096 2>/dev/null || true
 echo "[start.sh] open-file limit (ulimit -n) = $(ulimit -n)" >> "$LOG_DIR/launchd-start.log"
 
 # Load .env so subprocesses inherit API keys etc.
-set -a; source "$REPO/.env"; set +a
+# DISASTER-PROOF: sourcing is NON-FATAL. Under `set -e`, a single malformed .env line aborted the
+# whole startup and took the engine down (2026-06-26: a token pasted as `GITHUB_TOKEN= <token>` ran
+# the token as a command → exit 127 → engine never launched). We lift errexit around the source so a
+# bad line is ignored (every well-formed assignment before AND after it still loads) and the engine
+# always starts. The secret-scan + a clean .env are the right place to catch malformed lines — not a
+# dead engine.
+set +e
+set -a; source "$REPO/.env" 2>/dev/null; set +a
+set -e
 
 # ── Rotate the IBKR clientId block each restart (deploy-churn fix) ──────────────
 # A hard-killed engine leaves its IBKR connection (clientId) held by TWS for ~30-60s, so a fresh
