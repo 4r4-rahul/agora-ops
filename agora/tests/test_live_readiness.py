@@ -316,7 +316,10 @@ class TestComplianceHonesty:
         return m
 
     def test_wash_sale_cluster_fails(self):
-        r = self._meter(n_wash=15)._score_compliance()
+        # n_pos=1 keeps this hermetic: 1 is within max_open_positions for ANY config (Field ge=1),
+        # so the ONLY failing check is the wash-sale cluster — not an ambient-settings artifact.
+        # (n_pos=5 assumed the .env value; CI's default max_open_positions=4 made 5 > max → flaky.)
+        r = self._meter(n_wash=15, n_pos=1)._score_compliance()
         assert r["checks"]["wash_sale_no_cluster"] is False    # 15 ≥ 10 cluster
         assert r["checks"]["position_count_within_max"] is True
         assert r["score"] < 100

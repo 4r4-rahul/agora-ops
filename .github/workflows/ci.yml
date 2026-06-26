@@ -19,6 +19,12 @@ jobs:
   test-and-security:
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      # Tests instantiate AgoraSettings via get_settings() at import time, and anthropic_api_key is
+      # a REQUIRED field (no default — production fails fast on a missing real key). CI has no real
+      # secret, so provide a dummy: settings validate, and the tests mock the LLM (the full suite
+      # runs in seconds — no real API calls). Production behaviour is unchanged.
+      ANTHROPIC_API_KEY: ci-dummy-not-a-real-key
     steps:
       - uses: actions/checkout@v4
 
