@@ -1021,8 +1021,12 @@ class ScheduledAttributor:
                                 # Profile the FULL tradeable universe (not just already-traded tickers), so
                                 # EVERY ticker has an adaptivity profile — otherwise a first-ever entry in a
                                 # universe ticker sizes non-adaptively at 1.0× until its second trade.
+                                # NB: this class has no self._settings — use get_settings() (as the rest of
+                                # this method does). The old self._settings AttributeError was swallowed by
+                                # the except below, so the universe was silently never profiled.
+                                from agora.core.config import get_settings as _get_settings
                                 _tk = list(dict.fromkeys(
-                                    _traded + list(getattr(self._settings, "etf_universe", []) or [])))
+                                    _traded + list(getattr(_get_settings(), "etf_universe", []) or [])))
                                 from agora.ops.ticker_profile import build_profiles
                                 _bp = build_profiles(self._db_path, _tk)
                                 logger.info("ticker-profiles: %s", _bp.get("summary", _bp))

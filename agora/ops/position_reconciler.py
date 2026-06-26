@@ -24,6 +24,7 @@ import json
 import logging
 import sqlite3
 from dataclasses import dataclass, field
+from datetime import UTC
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -182,7 +183,7 @@ def ibkr_positions_detailed(ib: Any) -> dict[Leg, tuple[int, float]]:
     return out
 
 
-def plan_overfill_flatten(rep: "ReconcileReport", min_excess: int = 25) -> list[dict]:
+def plan_overfill_flatten(rep: ReconcileReport, min_excess: int = 25) -> list[dict]:
     """Compute the flatten plan for broker legs MASSIVELY over the book — the 2026-06-26 signature
     (DIA book −59 vs broker +631). Scans BOTH qty_mismatch AND orphan legs: when a position is
     ghost-closed in the DB while its over-filled broker legs persist (exactly what happened on the
@@ -284,14 +285,14 @@ def _position_age_minutes(pos: Any) -> float | None:
     entry_ts_utc; falls back to entry_date (a prior calendar day → definitely settled). Returns None
     when age can't be established — the caller then treats it as 'not safe to correct yet'."""
     from datetime import date as _date
-    from datetime import datetime, timezone
+    from datetime import datetime
     ts = getattr(pos, "entry_ts_utc", None)
     if ts:
         try:
             dt = datetime.fromisoformat(str(ts))
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return (datetime.now(timezone.utc) - dt).total_seconds() / 60.0
+                dt = dt.replace(tzinfo=UTC)
+            return (datetime.now(UTC) - dt).total_seconds() / 60.0
         except Exception:
             pass
     ed = getattr(pos, "entry_date", None)

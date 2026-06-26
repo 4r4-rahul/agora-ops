@@ -4,8 +4,6 @@ import asyncio
 import importlib.util
 from pathlib import Path
 
-import pytest
-
 _SMOKE = Path(__file__).resolve().parent.parent.parent / "scripts" / "smoke_runaway_defense.py"
 
 

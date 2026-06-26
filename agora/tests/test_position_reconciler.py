@@ -402,7 +402,8 @@ class TestLegRatioVsAbsolute:
     use position.contracts as the authoritative size so the reconciler agrees with the broker."""
 
     def _db_with_contracts(self, ticker, contracts, legs):
-        import sqlite3, tempfile
+        import sqlite3
+        import tempfile
         p = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
         with sqlite3.connect(p) as c:
             c.execute("CREATE TABLE positions (ticker TEXT, status TEXT, legs_json TEXT, "
@@ -577,6 +578,7 @@ class TestUnderfillBookCorrection:
 class TestReconcileContractsPrimitive:
     def test_resizes_down_and_scales_dollars(self, tmp_path):
         import sqlite3 as _sq
+
         from agora.lifecycle.position_manager import PositionManager
         db = _sq.connect(str(tmp_path / "t.db"))
         db.execute("CREATE TABLE positions (position_id TEXT, contracts INTEGER, "
@@ -590,6 +592,7 @@ class TestReconcileContractsPrimitive:
 
     def test_never_increases(self, tmp_path):
         import sqlite3 as _sq
+
         from agora.lifecycle.position_manager import PositionManager
         db = _sq.connect(str(tmp_path / "t.db"))
         db.execute("CREATE TABLE positions (position_id TEXT, contracts INTEGER, "
