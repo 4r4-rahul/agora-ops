@@ -15,11 +15,13 @@ import types
 
 from agora.ops.position_reconciler import (
     LIVE_STATUSES,
+    ReconcileReport,
     _norm_expiry,
     db_legs,
     diff,
     format_report,
     ibkr_legs,
+    plan_overfill_flatten,
 )
 
 
@@ -278,3 +280,81 @@ class TestAdoptOversizedAlert:
         # observability ONLY — the oversized position must still be tracked, at its real broker size
         _ok, adopted = _do_adopt(40)
         assert len(adopted) == 1 and adopted[0].contracts == 40
+
+
+# ── over-fill flatten planner (2026-06-26 DIA 631-vs-59 runaway) ────────────────
+def _mm(symbol, db_qty, ibkr_qty, right="P", strike=505.0, expiry="20260717"):
+    return {"symbol": symbol, "right": right, "strike": strike, "expiry": expiry,
+            "db_qty": db_qty, "ibkr_qty": ibkr_qty}
+
+
+class TestOverfillPlanner:
+    def test_flags_the_dia_runaway_signature(self):
+        rep = ReconcileReport(qty_mismatch=[_mm("DIA", -59, 631)])
+        plan = plan_overfill_flatten(rep, min_excess=25)
+        assert len(plan) == 1
+        p = plan[0]
+        # broker is +631, book wants -59 → SELL 690 to bring broker to book
+        assert p["action"] == "SELL" and p["flatten_qty"] == 690 and p["target_qty"] == -59
+
+    def test_buy_side_overfill(self):
+        rep = ReconcileReport(qty_mismatch=[_mm("DIA", 59, -631)])
+        p = plan_overfill_flatten(rep, min_excess=25)[0]
+        assert p["action"] == "BUY" and p["flatten_qty"] == 690
+
+    def test_ignores_routine_partial_fill(self):
+        # db -1 vs ibkr -3 is a normal partial, NOT a runaway — must not be flagged.
+        rep = ReconcileReport(qty_mismatch=[_mm("IWM", -1, -3, right="C", strike=307.0)])
+        assert plan_overfill_flatten(rep, min_excess=25) == []
+
+    def test_threshold_respected(self):
+        # excess of exactly min_excess with ≥2x magnitude is flagged; just under is not.
+        assert plan_overfill_flatten(ReconcileReport(qty_mismatch=[_mm("X", 10, 35)]), 25)  # excess 25
+        assert plan_overfill_flatten(ReconcileReport(qty_mismatch=[_mm("X", 10, 34)]), 25) == []
+
+
+class TestFlattenExecutor:
+    """The flatten executor must (a) place the right single-leg order, (b) NOT stack when one is
+    already working, (c) refuse an insane size. It runs on the heal()-connected sync ib."""
+
+    class _FakeOrder:
+        def __init__(self, ref, status):
+            self.order = types.SimpleNamespace(orderRef=ref, orderId=1)
+            self.orderStatus = types.SimpleNamespace(status=status)
+
+    class _FakeIB:
+        def __init__(self, working=()):
+            self._working = list(working)
+            self.placed = []
+        def reqAllOpenOrders(self): pass
+        def sleep(self, _s): pass
+        def openTrades(self): return self._working
+        def qualifyContracts(self, opt): return [opt]
+        def placeOrder(self, contract, order): self.placed.append((contract, order)); return order
+
+    def _plan(self):
+        return [{"symbol": "DIA", "right": "P", "strike": 505.0, "expiry": "20260717",
+                 "db_qty": -59, "ibkr_qty": 631, "action": "SELL",
+                 "flatten_qty": 690, "target_qty": -59}]
+
+    def test_places_the_flatten_order(self):
+        from agora.ops.position_reconciler import _flatten_overfill
+        ib = self._FakeIB()
+        out = _flatten_overfill(ib, self._plan(), max_flatten=5000)
+        assert out["placed"] == 1 and len(ib.placed) == 1
+        _, order = ib.placed[0]
+        assert order.action == "SELL" and order.totalQuantity == 690
+        assert order.orderRef.startswith("FLATTEN_DIA")
+
+    def test_does_not_stack_when_already_working(self):
+        from agora.ops.position_reconciler import _flatten_overfill
+        ref = "FLATTEN_DIAP505_20260717"
+        ib = self._FakeIB(working=[self._FakeOrder(ref, "Submitted")])
+        out = _flatten_overfill(ib, self._plan(), max_flatten=5000)
+        assert out["placed"] == 0 and out["skipped"] == 1 and ib.placed == []
+
+    def test_refuses_insane_size(self):
+        from agora.ops.position_reconciler import _flatten_overfill
+        ib = self._FakeIB()
+        out = _flatten_overfill(ib, self._plan(), max_flatten=100)  # 690 > 100
+        assert out["placed"] == 0 and out["refused"] == 1 and ib.placed == []

@@ -21,9 +21,12 @@ In the app:   GET /agora/reconcile  (read-only)
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from dataclasses import dataclass, field
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # Statuses the position manager treats as live (must match get_open_positions()).
 LIVE_STATUSES = ("open", "tested", "rolled")
@@ -167,9 +170,100 @@ def ibkr_positions_detailed(ib: Any) -> dict[Leg, tuple[int, float]]:
     return out
 
 
+def plan_overfill_flatten(rep: "ReconcileReport", min_excess: int = 25) -> list[dict]:
+    """Compute the flatten plan for broker legs MASSIVELY over the book — the 2026-06-26 signature
+    (DIA book −59 vs broker +631). For each qty_mismatch leg that is over-filled (broker magnitude
+    ≥ 2× the book AND excess ≥ min_excess contracts), return the order that brings the broker leg
+    back to the book quantity. Pure computation — executes nothing. The caller decides shadow vs arm.
+
+    A routine ±1/±2 partial fill is NOT an over-fill (excess below min_excess) — this targets only
+    the runaway-scale divergence the engine never intended."""
+    plan: list[dict] = []
+    for m in rep.qty_mismatch:
+        db_qty = int(m.get("db_qty", 0))
+        ib_qty = int(m.get("ibkr_qty", 0))
+        excess = abs(ib_qty) - abs(db_qty)
+        if excess < min_excess or abs(ib_qty) < 2 * max(1, abs(db_qty)):
+            continue
+        delta = ib_qty - db_qty            # trade this to bring broker → book
+        plan.append({
+            "symbol": m.get("symbol"), "right": m.get("right"),
+            "strike": m.get("strike"), "expiry": m.get("expiry"),
+            "db_qty": db_qty, "ibkr_qty": ib_qty,
+            "action": "SELL" if delta > 0 else "BUY",
+            "flatten_qty": abs(delta), "target_qty": db_qty,
+        })
+    return plan
+
+
+_FLATTEN_TERMINAL = frozenset(
+    {"Filled", "Cancelled", "ApiCancelled", "Inactive", "PendingCancel"}
+)
+
+
+def _flatten_overfill(ib: Any, plan: list[dict], max_flatten: int) -> dict:
+    """Execute an over-fill flatten plan on the heal()-connected (sync) ib: ONE single-leg order per
+    leg to bring the broker quantity back to the book quantity.
+
+    Each order carries a per-leg FLATTEN_<leg> orderRef and is skipped if one is already working —
+    the SAME idempotency guard as the close path, so this cleanup can never stack into a runaway the
+    way the bug it cleans up did. A paper fill that lags 2-4 min is therefore waited out across heal
+    cycles, not re-fired. Orders larger than max_flatten are refused (defense vs a bad diff).
+
+    Returns {"placed": n, "skipped": n, "refused": n}. Never raises."""
+    from ib_insync import Option, Order
+    out = {"placed": 0, "skipped": 0, "refused": 0}
+    try:
+        ib.reqAllOpenOrders()
+        ib.sleep(0.5)
+        working_refs = {(t.order.orderRef or "") for t in ib.openTrades()
+                        if t.orderStatus.status not in _FLATTEN_TERMINAL}
+    except Exception as exc:
+        logger.warning("Over-fill flatten: open-orders snapshot failed (%s) — skipping this cycle", exc)
+        return out
+
+    for item in plan:
+        ref = (f"FLATTEN_{item['symbol']}{item['right']}{int(float(item['strike']))}_"
+               f"{item['expiry']}")[:30]
+        if any(r.startswith(ref) for r in working_refs):
+            out["skipped"] += 1
+            logger.warning("Over-fill flatten SKIP %s — already working (not stacking)", ref)
+            continue
+        if int(item["flatten_qty"]) > max_flatten:
+            out["refused"] += 1
+            logger.error("Over-fill flatten REFUSED %s — qty %d exceeds sanity ceiling %d",
+                         ref, item["flatten_qty"], max_flatten)
+            continue
+        try:
+            opt = Option(item["symbol"], item["expiry"], float(item["strike"]), item["right"],
+                         exchange="SMART", currency="USD", multiplier="100")
+            if not ib.qualifyContracts(opt):
+                logger.warning("Over-fill flatten: could not qualify %s — skipping", ref)
+                continue
+            o = Order()
+            o.action = item["action"]
+            o.totalQuantity = int(item["flatten_qty"])
+            o.orderType = "MKT"   # cleanup of known junk — a guaranteed exit; paper slippage is moot
+            o.tif = "DAY"
+            o.orderRef = ref
+            o.transmit = True
+            ib.placeOrder(opt, o)
+            out["placed"] += 1
+            logger.error(
+                "OVER-FILL FLATTEN PLACED — %s %s %s %d (broker %d → book %d) ref=%s",
+                item["action"], item["symbol"], item["right"], item["flatten_qty"],
+                item["ibkr_qty"], item["target_qty"], ref,
+            )
+        except Exception as exc:
+            logger.error("Over-fill flatten place failed for %s: %s", ref, exc)
+    return out
+
+
 def heal(db_path: str, position_mgr: Any, host: str = "127.0.0.1", port: int = 7497,
          client_id: int = 73, adopt_orphans: bool = True, close_ghosts: bool = True,
-         ghost_min_age_min: float = 3.0) -> dict:
+         ghost_min_age_min: float = 3.0,
+         overfill_flatten_enabled: bool = True, overfill_min_excess: int = 25,
+         overfill_max_flatten: int = 5000) -> dict:
     """Make the DB a faithful mirror of the broker (TWS↔DB 100% accuracy):
 
       • GHOST   (DB position open, none of its legs at the broker) → mark closed in DB.
@@ -177,7 +271,9 @@ def heal(db_path: str, position_mgr: Any, host: str = "127.0.0.1", port: int = 7
                 hasn't arrived yet is never closed prematurely.
       • ORPHAN  (broker leg with no DB position) → ADOPT into the DB as a tracked position so the
                 engine manages its exit (never silently left unmanaged, never auto-flattened).
-      • QTY_MISMATCH → reported, not auto-mutated (a partial fill needs a human/engine decision).
+      • QTY_MISMATCH → reported. A routine partial fill is left for an engine decision, BUT a leg
+                MASSIVELY over the book (the 2026-06-26 over-fill signature) is mechanically flattened
+                back to the book qty when overfill_flatten_enabled (single-leg, idempotency-guarded).
 
     Read-mostly on a clean book (no-op). Returns a summary dict. Never raises."""
     from ib_insync import IB
@@ -245,9 +341,25 @@ def heal(db_path: str, position_mgr: Any, host: str = "127.0.0.1", port: int = 7
                 out["errors"].append(f"orphan-adopt: {exc}")
 
         out["qty_mismatch"] = len(rep.qty_mismatch)
+
+        # ── OVER-FILL DETECTION + FLATTEN: legs MASSIVELY over the book (DIA 631-vs-59 on
+        # 2026-06-26). Compute the exact flatten plan, log it, and — when enabled (ON for paper:
+        # paper IS the validation environment) — execute it via single-leg, idempotency-guarded
+        # orders so the broker is brought back to the book. The guard means the cleanup itself
+        # can never stack into a runaway.
+        overfill_plan = plan_overfill_flatten(rep, overfill_min_excess)
+        out["overfill_plan"] = overfill_plan
+        if overfill_plan:
+            logger.error(
+                "OVER-FILL DETECTED — %d leg(s) far exceed the book. Flatten plan: %s",
+                len(overfill_plan), overfill_plan,
+            )
+            if overfill_flatten_enabled:
+                out["overfill_flatten"] = _flatten_overfill(
+                    ib, overfill_plan, overfill_max_flatten)
+
         if out["ghosts_closed"] or out["orphans_adopted"] or out["qty_mismatch"]:
-            import logging
-            logging.getLogger(__name__).warning(
+            logger.warning(
                 "PositionHealer: closed %d ghost(s), adopted %d orphan(s), %d qty-mismatch%s",
                 out["ghosts_closed"], out["orphans_adopted"], out["qty_mismatch"],
                 f" {rep.qty_mismatch}" if rep.qty_mismatch else "")

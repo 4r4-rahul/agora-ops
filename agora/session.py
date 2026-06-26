@@ -4659,7 +4659,13 @@ class AgoraSession:
                 _a.set_event_loop(_loop)
                 try:
                     return heal(str(self._settings.db_path), self._position_mgr,
-                                self._settings.ibkr_host, self._settings.ibkr_port, client_id=73)
+                                self._settings.ibkr_host, self._settings.ibkr_port, client_id=73,
+                                overfill_flatten_enabled=getattr(
+                                    self._settings, "reconcile_overfill_flatten_enabled", True),
+                                overfill_min_excess=getattr(
+                                    self._settings, "reconcile_overfill_min_excess", 25),
+                                overfill_max_flatten=getattr(
+                                    self._settings, "reconcile_overfill_max_flatten", 5000))
                 finally:
                     try:
                         _loop.close()
@@ -4894,6 +4900,16 @@ class AgoraSession:
             try:
                 order = await close_trade(position, self._settings, self._session_id)
                 status = (order or {}).get("status", "")
+                # IDEMPOTENCY: a close for this position is ALREADY working at the broker. Do NOT
+                # retry (would re-check and skip again) and do NOT escalate as a failure — the
+                # working order will fill (paper combos lag 2-4 min). Leave OPEN; next cycle's guard
+                # keeps it to exactly one working close. This is the runaway-stacking stop.
+                if status == "AlreadyWorking":
+                    logger.info(
+                        "Close for %s already working at broker (orderId=%s) — leaving OPEN, "
+                        "not stacking another", position.ticker, (order or {}).get("order_id"),
+                    )
+                    return False
                 # A position is only CLOSED if it actually flattened. "PartiallyClosed" means a leg
                 # is stranded at the broker — do NOT mark closed (orphan) and do NOT blindly retry
                 # (would over-close the already-flat leg); escalate and leave OPEN for recon. Any
