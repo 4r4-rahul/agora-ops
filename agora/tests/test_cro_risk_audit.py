@@ -21,10 +21,14 @@ def _audit_stub(greeks=None, positions=None, kill=False, cb_tripped=False,
                 daily_rows=(), settings_over=None):
     db = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
     conn = sqlite3.connect(db)
-    conn.execute("CREATE TABLE positions (realized_pnl REAL, close_date TEXT, "
-                 "regime_at_entry TEXT DEFAULT 'neutral')")
+    # Full schema so the CRO's daily-loss query can apply _REAL_CLOSE (it now excludes adopted/
+    # fiction — see 7b3a2c9). daily_rows are REAL closes (status=closed, source=lifecycle).
+    conn.execute("CREATE TABLE positions (realized_pnl REAL, close_date TEXT, status TEXT DEFAULT 'closed', "
+                 "close_source TEXT DEFAULT 'lifecycle', regime_at_entry TEXT DEFAULT 'neutral')")
     for pnl in daily_rows:
-        conn.execute("INSERT INTO positions (realized_pnl, close_date) VALUES (?, date('now'))", (pnl,))
+        conn.execute(
+            "INSERT INTO positions (realized_pnl, close_date, status, close_source, regime_at_entry) "
+            "VALUES (?, date('now'), 'closed', 'lifecycle', 'neutral')", (pnl,))
     conn.commit()
     conn.close()
 
