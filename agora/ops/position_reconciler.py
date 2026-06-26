@@ -172,14 +172,22 @@ def ibkr_positions_detailed(ib: Any) -> dict[Leg, tuple[int, float]]:
 
 def plan_overfill_flatten(rep: "ReconcileReport", min_excess: int = 25) -> list[dict]:
     """Compute the flatten plan for broker legs MASSIVELY over the book — the 2026-06-26 signature
-    (DIA book −59 vs broker +631). For each qty_mismatch leg that is over-filled (broker magnitude
-    ≥ 2× the book AND excess ≥ min_excess contracts), return the order that brings the broker leg
-    back to the book quantity. Pure computation — executes nothing. The caller decides shadow vs arm.
+    (DIA book −59 vs broker +631). Scans BOTH qty_mismatch AND orphan legs: when a position is
+    ghost-closed in the DB while its over-filled broker legs persist (exactly what happened on the
+    10:29 restart — the 659-contract DIA didn't stream in time, the adopted row was ghost-closed,
+    and the legs became orphans), the over-fill shows up as an ORPHAN, not a mismatch. We must catch
+    both, or a runaway leg escapes flattening and gets re-adopted as a tracked giant position.
 
-    A routine ±1/±2 partial fill is NOT an over-fill (excess below min_excess) — this targets only
-    the runaway-scale divergence the engine never intended."""
+    A leg is over-filled when broker magnitude ≥ 2× the book (book=0 for an orphan) AND the excess
+    ≥ min_excess contracts — so routine ±1/±2 partials and normal small orphan adoptions are left
+    alone. Returns the single-leg order that brings each over-filled broker leg back to the book
+    quantity (0 for an orphan). Pure computation — executes nothing."""
     plan: list[dict] = []
-    for m in rep.qty_mismatch:
+    # qty_mismatch carries db_qty/ibkr_qty; an orphan is the same shape with db_qty == 0.
+    candidates = list(rep.qty_mismatch) + [
+        {**o, "db_qty": 0} for o in rep.orphans
+    ]
+    for m in candidates:
         db_qty = int(m.get("db_qty", 0))
         ib_qty = int(m.get("ibkr_qty", 0))
         excess = abs(ib_qty) - abs(db_qty)
@@ -291,7 +299,10 @@ def heal(db_path: str, position_mgr: Any, host: str = "127.0.0.1", port: int = 7
     try:
         ib.connect(host, port, clientId=client_id, timeout=15)
         ib.reqPositions()
-        ib.sleep(1.2)
+        # A large position (e.g. the 659-contract DIA over-fill) streams as hundreds of position
+        # messages; a 1.2s settle truncated it on the 2026-06-26 restart and the adopted row was
+        # falsely ghost-closed. 3s gives a big book time to arrive before we diff/ghost-close.
+        ib.sleep(3.0)
         ibk = ibkr_legs(ib)                    # signed qty per leg
         detailed = ibkr_positions_detailed(ib) # qty + avgCost per leg
     except Exception as exc:
@@ -302,6 +313,26 @@ def heal(db_path: str, position_mgr: Any, host: str = "127.0.0.1", port: int = 7
 
     try:
         rep = diff(db_legs(db_path), ibk)
+
+        # ── OVER-FILL DETECTION + FLATTEN (runs FIRST): legs MASSIVELY over the book (DIA 631-vs-59
+        # on 2026-06-26), whether they show as a qty_mismatch or as an orphan (when the DB row was
+        # ghost-closed but the over-filled broker legs persist). Flatten BEFORE adoption so a runaway
+        # junk leg is brought back to the book — NOT adopted as a tracked giant position. Each order
+        # is single-leg + idempotency-guarded, so the cleanup itself can never stack into a runaway.
+        overfill_plan = plan_overfill_flatten(rep, overfill_min_excess)
+        out["overfill_plan"] = overfill_plan
+        overfill_keys: set[tuple] = set()
+        if overfill_plan:
+            overfill_keys = {
+                (p["symbol"], p["right"], float(p["strike"]), p["expiry"]) for p in overfill_plan
+            }
+            logger.error(
+                "OVER-FILL DETECTED — %d leg(s) far exceed the book. Flatten plan: %s",
+                len(overfill_plan), overfill_plan,
+            )
+            if overfill_flatten_enabled:
+                out["overfill_flatten"] = _flatten_overfill(
+                    ib, overfill_plan, overfill_max_flatten)
 
         # ── GHOSTS: close DB positions whose legs are entirely absent at the broker ──
         if close_ghosts:
@@ -326,10 +357,14 @@ def heal(db_path: str, position_mgr: Any, host: str = "127.0.0.1", port: int = 7
                 out["errors"].append(f"ghost-close: {exc}")
 
         # ── ORPHANS: adopt broker legs that no DB position covers ──
+        # EXCLUDE legs being flattened as over-fills — adopting a 659-contract junk leg would re-track
+        # the very runaway we're unwinding.
         if adopt_orphans and rep.orphans:
             try:
                 groups: dict[tuple[str, str], list[dict]] = {}
                 for o in rep.orphans:
+                    if (o["symbol"], o["right"], float(o["strike"]), o["expiry"]) in overfill_keys:
+                        continue
                     groups.setdefault((o["symbol"], o["expiry"]), []).append(o)
                 for (sym, expiry), legs in groups.items():
                     adopted = _adopt_group(position_mgr, sym, expiry, legs, detailed,
@@ -341,22 +376,6 @@ def heal(db_path: str, position_mgr: Any, host: str = "127.0.0.1", port: int = 7
                 out["errors"].append(f"orphan-adopt: {exc}")
 
         out["qty_mismatch"] = len(rep.qty_mismatch)
-
-        # ── OVER-FILL DETECTION + FLATTEN: legs MASSIVELY over the book (DIA 631-vs-59 on
-        # 2026-06-26). Compute the exact flatten plan, log it, and — when enabled (ON for paper:
-        # paper IS the validation environment) — execute it via single-leg, idempotency-guarded
-        # orders so the broker is brought back to the book. The guard means the cleanup itself
-        # can never stack into a runaway.
-        overfill_plan = plan_overfill_flatten(rep, overfill_min_excess)
-        out["overfill_plan"] = overfill_plan
-        if overfill_plan:
-            logger.error(
-                "OVER-FILL DETECTED — %d leg(s) far exceed the book. Flatten plan: %s",
-                len(overfill_plan), overfill_plan,
-            )
-            if overfill_flatten_enabled:
-                out["overfill_flatten"] = _flatten_overfill(
-                    ib, overfill_plan, overfill_max_flatten)
 
         if out["ghosts_closed"] or out["orphans_adopted"] or out["qty_mismatch"]:
             logger.warning(

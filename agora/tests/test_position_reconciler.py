@@ -358,3 +358,27 @@ class TestFlattenExecutor:
         ib = self._FakeIB()
         out = _flatten_overfill(ib, self._plan(), max_flatten=100)  # 690 > 100
         assert out["placed"] == 0 and out["refused"] == 1 and ib.placed == []
+
+
+class TestOverfillFromOrphans:
+    """The 10:29 restart ghost-closed the adopted DIA row while its 659-contract broker legs
+    persisted — so the over-fill surfaced as an ORPHAN, not a qty_mismatch. The planner must catch
+    orphan over-fills too (book=0 → flatten the whole broker leg), or the runaway escapes cleanup."""
+
+    def test_massive_orphan_is_flagged_for_flatten(self):
+        rep = ReconcileReport(orphans=[
+            {"symbol": "DIA", "right": "P", "strike": 505.0, "expiry": "20260717",
+             "db_qty": 0, "ibkr_qty": 659},
+        ])
+        plan = plan_overfill_flatten(rep, min_excess=25)
+        assert len(plan) == 1
+        p = plan[0]
+        assert p["action"] == "SELL" and p["flatten_qty"] == 659 and p["target_qty"] == 0
+
+    def test_normal_small_orphan_not_flagged(self):
+        # a routine 5-contract adopted orphan must NOT be flattened — it gets adopted normally.
+        rep = ReconcileReport(orphans=[
+            {"symbol": "SPY", "right": "C", "strike": 600.0, "expiry": "20260731",
+             "db_qty": 0, "ibkr_qty": 5},
+        ])
+        assert plan_overfill_flatten(rep, min_excess=25) == []
