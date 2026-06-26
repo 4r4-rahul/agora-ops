@@ -1477,7 +1477,20 @@ async def get_today_summary() -> JSONResponse:
     db_path = session._settings.db_path
 
     closed_today: list[dict] = []
-    realized_pnl_today = 0.0
+    realized_pnl_today = 0.0     # REAL engine trades only
+    fiction_pnl_today = 0.0      # adopted/reconcile — shown separately, never in the headline
+
+    def _row_is_real(close_source: str, regime: str) -> bool:
+        """Mirror book_manager._REAL_CLOSE so the closed-today total is honest (excludes the adopted
+        fiction that made the owner see −$11,159 / −$14,964 for what was really a +$2,171 day)."""
+        if (regime or "") == "adopted":
+            return False
+        src = close_source or ""
+        if any(k in src for k in ("fabricated", "sync", "reconcile", "duplicate")):
+            return False
+        return src in {"lifecycle", "thesis_exit", "trailing_stop", "stop_loss", "pre_earnings"} \
+            or src.startswith("session:")
+
     try:
         conn = _sql.connect(str(db_path), check_same_thread=False)
         rows = conn.execute(
@@ -1494,8 +1507,16 @@ async def get_today_summary() -> JSONResponse:
         conn.close()
         for r in rows:
             pnl = float(r[6] or 0.0)
-            realized_pnl_today += pnl
+            is_real = _row_is_real(r[7] or "", r[16] or "")
+            if is_real:
+                realized_pnl_today += pnl
+            else:
+                fiction_pnl_today += pnl
+            provenance = "engine" if is_real else (
+                "adopted" if (r[16] or "") == "adopted" else "reconcile")
             closed_today.append({
+                "is_real":      is_real,          # True = a real engine trade; False = adopted/fiction
+                "provenance":   provenance,        # "engine" | "adopted" | "reconcile"
                 "ticker":       r[0],
                 "strategy":     r[1],
                 "direction":    r[2],
@@ -1575,7 +1596,8 @@ async def get_today_summary() -> JSONResponse:
     return JSONResponse({
         "closed_today":             closed_today,
         "closed_count":             len(closed_today),
-        "realized_pnl_today":       round(realized_pnl_today, 2),
+        "realized_pnl_today":       round(realized_pnl_today, 2),    # REAL engine trades only
+        "fiction_pnl_today":        round(fiction_pnl_today, 2),     # adopted/reconcile, quarantined
         "open_count":               len(open_positions),
         "unrealized_pnl_today":     (round(unrealized_pnl_today, 2)
                                      if unrealized_pnl_today is not None else None),

@@ -31,3 +31,13 @@ def test_performance_real_close_mirrors_book_manager_intent():
     from agora.ops import book_manager
     bm_src = inspect.getsource(book_manager)
     assert "adopted" in bm_src and "_REAL_CLOSE" in bm_src
+
+
+def test_today_endpoint_separates_real_from_fiction():
+    """`/agora/today` must put adopted/fiction in fiction_pnl_today and flag each row's provenance,
+    so the closed-today view never sums the −$11,159 AMD adopted ghost into the headline."""
+    import inspect
+    src = inspect.getsource(routes.get_today_summary)
+    assert "fiction_pnl_today" in src and "realized_pnl_today" in src
+    assert '"adopted"' in src or "'adopted'" in src   # excludes adopted from the real total
+    assert '"is_real"' in src and '"provenance"' in src   # each row flagged for the UI
