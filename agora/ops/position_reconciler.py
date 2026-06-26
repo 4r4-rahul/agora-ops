@@ -40,26 +40,38 @@ def _norm_expiry(exp: str) -> str:
 
 
 def db_legs(db_path: str) -> dict[Leg, int]:
-    """Aggregate signed contract qty per option leg across all live DB positions."""
+    """Aggregate signed contract qty per option leg across all live DB positions.
+
+    The absolute per-leg quantity is the position-level `contracts` (the size the broker order was
+    placed with) times the leg's RATIO. The per-leg `contracts` in legs_json is written
+    inconsistently across entry paths — some store the absolute count (AMD long_put: 8), some store
+    the ratio (IWM/SCHW 3-lot vertical: 1) — so reading it directly under-reported IWM/SCHW as ±1
+    while the broker held ±3 (phantom qty-mismatch). We normalize the leg count against the smallest
+    leg in the position to recover the true ratio, which is correct under BOTH conventions and still
+    preserves a genuine ratio spread (e.g. 1×2)."""
     legs: dict[Leg, int] = {}
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         placeholders = ",".join("?" * len(LIVE_STATUSES))
         rows = conn.execute(
-            f"SELECT ticker, legs_json FROM positions WHERE status IN ({placeholders})",
+            f"SELECT ticker, contracts, legs_json FROM positions WHERE status IN ({placeholders})",
             LIVE_STATUSES,
         ).fetchall()
     for r in rows:
         ticker = r["ticker"]
+        pos_contracts = int(r["contracts"] or 0)
         try:
             parsed = json.loads(r["legs_json"] or "[]")
         except Exception:
             continue
+        leg_counts = [int(lg.get("contracts", 0) or 0) for lg in parsed]
+        base = min((c for c in leg_counts if c > 0), default=1)  # smallest leg = 1 ratio unit
         for lg in parsed:
             right = "C" if str(lg.get("option_type", "")).lower().startswith("c") else "P"
             strike = float(lg.get("strike", 0) or 0)
             expiry = _norm_expiry(str(lg.get("expiration", "")))
-            qty = int(lg.get("contracts", 0) or 0)
+            leg_ratio = (int(lg.get("contracts", 0) or 0) or base) / base
+            qty = round(pos_contracts * leg_ratio)
             sign = 1 if str(lg.get("action", "")).lower() == "buy" else -1
             key: Leg = (ticker, right, strike, expiry)
             legs[key] = legs.get(key, 0) + sign * qty

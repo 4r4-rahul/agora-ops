@@ -27,12 +27,24 @@ from agora.ops.position_reconciler import (
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 def _db(rows: list[tuple]) -> str:
-    """rows: (ticker, status, legs_json)."""
+    """rows: (ticker, status, legs_json). The position-level `contracts` is the authoritative
+    absolute size (what the broker order was placed with); db_legs() reads it now, so we derive it
+    from the legs (max leg count = the absolute count for these single-ratio test positions)."""
     p = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
     with sqlite3.connect(p) as c:
         c.execute("CREATE TABLE positions (ticker TEXT, status TEXT, legs_json TEXT, "
-                  "regime_at_entry TEXT DEFAULT 'neutral')")
-        c.executemany("INSERT INTO positions (ticker, status, legs_json) VALUES (?,?,?)", rows)
+                  "contracts INTEGER DEFAULT 1, regime_at_entry TEXT DEFAULT 'neutral')")
+        enriched = []
+        for ticker, status, legs_json in rows:
+            try:
+                counts = [int(l.get("contracts", 1) or 1) for l in json.loads(legs_json or "[]")]
+            except Exception:
+                counts = []
+            enriched.append((ticker, status, legs_json, max(counts) if counts else 1))
+        c.executemany(
+            "INSERT INTO positions (ticker, status, legs_json, contracts) VALUES (?,?,?,?)",
+            enriched,
+        )
     return p
 
 
@@ -382,3 +394,43 @@ class TestOverfillFromOrphans:
              "db_qty": 0, "ibkr_qty": 5},
         ])
         assert plan_overfill_flatten(rep, min_excess=25) == []
+
+
+class TestLegRatioVsAbsolute:
+    """Regression for the 2026-06-26 phantom mismatch: legs_json stores the per-leg count
+    inconsistently (AMD long_put = absolute 8; IWM/SCHW 3-lot vertical = ratio 1). db_legs must
+    use position.contracts as the authoritative size so the reconciler agrees with the broker."""
+
+    def _db_with_contracts(self, ticker, contracts, legs):
+        import sqlite3, tempfile
+        p = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
+        with sqlite3.connect(p) as c:
+            c.execute("CREATE TABLE positions (ticker TEXT, status TEXT, legs_json TEXT, "
+                      "contracts INTEGER, regime_at_entry TEXT DEFAULT 'neutral')")
+            c.execute("INSERT INTO positions (ticker, status, legs_json, contracts) VALUES (?,?,?,?)",
+                      (ticker, "open", json.dumps(legs), contracts))
+        return p
+
+    def test_ratio_convention_uses_position_contracts(self):
+        # IWM 3-lot vertical, legs stored as ratio 1 → must aggregate to ±3 (broker truth).
+        legs = [_leg(action="sell", option_type="call", strike=307, contracts=1),
+                _leg(action="buy", option_type="call", strike=309, contracts=1)]
+        db = self._db_with_contracts("IWM", 3, legs)
+        out = db_legs(db)
+        assert out[("IWM", "C", 307.0, "20260821")] == -3
+        assert out[("IWM", "C", 309.0, "20260821")] == +3
+
+    def test_absolute_convention_not_double_counted(self):
+        # AMD long_put, legs stored as absolute 8, position.contracts 8 → ±8, NOT 8*8.
+        legs = [_leg(action="buy", option_type="put", strike=200, contracts=8)]
+        db = self._db_with_contracts("AMD", 8, legs)
+        assert db_legs(db)[("AMD", "P", 200.0, "20260821")] == +8
+
+    def test_genuine_ratio_spread_preserved(self):
+        # 1x2 ratio, 4 spreads: legs stored as ratio (1,2) → ±4 and ±8.
+        legs = [_leg(action="buy", option_type="call", strike=100, contracts=1),
+                _leg(action="sell", option_type="call", strike=110, contracts=2)]
+        db = self._db_with_contracts("XYZ", 4, legs)
+        out = db_legs(db)
+        assert out[("XYZ", "C", 100.0, "20260821")] == +4
+        assert out[("XYZ", "C", 110.0, "20260821")] == -8
