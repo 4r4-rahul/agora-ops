@@ -3287,9 +3287,13 @@ async function fetchToday() {
 
     if (ctCount) ctCount.textContent = d.closed_count ?? 0;
     if (ctPnl && d.closed_count > 0) {
-      const p = d.realized_pnl_today;
+      const p = d.realized_pnl_today;   // REAL engine trades only (fiction excluded by the API)
       ctPnl.textContent = fmt$(p);
       ctPnl.className   = pnlCls(p);
+      if (d.fiction_pnl_today) {         // show quarantined adopted/reconcile fiction, never in the headline
+        ctPnl.textContent += ` `;
+        ctPnl.innerHTML = fmt$(p) + `<span title="Adopted/reconcile fiction — quarantined, NOT a strategy outcome" style="font-size:9px;color:#987;margin-left:6px">(${fmt$(d.fiction_pnl_today)} fiction excl.)</span>`;
+      }
     }
 
     if (ctTbody) {
@@ -3330,6 +3334,12 @@ async function fetchToday() {
           const convStr = (conv != null && conv > 0) ? (conv <= 1 ? (conv*100).toFixed(0)+'%' : conv.toFixed(0)) : '—';
           const regime  = r.regime_at_entry || '—';
           const pillar  = r.pillar || '—';
+          // PROVENANCE: flag adopted/reconcile rows so a quarantined ghost (the AMD −$11,159 adopted
+          // leg) is NEVER mistaken for a real engine trade. is_real comes from the /agora/today API.
+          const isFic   = r.is_real === false;
+          const provBadge = isFic
+            ? `<span title="${r.provenance==='adopted'?'Adopted legacy position — reconstructed cost basis, NOT a real engine trade (excluded from strategy P&L)':'Reconciliation artifact — not a strategy trade'}" style="font-size:8px;font-weight:700;letter-spacing:.04em;padding:1px 4px;border-radius:3px;background:#3a2a2a;color:#c98;border:1px solid #543;margin-left:5px;vertical-align:middle">${r.provenance==='adopted'?'ADOPTED':'RECON'}</span>`
+            : '';
           let legsHtml  = '';
           try {
             const legs = JSON.parse(r.legs_json || '[]');
@@ -3360,8 +3370,8 @@ async function fetchToday() {
             ${legsHtml?`<div class="detail-legs-row">${legsHtml}</div>`:''}
           </div>`;
 
-          return `<tr class="pos-row" onclick="toggleClosedDetail(${i})">
-            <td><span class="chevron" id="cchev-${i}">▶</span> <strong>${r.ticker}</strong></td>
+          return `<tr class="pos-row" onclick="toggleClosedDetail(${i})"${isFic?' style="opacity:.5"':''}>
+            <td><span class="chevron" id="cchev-${i}">▶</span> <strong>${r.ticker}</strong>${provBadge}</td>
             <td style="font-size:10px">${strat}</td>
             <td>${dir}</td>
             <td>$${(r.entry_price||0).toFixed(2)}</td>
