@@ -544,6 +544,13 @@ class AgoraSettings(BaseSettings):
         description="Sanity ceiling on a single flatten order. A computed flatten larger than this "
                     "is refused + alerted rather than blindly fired (defense-in-depth vs a bad diff).",
     )
+    reconcile_underfill_min_age_min: float = Field(
+        default=20.0,
+        description="A position whose book size exceeds the broker's actual holding (a settled "
+                    "under-fill) is corrected DOWN to the broker only after it is this many minutes "
+                    "old — past any paper fill latency — so a still-settling fill is never corrected "
+                    "mid-flight. The 2026-06-26 TSLA 2-vs-1 gap self-resolved in <1 cycle.",
+    )
     paper_min_contracts: int = Field(
         default=1, ge=1, le=20,
         description="PAPER-ONLY minimum contracts per trade. RECALIBRATED 2026-06-26 from 3→1: a floor of "

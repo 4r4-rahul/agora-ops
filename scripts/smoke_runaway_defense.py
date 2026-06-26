@@ -107,18 +107,20 @@ def _temp_db(rows=()):
 
 
 def _mgr(open_positions):
-    closed = []
+    closed, resized = [], []
     return types.SimpleNamespace(
         get_open_positions=lambda: open_positions,
         mark_position_closed=lambda **kw: closed.append(kw),
-    ), closed
+        reconcile_contracts=lambda position_id, broker_contracts, reason: (
+            resized.append((position_id, broker_contracts)) or True),
+    ), closed, resized
 
 
 # ════════════════════════════════════════════════════════════════════════════════
 # DEFENSE 1 — the close idempotency guard: the runaway can't even start
 # ════════════════════════════════════════════════════════════════════════════════
 async def defense_1_close_cannot_stack():
-    print(f"\n{BOLD}[1/4] Close idempotency guard — the runaway's actual engine{RESET}")
+    print(f"\n{BOLD}[1/5] Close idempotency guard — the runaway's actual engine{RESET}")
     print(f"{DIM}   Worst case: the exit path re-fires a full-size close EVERY cycle while the prior")
     print(f"   one is still working (paper fills lag 2-4 min). On 06-26, 17 stacked → DIA 659.{RESET}")
 
@@ -166,7 +168,7 @@ async def defense_1_close_cannot_stack():
 # DEFENSE 2 — over-fill detection + mechanical flatten
 # ════════════════════════════════════════════════════════════════════════════════
 def defense_2_overfill_detected_and_flattened():
-    print(f"\n{BOLD}[2/4] Over-fill detection + flatten — unwind the monster{RESET}")
+    print(f"\n{BOLD}[2/5] Over-fill detection + flatten — unwind the monster{RESET}")
     print(f"{DIM}   Worst case: the broker already holds a 659-contract DIA leg the book never sized.{RESET}")
 
     ib = FakeIB(snapshots=[[_BrokerPos("DIA", "P", 505.0, "20260717", 659)]])
@@ -175,7 +177,7 @@ def defense_2_overfill_detected_and_flattened():
     try:
         __import__("ib_insync").IB = lambda: ib
         db = _temp_db()                       # empty book → the 659 is a pure orphan over-fill
-        mgr, _ = _mgr([])
+        mgr, _, _ = _mgr([])
         out = heal(db, mgr, overfill_flatten_enabled=True)
     finally:
         __import__("ib_insync").IB = orig_IB
@@ -195,7 +197,7 @@ def defense_2_overfill_detected_and_flattened():
 # DEFENSE 3 — engine auto-trips its OWN kill switch (06-26: a human did this)
 # ════════════════════════════════════════════════════════════════════════════════
 def defense_3_auto_halt(overfill_present: bool):
-    print(f"\n{BOLD}[3/4] Auto-halt — the engine trips its own kill switch{RESET}")
+    print(f"\n{BOLD}[3/5] Auto-halt — the engine trips its own kill switch{RESET}")
     print(f"{DIM}   Worst case: nobody is watching. On 06-26 a human tripped the switch by hand.{RESET}")
 
     from agora.risk.risk_council import RiskCouncil
@@ -223,7 +225,7 @@ def defense_3_auto_halt(overfill_present: bool):
 # DEFENSE 4 — never destroy the book on incomplete/streaming broker data
 # ════════════════════════════════════════════════════════════════════════════════
 def defense_4_ghost_close_stability():
-    print(f"\n{BOLD}[4/4] Ghost-close stability — don't corrupt the book mid-stream{RESET}")
+    print(f"\n{BOLD}[4/5] Ghost-close stability — don't corrupt the book mid-stream{RESET}")
     print(f"{DIM}   Worst case: the 659-contract position is still streaming; a half-arrived snapshot")
     print(f"   makes its legs look 'gone'. On 06-26 this falsely closed adopted DIA/NOW.{RESET}")
 
@@ -233,7 +235,7 @@ def defense_4_ghost_close_stability():
     leg = types.SimpleNamespace(option_type="put", strike=505.0,
                                 expiration=types.SimpleNamespace(isoformat=lambda: "2026-07-17"))
     pos = types.SimpleNamespace(position_id="adopt-dia", ticker="DIA", legs=[leg])
-    mgr, closed = _mgr([pos])
+    mgr, closed, _ = _mgr([pos])
     db = _temp_db([("DIA", "open", json.dumps([
         {"option_type": "put", "strike": 505.0, "expiration": "2026-07-17",
          "action": "sell", "contracts": 59}]), 59)])
@@ -251,6 +253,48 @@ def defense_4_ghost_close_stability():
             "snapshots disagreed (stream arriving) → ghost-close DEFERRED, adopted DIA NOT falsely closed")
 
 
+# ════════════════════════════════════════════════════════════════════════════════
+# DEFENSE 5 — settled under-fill: correct the book DOWN to the broker (don't over-close)
+# ════════════════════════════════════════════════════════════════════════════════
+def defense_5_underfill_book_correction():
+    print(f"\n{BOLD}[5/5] Settled under-fill — make the book truthful, don't over-close{RESET}")
+    print(f"{DIM}   Worst case: the book says 2 contracts but only 1 ever filled (TSLA 2-vs-1). A close")
+    print(f"   would size to 2 and leave a stray leg. The book must be corrected DOWN to the broker —")
+    print(f"   but ONLY once aged past fill latency (a fresh gap may still be filling).{RESET}")
+
+    legs_meta = [("call", 435.0, "sell"), ("call", 445.0, "buy")]
+    broker = [_BrokerPos("TSLA", "C", s, "20260724", (-1 if a == "sell" else 1)) for _, s, a in legs_meta]
+    pos_legs = [types.SimpleNamespace(option_type=ot, strike=s,
+                                      expiration=types.SimpleNamespace(isoformat=lambda: "2026-07-24"))
+                for ot, s, _ in legs_meta]
+
+    def _run(entry_ts, min_age):
+        ib = FakeIB(snapshots=[broker, broker, broker])
+        pos = types.SimpleNamespace(position_id="tsla-1", ticker="TSLA", contracts=2,
+                                    legs=pos_legs, entry_ts_utc=entry_ts)
+        mgr, _, resized = _mgr([pos])
+        db = _temp_db([("TSLA", "open", json.dumps([
+            {"option_type": ot, "strike": s, "expiration": "2026-07-24", "action": a, "contracts": 1}
+            for ot, s, a in legs_meta]), 2)])
+        orig_IB = __import__("ib_insync").IB
+        try:
+            __import__("ib_insync").IB = lambda: ib
+            out = heal(db, mgr, overfill_flatten_enabled=False, underfill_min_age_min=min_age)
+        finally:
+            __import__("ib_insync").IB = orig_IB
+        return out, resized
+
+    # aged gap → corrected down to the broker's 1
+    out, resized = _run("2026-06-25T12:00:00+00:00", min_age=20.0)
+    _record("underfill-aged-corrected", resized == [("tsla-1", 1)] and out.get("book_resized") == 1,
+            "aged 2-vs-1 gap → book corrected to broker's 1 (close now sizes to 1, no stray leg)")
+
+    # fresh gap (huge min_age) → left alone (may still be filling)
+    _, resized_fresh = _run("2026-06-25T12:00:00+00:00", min_age=10_000_000)
+    _record("underfill-fresh-left-alone", resized_fresh == [],
+            "a still-settling fill is NOT corrected mid-flight (06-26 TSLA self-resolved in <1 cycle)")
+
+
 async def main() -> int:
     print(f"{BOLD}╔══════════════════════════════════════════════════════════════════════╗{RESET}")
     print(f"{BOLD}║  SMOKE TEST — 'The 2026-06-26 Runaway': can the engine stop the worst? ║{RESET}")
@@ -260,6 +304,7 @@ async def main() -> int:
     overfill = defense_2_overfill_detected_and_flattened()
     defense_3_auto_halt(overfill)
     defense_4_ghost_close_stability()
+    defense_5_underfill_book_correction()
 
     passed = sum(1 for _, ok, _ in _results if ok)
     total = len(_results)

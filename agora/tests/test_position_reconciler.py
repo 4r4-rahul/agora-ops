@@ -522,3 +522,79 @@ class TestHealGhostCloseStability:
         assert out.get("ghost_close_deferred") is not True
         assert out["ghosts_closed"] == 1
         assert len(closed) == 1 and closed[0]["position_id"] == "adopt-dia"
+
+
+# ── settled under-fill: correct the BOOK down to the broker (TSLA 2-vs-1) ────────
+class TestUnderfillBookCorrection:
+    """broker holds FEWER than the book (a settled under-fill). The book is corrected DOWN to the
+    broker — but ONLY when stable AND aged past fill latency, never mid-fill."""
+
+    def _aged_pos(self, contracts, broker_present=True):
+        leg = types.SimpleNamespace(option_type="call", strike=435.0,
+                                    expiration=types.SimpleNamespace(isoformat=lambda: "2026-07-24"))
+        leg2 = types.SimpleNamespace(option_type="call", strike=445.0,
+                                     expiration=types.SimpleNamespace(isoformat=lambda: "2026-07-24"))
+        return types.SimpleNamespace(position_id="tsla-1", ticker="TSLA", contracts=contracts,
+                                     legs=[leg, leg2], entry_ts_utc="2026-06-25T12:00:00+00:00")
+
+    def _run(self, monkeypatch, broker_qty, age_ts, min_age=20.0):
+        from agora.ops import position_reconciler as pr
+        # broker holds `broker_qty` of each TSLA leg, stable across snapshots
+        legs = [_FakeBrokerPos("TSLA", "C", 435.0, "20260724", -broker_qty),
+                _FakeBrokerPos("TSLA", "C", 445.0, "20260724", broker_qty)] if broker_qty else []
+        ib = _StreamingIB([legs, legs, legs])
+        monkeypatch.setattr("ib_insync.IB", lambda: ib)
+        resized = {}
+        pos = self._aged_pos(2)
+        pos.entry_ts_utc = age_ts
+        mgr = types.SimpleNamespace(
+            get_open_positions=lambda: [pos],
+            mark_position_closed=lambda **kw: None,
+            reconcile_contracts=lambda position_id, broker_contracts, reason: resized.update(
+                {"id": position_id, "to": broker_contracts}) or True,
+        )
+        db = _db([("TSLA", "open", json.dumps([
+            {"option_type": "call", "strike": 435.0, "expiration": "2026-07-24",
+             "action": "sell", "contracts": 1},
+            {"option_type": "call", "strike": 445.0, "expiration": "2026-07-24",
+             "action": "buy", "contracts": 1}]))])
+        out = pr.heal(db, mgr, overfill_flatten_enabled=False, underfill_min_age_min=min_age)
+        return out, resized
+
+    def test_aged_underfill_resizes_book_down(self, monkeypatch):
+        out, resized = self._run(monkeypatch, broker_qty=1, age_ts="2026-06-25T12:00:00+00:00")
+        assert resized.get("to") == 1, "aged 2-vs-1 under-fill must resize book to broker (1)"
+        assert out.get("book_resized") == 1
+
+    def test_fresh_underfill_is_left_alone(self, monkeypatch):
+        # a position entered 'now' (huge min_age) must NOT be corrected — it may still be filling
+        out, resized = self._run(monkeypatch, broker_qty=1,
+                                 age_ts="2026-06-25T12:00:00+00:00", min_age=10_000_000)
+        assert resized == {}, "a still-settling fill must never be corrected mid-flight"
+        assert out.get("book_resized") in (None, 0)
+
+
+class TestReconcileContractsPrimitive:
+    def test_resizes_down_and_scales_dollars(self, tmp_path):
+        import sqlite3 as _sq
+        from agora.lifecycle.position_manager import PositionManager
+        db = _sq.connect(str(tmp_path / "t.db"))
+        db.execute("CREATE TABLE positions (position_id TEXT, contracts INTEGER, "
+                   "max_loss_dollars REAL, max_gain_dollars REAL, ticker TEXT, last_reviewed TEXT)")
+        db.execute("INSERT INTO positions VALUES ('p1', 2, 400.0, 600.0, 'TSLA', '')")
+        db.commit()
+        stub = types.SimpleNamespace(_db=db)
+        ok = PositionManager.reconcile_contracts(stub, "p1", 1, "underfill_book_to_broker")
+        row = db.execute("SELECT contracts, max_loss_dollars, max_gain_dollars FROM positions").fetchone()
+        assert ok and row == (1, 200.0, 300.0), "book resized 2→1, dollars halved, no P&L"
+
+    def test_never_increases(self, tmp_path):
+        import sqlite3 as _sq
+        from agora.lifecycle.position_manager import PositionManager
+        db = _sq.connect(str(tmp_path / "t.db"))
+        db.execute("CREATE TABLE positions (position_id TEXT, contracts INTEGER, "
+                   "max_loss_dollars REAL, max_gain_dollars REAL, ticker TEXT, last_reviewed TEXT)")
+        db.execute("INSERT INTO positions VALUES ('p1', 1, 200.0, 300.0, 'TSLA', '')")
+        db.commit()
+        stub = types.SimpleNamespace(_db=db)
+        assert PositionManager.reconcile_contracts(stub, "p1", 3, "x") is False  # never increase

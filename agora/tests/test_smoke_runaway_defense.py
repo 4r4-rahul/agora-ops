@@ -25,4 +25,4 @@ def test_all_runaway_defenses_hold():
 
 
 def _results_all_passed(mod):
-    return all(ok for _, ok, _ in mod._results) and len(mod._results) >= 8
+    return all(ok for _, ok, _ in mod._results) and len(mod._results) >= 10

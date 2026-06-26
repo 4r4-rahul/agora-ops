@@ -279,6 +279,31 @@ def _flatten_overfill(ib: Any, plan: list[dict], max_flatten: int) -> dict:
     return out
 
 
+def _position_age_minutes(pos: Any) -> float | None:
+    """Minutes since the position was entered, for the under-fill settle guard. Prefers the precise
+    entry_ts_utc; falls back to entry_date (a prior calendar day → definitely settled). Returns None
+    when age can't be established — the caller then treats it as 'not safe to correct yet'."""
+    from datetime import date as _date
+    from datetime import datetime, timezone
+    ts = getattr(pos, "entry_ts_utc", None)
+    if ts:
+        try:
+            dt = datetime.fromisoformat(str(ts))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return (datetime.now(timezone.utc) - dt).total_seconds() / 60.0
+        except Exception:
+            pass
+    ed = getattr(pos, "entry_date", None)
+    if ed:
+        try:
+            if datetime.fromisoformat(str(ed)[:10]).date() < _date.today():
+                return 24 * 60.0   # entered a prior day → long settled
+        except Exception:
+            pass
+    return None
+
+
 def safe_to_ghost_close(snap_a: dict, snap_b: dict, leg_keys: list) -> bool:
     """A DB position is a TRUE ghost (safe to close) only if BOTH broker snapshots agree (the
     position stream has settled — no leg still arriving) AND every one of its legs is absent in
@@ -295,7 +320,7 @@ def heal(db_path: str, position_mgr: Any, host: str = "127.0.0.1", port: int = 7
          client_id: int = 73, adopt_orphans: bool = True, close_ghosts: bool = True,
          ghost_min_age_min: float = 3.0,
          overfill_flatten_enabled: bool = True, overfill_min_excess: int = 25,
-         overfill_max_flatten: int = 5000) -> dict:
+         overfill_max_flatten: int = 5000, underfill_min_age_min: float = 20.0) -> dict:
     """Make the DB a faithful mirror of the broker (TWS↔DB 100% accuracy):
 
       • GHOST   (DB position open, none of its legs at the broker) → mark closed in DB.
@@ -388,6 +413,37 @@ def heal(db_path: str, position_mgr: Any, host: str = "127.0.0.1", port: int = 7
                     out["ghosts_closed"] += 1
             except Exception as exc:
                 out["errors"].append(f"ghost-close: {exc}")
+
+        # ── SETTLED UNDER-FILL: broker holds FEWER than the book (the TSLA 2-vs-1 case). The broker
+        # is the truth for what's held, so correct the BOOK down — but ONLY once the gap has SETTLED
+        # (snapshots stable AND the position aged past fill latency), never mid-fill. A fresh small
+        # gap is almost always a settling fill (06-26's TSLA self-resolved in <1 cycle, so correcting
+        # it then would have fought a live fill). Makes closes/P&L/risk use the real size.
+        if positions_stable:
+            try:
+                for pos in position_mgr.get_open_positions():
+                    book_ct = int(getattr(pos, "contracts", 0) or 0)
+                    if book_ct <= 0:
+                        continue
+                    age = _position_age_minutes(pos)
+                    if age is None or age < underfill_min_age_min:
+                        continue   # too fresh / unknown age → may still be filling; leave it
+                    broker_qtys = []
+                    for lg in pos.legs:
+                        right = "C" if str(lg.option_type).lower().startswith("c") else "P"
+                        k = (pos.ticker, right, float(lg.strike),
+                             _norm_expiry(lg.expiration.isoformat()))
+                        broker_qtys.append(abs(ibk.get(k, 0)))
+                    if not broker_qtys:
+                        continue
+                    broker_ct = broker_qtys[0]
+                    # uniform across legs (ratio-1 structure), broker holds SOME but fewer than book
+                    if broker_ct > 0 and all(b == broker_ct for b in broker_qtys) and broker_ct < book_ct:
+                        if position_mgr.reconcile_contracts(
+                                pos.position_id, broker_ct, "underfill_book_to_broker"):
+                            out["book_resized"] = out.get("book_resized", 0) + 1
+            except Exception as exc:
+                out["errors"].append(f"underfill-resize: {exc}")
 
         # ── ORPHANS: adopt broker legs that no DB position covers ──
         # EXCLUDE legs being flattened as over-fills — adopting a 659-contract junk leg would re-track

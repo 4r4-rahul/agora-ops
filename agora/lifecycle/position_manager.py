@@ -159,6 +159,43 @@ class PositionManager:
         except Exception as exc:
             logger.error("apply_partial_close failed [%s]: %s", position_id, exc, exc_info=True)
 
+    def reconcile_contracts(self, position_id: str, broker_contracts: int, reason: str) -> bool:
+        """Correct a position's recorded size DOWN to the broker's actual holding (the source of
+        truth for what's held). This is a RECORDING correction for a settled under-fill — the book
+        recorded N contracts but only `broker_contracts` ever filled — NOT a trade and NOT a P&L
+        event. Scales max_loss/max_gain proportionally so risk + close sizing use the real size.
+
+        Only ever DECREASES (broker < book); increases are handled by over-fill flatten / orphan
+        adoption. Returns True if it resized."""
+        try:
+            row = self._db.execute(
+                "SELECT contracts, max_loss_dollars, max_gain_dollars, ticker FROM positions "
+                "WHERE position_id=?", (position_id,),
+            ).fetchone()
+            if not row:
+                return False
+            old_ct = int(row[0])
+            new_ct = int(broker_contracts)
+            if new_ct <= 0 or new_ct >= old_ct:
+                return False   # ghost (0) handled elsewhere; never increase here
+            ratio = new_ct / old_ct
+            self._db.execute(
+                "UPDATE positions SET contracts=?, max_loss_dollars=?, max_gain_dollars=?, "
+                "last_reviewed=? WHERE position_id=?",
+                (new_ct, row[1] * ratio, row[2] * ratio,
+                 datetime.now(tz=UTC).isoformat(), position_id),
+            )
+            self._db.commit()
+            logger.warning(
+                "BOOK RESIZED %s: %d→%d contracts to match broker (%s) — settled under-fill, "
+                "no P&L event; risk/close sizing now use the real size",
+                row[3], old_ct, new_ct, reason,
+            )
+            return True
+        except Exception as exc:
+            logger.error("reconcile_contracts failed [%s]: %s", position_id, exc, exc_info=True)
+            return False
+
     def set_price_target_for_position(
         self, position_id: str, aligned_return_pct: float, entry_spot: float
     ) -> None:
