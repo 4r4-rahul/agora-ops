@@ -143,3 +143,15 @@ class TestExecutionBugLedger:
     def test_ledger_safe_on_bad_path(self):
         from agora.ops.book_manager import execution_bug_ledger
         assert "error" in execution_bug_ledger("/nonexistent/x.db")
+
+
+class TestRebuildErrorPath:
+    def test_rebuild_returns_error_on_missing_positions_table(self, tmp_path):
+        import sqlite3
+        p = str(tmp_path / "broken.db")
+        conn = sqlite3.connect(p)
+        conn.execute("CREATE TABLE daily_pnl (record_date TEXT PRIMARY KEY, realized_pnl REAL, "
+                     "unrealized_pnl REAL, trades_count INTEGER)")
+        conn.commit(); conn.close()   # NO positions table → rebuild's query raises
+        out = rebuild_daily_pnl(p)
+        assert "error" in out and "before" in out
