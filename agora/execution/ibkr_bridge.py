@@ -360,6 +360,7 @@ async def close_trade(pos: Any, settings: Any, session_id: str) -> dict:
         legs=_pos_to_close_legs(pos),
         contracts=pos.contracts,
         session_id=session_id,
+        position_id=str(getattr(pos, "position_id", "") or ""),
         host=settings.ibkr_host,
         port=settings.ibkr_port,
         client_id=settings.ibkr_client_id + 1,

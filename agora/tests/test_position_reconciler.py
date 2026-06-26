@@ -15,22 +15,36 @@ import types
 
 from agora.ops.position_reconciler import (
     LIVE_STATUSES,
+    ReconcileReport,
     _norm_expiry,
     db_legs,
     diff,
     format_report,
     ibkr_legs,
+    plan_overfill_flatten,
 )
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 def _db(rows: list[tuple]) -> str:
-    """rows: (ticker, status, legs_json)."""
+    """rows: (ticker, status, legs_json). The position-level `contracts` is the authoritative
+    absolute size (what the broker order was placed with); db_legs() reads it now, so we derive it
+    from the legs (max leg count = the absolute count for these single-ratio test positions)."""
     p = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
     with sqlite3.connect(p) as c:
         c.execute("CREATE TABLE positions (ticker TEXT, status TEXT, legs_json TEXT, "
-                  "regime_at_entry TEXT DEFAULT 'neutral')")
-        c.executemany("INSERT INTO positions (ticker, status, legs_json) VALUES (?,?,?)", rows)
+                  "contracts INTEGER DEFAULT 1, regime_at_entry TEXT DEFAULT 'neutral')")
+        enriched = []
+        for ticker, status, legs_json in rows:
+            try:
+                counts = [int(l.get("contracts", 1) or 1) for l in json.loads(legs_json or "[]")]
+            except Exception:
+                counts = []
+            enriched.append((ticker, status, legs_json, max(counts) if counts else 1))
+        c.executemany(
+            "INSERT INTO positions (ticker, status, legs_json, contracts) VALUES (?,?,?,?)",
+            enriched,
+        )
     return p
 
 
@@ -278,3 +292,145 @@ class TestAdoptOversizedAlert:
         # observability ONLY — the oversized position must still be tracked, at its real broker size
         _ok, adopted = _do_adopt(40)
         assert len(adopted) == 1 and adopted[0].contracts == 40
+
+
+# ── over-fill flatten planner (2026-06-26 DIA 631-vs-59 runaway) ────────────────
+def _mm(symbol, db_qty, ibkr_qty, right="P", strike=505.0, expiry="20260717"):
+    return {"symbol": symbol, "right": right, "strike": strike, "expiry": expiry,
+            "db_qty": db_qty, "ibkr_qty": ibkr_qty}
+
+
+class TestOverfillPlanner:
+    def test_flags_the_dia_runaway_signature(self):
+        rep = ReconcileReport(qty_mismatch=[_mm("DIA", -59, 631)])
+        plan = plan_overfill_flatten(rep, min_excess=25)
+        assert len(plan) == 1
+        p = plan[0]
+        # broker is +631, book wants -59 → SELL 690 to bring broker to book
+        assert p["action"] == "SELL" and p["flatten_qty"] == 690 and p["target_qty"] == -59
+
+    def test_buy_side_overfill(self):
+        rep = ReconcileReport(qty_mismatch=[_mm("DIA", 59, -631)])
+        p = plan_overfill_flatten(rep, min_excess=25)[0]
+        assert p["action"] == "BUY" and p["flatten_qty"] == 690
+
+    def test_ignores_routine_partial_fill(self):
+        # db -1 vs ibkr -3 is a normal partial, NOT a runaway — must not be flagged.
+        rep = ReconcileReport(qty_mismatch=[_mm("IWM", -1, -3, right="C", strike=307.0)])
+        assert plan_overfill_flatten(rep, min_excess=25) == []
+
+    def test_threshold_respected(self):
+        # excess of exactly min_excess with ≥2x magnitude is flagged; just under is not.
+        assert plan_overfill_flatten(ReconcileReport(qty_mismatch=[_mm("X", 10, 35)]), 25)  # excess 25
+        assert plan_overfill_flatten(ReconcileReport(qty_mismatch=[_mm("X", 10, 34)]), 25) == []
+
+
+class TestFlattenExecutor:
+    """The flatten executor must (a) place the right single-leg order, (b) NOT stack when one is
+    already working, (c) refuse an insane size. It runs on the heal()-connected sync ib."""
+
+    class _FakeOrder:
+        def __init__(self, ref, status):
+            self.order = types.SimpleNamespace(orderRef=ref, orderId=1)
+            self.orderStatus = types.SimpleNamespace(status=status)
+
+    class _FakeIB:
+        def __init__(self, working=()):
+            self._working = list(working)
+            self.placed = []
+        def reqAllOpenOrders(self): pass
+        def sleep(self, _s): pass
+        def openTrades(self): return self._working
+        def qualifyContracts(self, opt): return [opt]
+        def placeOrder(self, contract, order): self.placed.append((contract, order)); return order
+
+    def _plan(self):
+        return [{"symbol": "DIA", "right": "P", "strike": 505.0, "expiry": "20260717",
+                 "db_qty": -59, "ibkr_qty": 631, "action": "SELL",
+                 "flatten_qty": 690, "target_qty": -59}]
+
+    def test_places_the_flatten_order(self):
+        from agora.ops.position_reconciler import _flatten_overfill
+        ib = self._FakeIB()
+        out = _flatten_overfill(ib, self._plan(), max_flatten=5000)
+        assert out["placed"] == 1 and len(ib.placed) == 1
+        _, order = ib.placed[0]
+        assert order.action == "SELL" and order.totalQuantity == 690
+        assert order.orderRef.startswith("FLATTEN_DIA")
+
+    def test_does_not_stack_when_already_working(self):
+        from agora.ops.position_reconciler import _flatten_overfill
+        ref = "FLATTEN_DIAP505_20260717"
+        ib = self._FakeIB(working=[self._FakeOrder(ref, "Submitted")])
+        out = _flatten_overfill(ib, self._plan(), max_flatten=5000)
+        assert out["placed"] == 0 and out["skipped"] == 1 and ib.placed == []
+
+    def test_refuses_insane_size(self):
+        from agora.ops.position_reconciler import _flatten_overfill
+        ib = self._FakeIB()
+        out = _flatten_overfill(ib, self._plan(), max_flatten=100)  # 690 > 100
+        assert out["placed"] == 0 and out["refused"] == 1 and ib.placed == []
+
+
+class TestOverfillFromOrphans:
+    """The 10:29 restart ghost-closed the adopted DIA row while its 659-contract broker legs
+    persisted — so the over-fill surfaced as an ORPHAN, not a qty_mismatch. The planner must catch
+    orphan over-fills too (book=0 → flatten the whole broker leg), or the runaway escapes cleanup."""
+
+    def test_massive_orphan_is_flagged_for_flatten(self):
+        rep = ReconcileReport(orphans=[
+            {"symbol": "DIA", "right": "P", "strike": 505.0, "expiry": "20260717",
+             "db_qty": 0, "ibkr_qty": 659},
+        ])
+        plan = plan_overfill_flatten(rep, min_excess=25)
+        assert len(plan) == 1
+        p = plan[0]
+        assert p["action"] == "SELL" and p["flatten_qty"] == 659 and p["target_qty"] == 0
+
+    def test_normal_small_orphan_not_flagged(self):
+        # a routine 5-contract adopted orphan must NOT be flattened — it gets adopted normally.
+        rep = ReconcileReport(orphans=[
+            {"symbol": "SPY", "right": "C", "strike": 600.0, "expiry": "20260731",
+             "db_qty": 0, "ibkr_qty": 5},
+        ])
+        assert plan_overfill_flatten(rep, min_excess=25) == []
+
+
+class TestLegRatioVsAbsolute:
+    """Regression for the 2026-06-26 phantom mismatch: legs_json stores the per-leg count
+    inconsistently (AMD long_put = absolute 8; IWM/SCHW 3-lot vertical = ratio 1). db_legs must
+    use position.contracts as the authoritative size so the reconciler agrees with the broker."""
+
+    def _db_with_contracts(self, ticker, contracts, legs):
+        import sqlite3, tempfile
+        p = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
+        with sqlite3.connect(p) as c:
+            c.execute("CREATE TABLE positions (ticker TEXT, status TEXT, legs_json TEXT, "
+                      "contracts INTEGER, regime_at_entry TEXT DEFAULT 'neutral')")
+            c.execute("INSERT INTO positions (ticker, status, legs_json, contracts) VALUES (?,?,?,?)",
+                      (ticker, "open", json.dumps(legs), contracts))
+        return p
+
+    def test_ratio_convention_uses_position_contracts(self):
+        # IWM 3-lot vertical, legs stored as ratio 1 → must aggregate to ±3 (broker truth).
+        legs = [_leg(action="sell", option_type="call", strike=307, contracts=1),
+                _leg(action="buy", option_type="call", strike=309, contracts=1)]
+        db = self._db_with_contracts("IWM", 3, legs)
+        out = db_legs(db)
+        assert out[("IWM", "C", 307.0, "20260821")] == -3
+        assert out[("IWM", "C", 309.0, "20260821")] == +3
+
+    def test_absolute_convention_not_double_counted(self):
+        # AMD long_put, legs stored as absolute 8, position.contracts 8 → ±8, NOT 8*8.
+        legs = [_leg(action="buy", option_type="put", strike=200, contracts=8)]
+        db = self._db_with_contracts("AMD", 8, legs)
+        assert db_legs(db)[("AMD", "P", 200.0, "20260821")] == +8
+
+    def test_genuine_ratio_spread_preserved(self):
+        # 1x2 ratio, 4 spreads: legs stored as ratio (1,2) → ±4 and ±8.
+        legs = [_leg(action="buy", option_type="call", strike=100, contracts=1),
+                _leg(action="sell", option_type="call", strike=110, contracts=2)]
+        db = self._db_with_contracts("XYZ", 4, legs)
+        out = db_legs(db)
+        assert out[("XYZ", "C", 100.0, "20260821")] == +4
+        assert out[("XYZ", "C", 110.0, "20260821")] == -8

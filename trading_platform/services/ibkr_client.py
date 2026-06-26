@@ -181,6 +181,45 @@ def _valid_quote(x: Any) -> bool:
     return x is not None and isinstance(x, (int, float)) and not math.isnan(x) and x > 0
 
 
+# A close order is "still working" unless the broker reports a terminal state.
+_CLOSE_TERMINAL_STATUSES = frozenset(
+    {"Filled", "Cancelled", "ApiCancelled", "Inactive", "PendingCancel"}
+)
+
+
+def _close_ref_base(position_id: str, session_id: str) -> str:
+    """Position-UNIQUE orderRef base for a close. Keyed on position_id (NOT session_id) so the
+    idempotency guard can tell one position's close from another's, and so it matches across
+    engine restarts (a new session != a new position). Falls back to session_id only when no
+    position_id is supplied. Truncated to leave room for a leg suffix ("-L0")."""
+    key = (position_id or session_id or "").strip()
+    return f"CLOSE_{key}"[:26]
+
+
+async def _working_close_orders(ib: Any, ref_base: str) -> list:
+    """Return the broker's still-working close orders whose orderRef matches this position.
+
+    Uses reqAllOpenOrders so it sees orders submitted by PRIOR sessions / other clientIds —
+    the exact cross-restart stacking that ballooned DIA 59→631 contracts on 2026-06-26, when
+    every cycle re-fired a full-size MKT close while earlier closes (paper fills lag 2-4 min)
+    were still working. They all eventually filled and over-closed the position.
+
+    Fails OPEN (returns []) on query error: one extra order on a transient failure is recoverable
+    next cycle; refusing to ever close a position that needs to exit is an unbounded loss.
+    """
+    try:
+        await ib.reqAllOpenOrdersAsync()
+    except Exception as exc:  # pragma: no cover - transient broker/query error
+        logger.warning("Close idempotency check: reqAllOpenOrders failed (%s) — proceeding", exc)
+        return []
+    working = []
+    for trade in ib.openTrades():
+        ref = getattr(trade.order, "orderRef", "") or ""
+        if ref.startswith(ref_base) and trade.orderStatus.status not in _CLOSE_TERMINAL_STATUSES:
+            working.append(trade)
+    return working
+
+
 # M2: bounded marketable-limit close price. A pure MKT close on a thin/empty options book
 # can fill arbitrarily far from the touch (the order chases whatever liquidity exists). A
 # marketable LIMIT crosses the spread by a buffer so it fills like a market order in a normal
@@ -1127,6 +1166,7 @@ async def close_position(
     legs: list[dict[str, Any]],
     contracts: int,
     session_id: str,
+    position_id: str = "",
     host: str = "127.0.0.1",
     port: int = 7497,
     client_id: int = 2,  # separate client_id from entry to avoid conflicts
@@ -1152,6 +1192,23 @@ async def close_position(
         await _connect_ibkr(ib, host=host, port=port, client_id=client_id,
                             market_data_type=market_data_type)
         logger.info("[%s] Closing position %s x%d", session_id, ticker, contracts)
+
+        # IDEMPOTENCY GUARD: never stack closes. If a close for THIS position is already working
+        # at the broker, do not submit another — return AlreadyWorking and let the caller leave the
+        # position OPEN for the next cycle. Stops the runaway re-submission that ballooned DIA to
+        # 631 contracts (-~$105k of fictitious over-fill) on 2026-06-26.
+        ref_base = _close_ref_base(position_id, session_id)
+        working = await _working_close_orders(ib, ref_base)
+        if working:
+            ids = [t.order.orderId for t in working]
+            logger.warning(
+                "[%s] Close SKIPPED for %s — %d working close order(s) already live %s; not stacking",
+                session_id, ticker, len(working), ids,
+            )
+            return {
+                "order_id": ids[0], "status": "AlreadyWorking", "fills": [],
+                "avg_price": None, "net_close_signed": None,
+            }
 
         qualified_legs: list[tuple[dict, Any]] = []
         for leg in legs:
@@ -1218,7 +1275,7 @@ async def close_position(
         close_order.action = "BUY"   # reversed relative to entry
         close_order.totalQuantity = contracts
         close_order.tif = "DAY"
-        close_order.orderRef = f"CLOSE_{session_id[:30]}"
+        close_order.orderRef = ref_base
         close_order.transmit = True
         if close_net is not None:
             buffer = max(0.02, abs(close_net) * 0.05)
@@ -1295,6 +1352,7 @@ async def close_position_legs(
     legs: list[dict[str, Any]],
     contracts: int,
     session_id: str,
+    position_id: str = "",
     host: str = "127.0.0.1",
     port: int = 7497,
     client_id: int = 2,
@@ -1325,6 +1383,21 @@ async def close_position_legs(
         await _connect_ibkr(ib, host=host, port=port, client_id=client_id,
                             market_data_type=market_data_type)
         logger.info("[%s] Closing position LEG-BY-LEG %s x%d", session_id, ticker, contracts)
+
+        # IDEMPOTENCY GUARD (see close_position): one working close per position, broker-checked
+        # so it holds across restarts. Stops the 2026-06-26 close-stacking runaway.
+        ref_base = _close_ref_base(position_id, session_id)
+        working = await _working_close_orders(ib, ref_base)
+        if working:
+            ids = [t.order.orderId for t in working]
+            logger.warning(
+                "[%s] Leg-close SKIPPED for %s — %d working close order(s) already live %s; not stacking",
+                session_id, ticker, len(working), ids,
+            )
+            return {
+                "order_id": ids[0], "status": "AlreadyWorking", "fills": [],
+                "avg_price": None, "net_close_signed": None,
+            }
 
         qualified: list[tuple[dict, Any]] = []
         for leg in legs:
@@ -1368,7 +1441,7 @@ async def close_position_legs(
             o.action = close_action
             o.totalQuantity = contracts * leg.get("quantity", 1)
             o.tif = "DAY"
-            o.orderRef = f"CLOSE_{session_id[:26]}-L{i}"
+            o.orderRef = f"{ref_base}-L{i}"
             o.transmit = True
             if limit_px is not None:
                 o.orderType = "LMT"

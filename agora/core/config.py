@@ -525,6 +525,25 @@ class AgoraSettings(BaseSettings):
         default=10,
         description="Hard cap on contracts per trade regardless of size_multiplier",
     )
+    reconcile_overfill_flatten_enabled: bool = Field(
+        default=True,
+        description="When True, the reconciler mechanically flattens broker legs that massively "
+                    "exceed the book (the 2026-06-26 DIA 631-vs-59 over-fill signature) back to the "
+                    "book quantity, via single-leg orders each protected by the same idempotency "
+                    "guard as the close path (so the cleanup can't itself runaway). ON for paper: "
+                    "paper IS the validation environment — execute, validate, THEN deploy to live.",
+    )
+    reconcile_overfill_min_excess: int = Field(
+        default=25,
+        description="Min contracts a broker leg must exceed the book by before the over-fill "
+                    "flattener acts. Above routine ±1/±2 partial-fill noise; targets only runaway-"
+                    "scale divergence.",
+    )
+    reconcile_overfill_max_flatten: int = Field(
+        default=5000,
+        description="Sanity ceiling on a single flatten order. A computed flatten larger than this "
+                    "is refused + alerted rather than blindly fired (defense-in-depth vs a bad diff).",
+    )
     paper_min_contracts: int = Field(
         default=1, ge=1, le=20,
         description="PAPER-ONLY minimum contracts per trade. RECALIBRATED 2026-06-26 from 3→1: a floor of "
