@@ -104,7 +104,10 @@ def _shock_stub(evaluated):
     async def _eval(ticker, scan_priority=None, scan_reason=None):
         evaluated.append(ticker)
     return types.SimpleNamespace(
-        _last_shock_scan_ts=0.0,
+        # -inf, not 0.0: the debounce uses time.monotonic() (seconds since boot). On a long-running
+        # machine monotonic() is huge so 0.0 reads as "long ago", but on a freshly-booted CI runner
+        # monotonic() is small (< DEBOUNCE), so 0.0 wrongly debounced the first scan → empty evals.
+        _last_shock_scan_ts=float("-inf"),
         _SHOCK_SCAN_DEBOUNCE_SECS=AgoraSession._SHOCK_SCAN_DEBOUNCE_SECS,
         _SHOCK_SCAN_MAX_NAMES=AgoraSession._SHOCK_SCAN_MAX_NAMES,
         _SHOCK_SCAN_MAX_MOVE_PCT=AgoraSession._SHOCK_SCAN_MAX_MOVE_PCT,
