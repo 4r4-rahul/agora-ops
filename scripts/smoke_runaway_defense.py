@@ -26,6 +26,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))   # repo root �
 from agora.ops.position_reconciler import heal
 from trading_platform.services.ibkr_client import (
     _close_ref_base as close_ref_base,
+)
+from trading_platform.services.ibkr_client import (
     _working_close_orders as working_close_orders,
 )
 
@@ -172,7 +174,6 @@ def defense_2_overfill_detected_and_flattened():
     print(f"{DIM}   Worst case: the broker already holds a 659-contract DIA leg the book never sized.{RESET}")
 
     ib = FakeIB(snapshots=[[_BrokerPos("DIA", "P", 505.0, "20260717", 659)]])
-    import agora.ops.position_reconciler as pr
     orig_IB = __import__("ib_insync").IB
     try:
         __import__("ib_insync").IB = lambda: ib
@@ -259,7 +260,7 @@ def defense_4_ghost_close_stability():
 def defense_5_underfill_book_correction():
     print(f"\n{BOLD}[5/5] Settled under-fill — make the book truthful, don't over-close{RESET}")
     print(f"{DIM}   Worst case: the book says 2 contracts but only 1 ever filled (TSLA 2-vs-1). A close")
-    print(f"   would size to 2 and leave a stray leg. The book must be corrected DOWN to the broker —")
+    print("   would size to 2 and leave a stray leg. The book must be corrected DOWN to the broker —")
     print(f"   but ONLY once aged past fill latency (a fresh gap may still be filling).{RESET}")
 
     legs_meta = [("call", 435.0, "sell"), ("call", 445.0, "buy")]

@@ -174,6 +174,7 @@ class TestReconciliationHealth:
 
     def test_single_broker_fail_is_warn(self, tmp_path):
         import sqlite3
+
         from agora.ops.book_manager import reconciliation_health
         db = _db(tmp_path, [_REAL_A, _REAL_B])
         rebuild_daily_pnl(db)                      # ledger + partition OK
