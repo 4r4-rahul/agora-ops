@@ -454,10 +454,18 @@ class StrategyRulesEngine:
         # Default: VOL_PREMIUM — credit spread at 30 DTE (theta accelerates sharply
         # after 30 DTE; using 45 DTE pushes to the 66-90 bracket which has insufficient
         # credit/width ratio for positive EV at standard 20-delta short)
-        if direction == "bullish" or direction == "neutral":
+        if direction == "bullish":
             return StrategyType.BULL_PUT_SPREAD, 30
-        else:
+        elif direction == "bearish":
             return StrategyType.BEAR_CALL_SPREAD, 30
+        else:
+            # NEUTRAL view → a NEUTRAL structure. RECALIBRATION 2026-06-27: the old code routed
+            # neutral → BULL_PUT_SPREAD (a directionally-BULLISH bet), which won 10% (n=38, -$2,519),
+            # almost all in neutral regime. A neutral read has no up-tailwind, so sell BOTH wings
+            # (iron_condor) instead of betting up. Flag-gated + reversible.
+            if getattr(self._settings, "vol_premium_neutral_iron_condor", True):
+                return StrategyType.IRON_CONDOR, 30
+            return StrategyType.BULL_PUT_SPREAD, 30   # legacy behavior (flag off)
 
     # ── Expiry selection ───────────────────────────────────────────
 

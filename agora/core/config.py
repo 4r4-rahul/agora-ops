@@ -932,6 +932,16 @@ class AgoraSettings(BaseSettings):
                     "trendless tape is theta suicide. NB: raising the conviction bar would be WRONG "
                     "(conviction is anti-predictive in neutral: high>=70 -> 0% win). Reversible.",
     )
+    vol_premium_neutral_iron_condor: bool = Field(
+        default=True,
+        description="RECALIBRATION 2026-06-27: in the VOL_PREMIUM pillar, a NEUTRAL directional read "
+                    "must route to a NEUTRAL structure (iron_condor), NOT bull_put_spread. The old "
+                    "code sold a directionally-BULLISH credit spread on a neutral view: bull_put_spread "
+                    "won 10%% (n=38, -$2,519), almost all in neutral regime — selling downside with no "
+                    "up-tailwind into a choppy/down tape. This is the credit-spread analogue of R3 (the "
+                    "long-debit fix never reached credit spreads). bull_put_spread now requires a genuine "
+                    "BULLISH read. Reversible: set False to restore neutral->bull_put_spread.",
+    )
     long_options_vetter_overrides_advocate: bool = Field(
         default=True,
         description="For LONG options, a PROCEED from the purpose-built Opus vetter overrides a "
