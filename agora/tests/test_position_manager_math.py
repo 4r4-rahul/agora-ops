@@ -107,10 +107,16 @@ class TestPortfolioGreeks:
 # ── get_realized_pnl_today (daily-loss breaker input) ─────────────────────────
 class TestRealizedPnlToday:
     def _pm_with_rows(self, rows):
+        # rows: (pnl, close_date, status[, close_source='lifecycle'[, regime='neutral']])
         conn = sqlite3.connect(":memory:")
         conn.execute("CREATE TABLE positions (realized_pnl REAL, close_date TEXT, status TEXT, "
-                     "regime_at_entry TEXT DEFAULT 'neutral')")
-        conn.executemany("INSERT INTO positions (realized_pnl, close_date, status) VALUES (?,?,?)", rows)
+                     "close_source TEXT DEFAULT 'lifecycle', regime_at_entry TEXT DEFAULT 'neutral')")
+        for r in rows:
+            pnl, cd, st = r[0], r[1], r[2]
+            src = r[3] if len(r) > 3 else "lifecycle"
+            regime = r[4] if len(r) > 4 else "neutral"
+            conn.execute("INSERT INTO positions (realized_pnl, close_date, status, close_source, "
+                         "regime_at_entry) VALUES (?,?,?,?,?)", (pnl, cd, st, src, regime))
         return types.SimpleNamespace(_db=conn)
 
     def test_sums_only_today_closed(self):
@@ -133,6 +139,19 @@ class TestRealizedPnlToday:
         today = date.today().isoformat()
         pm = self._pm_with_rows([(-200.0, today, "closed"), (-50.0, today, "closed")])
         assert PositionManager.get_realized_pnl_today(pm) == -250.0
+
+    def test_excludes_all_fiction_sources(self):
+        # HARDEN-3 (GAP-5): the breaker-feeding sum must see REAL engine P&L only — not adopted
+        # (the −$808k DIA artifact) NOR reconcile/fabricated/duplicate. Was excluding only adopted.
+        today = date.today().isoformat()
+        pm = self._pm_with_rows([
+            (100.0, today, "closed"),                                # real lifecycle → counts
+            (-808_000.0, today, "closed", "lifecycle", "adopted"),   # adopted fiction → excluded
+            (5_000.0, today, "closed", "reconcile", "neutral"),      # reconcile fiction → excluded
+            (5_000.0, today, "closed", "fabricated_x", "neutral"),   # fabricated → excluded
+            (5_000.0, today, "closed", "tws_startup_sync", "neutral"),  # startup sync → excluded
+        ])
+        assert PositionManager.get_realized_pnl_today(pm) == 100.0
 
 
 # ── _write_trade_record (real-fill booking, NOT the model mark) ───────────────

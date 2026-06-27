@@ -1658,14 +1658,15 @@ class PositionManager:
         return None
 
     def get_realized_pnl_today(self) -> float:
-        """Sum of realized_pnl for positions closed today — feeds the DAILY-LOSS BREAKER. EXCLUDES
-        adopted positions: their reconstructed cost basis books fictional P&L (the 2026-06-25 −$1.17M
-        'day' was entirely adopted closes — −$808k on a single $16k-max-loss DIA spread), which would
-        falsely trip (or, as it did, distort) the breaker. The breaker must see only real engine P&L."""
+        """Sum of realized_pnl for positions closed today — feeds the DAILY-LOSS BREAKER. Uses the
+        canonical _REAL_CLOSE predicate so ALL fiction is excluded — not just adopted (the 2026-06-25
+        −$1.17M 'day' was adopted closes, −$808k on a $16k-max-loss DIA spread) but also reconcile/
+        fabricated/duplicate/tws_startup_sync. HARDEN-3 (GAP-5): previously excluded only adopted, so a
+        reconcile/fabricated close could still distort the breaker. The breaker sees real engine P&L only."""
+        from agora.ops.edge_dashboard import _REAL_CLOSE
         today = date.today().isoformat()
         row = self._db.execute(
-            "SELECT COALESCE(SUM(realized_pnl), 0) FROM positions "
-            "WHERE close_date=? AND status='closed' AND COALESCE(regime_at_entry,'') <> 'adopted'",
+            f"SELECT COALESCE(SUM(realized_pnl), 0) FROM positions WHERE close_date=? AND {_REAL_CLOSE}",
             (today,),
         ).fetchone()
         return float(row[0]) if row else 0.0
