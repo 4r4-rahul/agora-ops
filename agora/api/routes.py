@@ -1046,6 +1046,7 @@ async def get_health() -> JSONResponse:
         "open_positions": open_count,
         "system_health": sys_health,
         "reconciliation": recon,
+        "safety":        session._risk.get_breaker_status(),   # HARDEN-1: never hide the breaker state
         "timestamp":     datetime.now(_ET).isoformat(),
     })
 

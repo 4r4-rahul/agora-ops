@@ -73,6 +73,17 @@ class RiskCouncil:
         self._csuite_manager: Any = None   # CROAgent — set via register_csuite_manager()
         self._circuit_breaker: Any = None  # set via register_circuit_breaker()
         self._db = self._init_db()
+        # HARDEN-1 (2026-06-27): the safety state must never be hidden. If the daily-loss breaker is
+        # OFF (free-paper data collection), say so LOUDLY at startup so the operator is never unaware
+        # of a disabled account guard. Per-position 2x max-loss trip + over-fill auto-halt still fire.
+        if self._paper_breakers_disabled():
+            logger.critical(
+                "DAILY-LOSS BREAKER OFF — free-paper data-collection mode "
+                "(PAPER_DISABLE_LOSS_BREAKERS=true). Per-position 2x max-loss trip + over-fill "
+                "auto-halt STILL fire; the aggregate daily-loss circuit-break does NOT. Live mode "
+                "always enforces (double-guarded). Limit when on: $%.0f.",
+                self._settings.daily_loss_limit_dollars,
+            )
 
     def register_csuite_manager(self, manager: Any) -> None:
         """Wire the CROAgent as supervising executive."""
@@ -289,6 +300,24 @@ class RiskCouncil:
             "reason": row[2],
             "tripped_at": row[3],
             "tripped_by": row[4],
+        }
+
+    def get_breaker_status(self) -> dict[str, Any]:
+        """HARDEN-1 (2026-06-27): honest, surfaceable state of the loss breakers so the safety posture
+        is NEVER hidden (shown in /agora/health + dashboard). The aggregate daily-loss breaker can be
+        OFF for free-paper data collection; this makes that explicit. Per-position 2x max-loss trip and
+        over-fill auto-halt are UNCONDITIONAL (`trip_kill_switch` is not gated) and always active. Live
+        mode always enforces the daily-loss breaker (double-guarded in `_paper_breakers_disabled`)."""
+        disabled = self._paper_breakers_disabled()
+        return {
+            "daily_loss_breaker_enabled": not disabled,
+            "daily_loss_limit_dollars": round(self._settings.daily_loss_limit_dollars, 2),
+            "trading_mode": str(getattr(self._settings, "trading_mode", "paper")),
+            "always_on": ["per_position_2x_max_loss_trip", "over_fill_auto_halt"],
+            "state": (
+                "DAILY-LOSS BREAKER OFF — free-paper data collection (live always enforces)"
+                if disabled else "enforced"
+            ),
         }
 
     # ── P&L tracking ──────────────────────────────────────────────

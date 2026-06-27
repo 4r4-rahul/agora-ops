@@ -27,6 +27,7 @@ def _app() -> TestClient:
 def _session(**over):
     risk = types.SimpleNamespace(
         get_kill_switch_state=lambda: {"active": False, "reason": "", "tripped_at": "", "tripped_by": ""},
+        get_breaker_status=lambda: {"daily_loss_breaker_enabled": True, "state": "enforced"},
         trip_kill_switch=lambda reason, tripped_by: None,
         reset_kill_switch=lambda reset_by: None,
     )
