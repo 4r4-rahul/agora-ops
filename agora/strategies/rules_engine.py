@@ -463,7 +463,9 @@ class StrategyRulesEngine:
             # neutral → BULL_PUT_SPREAD (a directionally-BULLISH bet), which won 10% (n=38, -$2,519),
             # almost all in neutral regime. A neutral read has no up-tailwind, so sell BOTH wings
             # (iron_condor) instead of betting up. Flag-gated + reversible.
-            if getattr(self._settings, "vol_premium_neutral_iron_condor", True):
+            # getattr-chain stays safe when called statically (self=None) — defaults to the new
+            # behavior (iron_condor) unless the flag is explicitly off.
+            if getattr(getattr(self, "_settings", None), "vol_premium_neutral_iron_condor", True):
                 return StrategyType.IRON_CONDOR, 30
             return StrategyType.BULL_PUT_SPREAD, 30   # legacy behavior (flag off)
 

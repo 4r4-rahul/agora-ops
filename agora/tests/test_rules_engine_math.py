@@ -310,5 +310,8 @@ class TestSelectStrategy:
 
     def test_vol_premium_credit_side(self):
         f = StrategyRulesEngine._select_strategy
-        assert f(None, _conv(StrategyPillar.VOL_PREMIUM), "neutral", None) == (StrategyType.BULL_PUT_SPREAD, 30)
+        # RECALIBRATION 2026-06-27: neutral VOL_PREMIUM → IRON_CONDOR (neutral structure), not the
+        # bullish bull_put_spread (the 10%-win, −$2,519 leak). bullish→bull_put / bearish→bear_call.
+        assert f(None, _conv(StrategyPillar.VOL_PREMIUM), "neutral", None) == (StrategyType.IRON_CONDOR, 30)
+        assert f(None, _conv(StrategyPillar.VOL_PREMIUM), "bullish", None) == (StrategyType.BULL_PUT_SPREAD, 30)
         assert f(None, _conv(StrategyPillar.VOL_PREMIUM), "bearish", None) == (StrategyType.BEAR_CALL_SPREAD, 30)
