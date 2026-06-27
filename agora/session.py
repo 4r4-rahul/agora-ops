@@ -1892,6 +1892,7 @@ class AgoraSession:
                                     "event_day":         bool(getattr(rec, "event_day", False)),
                                 },
                             )
+                            await self._evaluate_entry_stop_once(position_id)  # GAP-2: protect immediately, not in 60s
                             # Link this fill to its existing entry-journal row (the decision was
                             # already journaled above) instead of writing a SECOND, duplicate row.
                             _leg0 = rec.legs[0] if getattr(rec, "legs", None) else None
@@ -4430,6 +4431,7 @@ class AgoraSession:
                 net_entry_signed=order.get("net_entry_signed"),
                 entry_ts_utc=(fills[-1].get("time") if fills else "") or "",
             )
+            await self._evaluate_entry_stop_once(position_id)  # GAP-2: protect immediately, not in 60s
             _complete_chain(
                 str(self._settings.db_path), chain_id, "filled",
                 strategy=_chain_strategy, gates_passed=_gates,
@@ -4545,6 +4547,26 @@ class AgoraSession:
             return (rel <= cap), rel
         except Exception:
             return True, 0.0   # fail-open: never block a trade on a pre-screen error
+
+    async def _evaluate_entry_stop_once(self, position_id: str | None) -> None:
+        """GAP-2 (HARDEN-3b): close the post-fill unprotected window. The first deterministic stop
+        evaluation was otherwise the next 60s lifecycle cycle. This marks the just-filled position ONCE
+        and runs the single exit owner immediately — REUSING _refresh_position_price (whose quote_ok
+        guard no-ops on a missing/stale quote → no mark) and _check_position_targets (surveil HOLDs on
+        unrealized=0.0, proven across all structure/regime combos). So it can ONLY exit on a genuine
+        adverse mark; it can never erroneously close a fresh, unmarked position. Fully fail-open."""
+        if not position_id:
+            return
+        try:
+            pm = self._position_mgr
+            pos = next((p for p in pm.get_open_positions() if p.position_id == position_id), None)
+            if pos is None:
+                return
+            await pm._refresh_position_price(pos)   # quote_ok guard inside → no-op on missing data
+            pos = next((p for p in pm.get_open_positions() if p.position_id == position_id), pos)
+            await pm._check_position_targets(pos)   # surveil / profit-engine / long-options exit owner
+        except Exception as exc:
+            logger.warning("Entry stop-eval skipped for %s: %s", position_id, exc)
 
     def _record_position(
         self,
