@@ -1031,12 +1031,21 @@ async def get_health() -> JSONResponse:
     if hasattr(session, "_system_health") and session._system_health:
         sys_health = session._system_health.get_status()
 
+    # BM-4: continuous reconciliation health (DB↔broker + DB-internal ledger + partition) so a
+    # divergence surfaces immediately, never sitting unnoticed like the −$425 recon_ok=0 did.
+    try:
+        from agora.ops.book_manager import reconciliation_health
+        recon = reconciliation_health(str(session._settings.db_path))
+    except Exception as exc:
+        recon = {"status": "critical", "error": str(exc)}
+
     return JSONResponse({
         "session_id":    session._session_id,
         "trading_mode":  session._settings.trading_mode,
         "kill_switch":   kill,
         "open_positions": open_count,
         "system_health": sys_health,
+        "reconciliation": recon,
         "timestamp":     datetime.now(_ET).isoformat(),
     })
 

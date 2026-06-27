@@ -155,3 +155,32 @@ class TestRebuildErrorPath:
         conn.commit(); conn.close()   # NO positions table → rebuild's query raises
         out = rebuild_daily_pnl(p)
         assert "error" in out and "before" in out
+
+
+class TestReconciliationHealth:
+    def test_clean_book_is_ok(self, tmp_path):
+        from agora.ops.book_manager import reconciliation_health
+        db = _db(tmp_path, [_REAL_A, _REAL_B])
+        rebuild_daily_pnl(db)
+        h = reconciliation_health(db)
+        assert h["status"] == "ok" and all(c["ok"] for c in h["checks"])
+
+    def test_broken_ledger_is_critical(self, tmp_path):
+        from agora.ops.book_manager import reconciliation_health
+        db = _db(tmp_path, [_REAL_A, _REAL_B], daily_pnl=[("2026-06-20", 9999.0, 0.0, 0)])  # drifted
+        h = reconciliation_health(db)
+        assert h["status"] == "critical"          # a broken ledger is always critical
+        assert h["checks"][0]["name"] == "ledger_reconciled" and not h["checks"][0]["ok"]
+
+    def test_single_broker_fail_is_warn(self, tmp_path):
+        import sqlite3
+        from agora.ops.book_manager import reconciliation_health
+        db = _db(tmp_path, [_REAL_A, _REAL_B])
+        rebuild_daily_pnl(db)                      # ledger + partition OK
+        with sqlite3.connect(db) as c:            # but broker recon flagged off
+            c.execute("CREATE TABLE perf_snapshots (snapshot_date TEXT, recon_ok INTEGER, recon_drift REAL)")
+            c.execute("INSERT INTO perf_snapshots VALUES ('2026-06-20', 0, -425.0)")
+        h = reconciliation_health(db)
+        assert h["status"] == "warn"
+        broker = next(c for c in h["checks"] if c["name"] == "broker_reconciled")
+        assert not broker["ok"]

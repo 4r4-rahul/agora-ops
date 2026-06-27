@@ -254,6 +254,60 @@ def canonical_book(db_path: str) -> dict[str, Any]:
         return {"error": str(exc)}
 
 
+def _latest_broker_recon(db_path: str) -> dict[str, Any]:
+    """The most recent DB↔broker reconciliation result (persisted by the perf snapshot as
+    recon_ok/recon_drift). This is the position-level reconcile (the reconciler/heal), distinct from
+    the DB-internal ledger reconcile()."""
+    try:
+        with sqlite3.connect(db_path, timeout=10) as conn:
+            row = conn.execute(
+                "SELECT recon_ok, recon_drift, snapshot_date FROM perf_snapshots "
+                "ORDER BY snapshot_date DESC LIMIT 1"
+            ).fetchone()
+        if not row:
+            return {"ok": True, "detail": "no snapshot yet", "stale": True}
+        ok, drift, day = bool(row[0]), float(row[1] or 0.0), row[2]
+        return {"ok": ok, "drift": round(drift, 2), "as_of": day, "stale": False}
+    except Exception:
+        # No perf_snapshots yet (fresh DB / pre-first-snapshot) is "no data", NOT a divergence — the
+        # real-time guards are the ledger + partition checks. Treat as ok-but-stale, don't false-warn.
+        return {"ok": True, "detail": "no snapshot data", "stale": True}
+
+
+def reconciliation_health(db_path: str) -> dict[str, Any]:
+    """Unified, CONTINUOUS reconciliation health — ONE severity (ok/warn/critical) for 'are the books
+    in sync RIGHT NOW', so a divergence can never sit unnoticed again (the −$425 recon_ok=0 sat for 2
+    days). Combines three independent checks; the UI + alerts read this single signal.
+
+      1. ledger_reconciled  — DB-internal: daily_pnl == real positions (reconcile())
+      2. partition_exact    — every closed penny attributed (real + Σexcluded == naïve)
+      3. broker_reconciled  — DB↔broker position-level recon (latest perf snapshot recon_ok)
+
+    critical = ≥2 failing OR the ledger itself is broken; warn = exactly 1; ok = all green.
+    A failing/erroring read is treated as NOT-ok (fail-loud), never silently green."""
+    internal = reconcile(db_path)
+    cb = canonical_book(db_path)
+    broker = _latest_broker_recon(db_path)
+    checks = [
+        {"name": "ledger_reconciled", "ok": bool(internal.get("reconciled")),
+         "detail": f"drift ${internal.get('drift', '?')}"},
+        {"name": "partition_exact", "ok": bool(cb.get("partition_ok")),
+         "detail": f"residual ${cb.get('partition_residual', '?')}"},
+        {"name": "broker_reconciled", "ok": bool(broker.get("ok")),
+         "detail": (f"drift ${broker.get('drift')}" + (" (stale)" if broker.get("stale") else ""))
+                   if "drift" in broker else broker.get("detail", "?")},
+    ]
+    n_fail = sum(1 for c in checks if not c["ok"])
+    ledger_broken = not checks[0]["ok"]
+    status = "ok" if n_fail == 0 else ("critical" if (n_fail >= 2 or ledger_broken) else "warn")
+    return {
+        "status": status,
+        "checks": checks,
+        "real_strategy_pnl": cb.get("real_strategy", {}).get("net_realized"),
+        "computed_at_utc": datetime.now(tz=UTC).isoformat(),
+    }
+
+
 if __name__ == "__main__":   # pragma: no cover — ad-hoc: python -m agora.ops.book_manager [db]
     import json
     import sys
