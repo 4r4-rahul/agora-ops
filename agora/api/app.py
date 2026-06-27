@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -77,6 +78,23 @@ async def lifespan(app: FastAPI):
     # Attach WebSocket log handler before session starts
     attach_log_handler()
 
+    # HARDEN-3b (GAP-4): acquire the single-engine lease BEFORE building the session, so a second
+    # engine on the same IBKR account refuses to start (defense-in-depth behind the launchd shell flock).
+    from ..core.config import get_settings as _get_settings
+    _s = _get_settings()
+    _lease_key = f"{_s.ibkr_host}:{_s.ibkr_port}:{_s.ibkr_client_id}"
+    if getattr(_s, "engine_lease_enabled", True):
+        import socket as _socket
+
+        from ..ops.engine_lease import LeaseHeldError, acquire_lease
+        try:
+            acquire_lease(str(_s.db_path), _lease_key, os.getpid(), _socket.gethostname(),
+                          _s.ibkr_client_id)
+            logger.info("Engine lease acquired (%s, pid=%d)", _lease_key, os.getpid())
+        except LeaseHeldError as exc:
+            logger.critical("REFUSING TO START — %s", exc)
+            raise
+
     # Start the AGORA trading session in the background
     from ..session import AgoraSession
     session = AgoraSession()
@@ -97,6 +115,11 @@ async def lifespan(app: FastAPI):
         await session_task
     except (asyncio.CancelledError, Exception):
         pass
+    # HARDEN-3b (GAP-4): release the lease on clean shutdown (a kill -9 leaves the row; the next
+    # engine takes over via stale-heartbeat / dead-pid detection).
+    if getattr(_s, "engine_lease_enabled", True):
+        from ..ops.engine_lease import release_lease
+        release_lease(str(_s.db_path), _lease_key, os.getpid())
 
 
 app = FastAPI(

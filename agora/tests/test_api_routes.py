@@ -47,7 +47,7 @@ def _session(**over):
         _session_id="TEST-SESSION",
         _settings=types.SimpleNamespace(
             trading_mode="paper", db_path="/tmp/agora_test.db",
-            ibkr_host="127.0.0.1", ibkr_port=7497),
+            ibkr_host="127.0.0.1", ibkr_port=7497, engine_lease_enabled=False),
         _risk=risk, _position_mgr=pm, readiness=readiness,
         _system_health=None, _ibkr_agent=None,
     )

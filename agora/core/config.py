@@ -96,6 +96,14 @@ class AgoraSettings(BaseSettings):
     ibkr_host: str = Field(default="127.0.0.1")
     ibkr_port: int = Field(default=7497)
     ibkr_client_id: int = Field(default=10)  # separate from APEX (client 1)
+    engine_lease_enabled: bool = Field(
+        default=True,
+        description="HARDEN-3b (GAP-4): in-process single-engine lease (DB-based, defense-in-depth "
+                    "behind the launchd shell flock). When True, a starting engine REFUSES to run if a "
+                    "different, live, fresh-heartbeat engine already holds the lease for the same IBKR "
+                    "slot (host:port:client_id) — preventing two engines/one account double-fire. "
+                    "Stale-heartbeat / dead-pid holders are taken over. Set False to disable.",
+    )
     ibkr_news_client_id: int = Field(
         default=4,
         description="clientId for IBKRNewsAgent (must differ from ibkr_client_id and startup_tws_sync_client_id).",

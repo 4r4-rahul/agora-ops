@@ -1017,6 +1017,19 @@ async def get_entry_funnel() -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+def _engine_lease_status(session) -> dict:
+    """HARDEN-3b (GAP-4): read-only single-engine lease state for /agora/health. Never raises."""
+    try:
+        s = session._settings
+        if not getattr(s, "engine_lease_enabled", True):
+            return {"enabled": False}
+        from agora.ops.engine_lease import lease_status
+        lk = f"{s.ibkr_host}:{s.ibkr_port}:{s.ibkr_client_id}"
+        return {"enabled": True, **lease_status(str(s.db_path), lk)}
+    except Exception as exc:
+        return {"status": "unknown", "error": str(exc)}
+
+
 @router.get("/health")
 async def get_health() -> JSONResponse:
     """
@@ -1047,6 +1060,7 @@ async def get_health() -> JSONResponse:
         "system_health": sys_health,
         "reconciliation": recon,
         "safety":        session._risk.get_breaker_status(),   # HARDEN-1: never hide the breaker state
+        "engine_lease":  _engine_lease_status(session),        # HARDEN-3b: single-engine lease state
         "timestamp":     datetime.now(_ET).isoformat(),
     })
 

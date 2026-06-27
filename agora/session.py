@@ -879,6 +879,16 @@ class AgoraSession:
             # Every ~5 min, surface the shared-snapshot cache effectiveness (#1/#2): a high hit
             # rate means the two pipelines are sharing fetches instead of duplicating them.
             _beat += 1
+            # HARDEN-3b (GAP-4): refresh the single-engine lease every ~30s (< 90s stale window).
+            if _beat % 3 == 0 and getattr(self._settings, "engine_lease_enabled", True):
+                try:
+                    import os as _os
+
+                    from agora.ops.engine_lease import refresh_lease
+                    lk = f"{self._settings.ibkr_host}:{self._settings.ibkr_port}:{self._settings.ibkr_client_id}"
+                    refresh_lease(str(self._settings.db_path), lk, _os.getpid())
+                except Exception:
+                    pass
             if _beat % 30 == 0:
                 try:
                     logger.info("MarketSnapshot cache %s", get_market_snapshot().stats())
