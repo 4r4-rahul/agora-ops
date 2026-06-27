@@ -48,6 +48,14 @@ def _profit_factor(pnls: list[float]) -> float:
     return round(gross_profit / gross_loss, 3)
 
 
+def _median(xs: list[float]) -> float | None:
+    if not xs:
+        return None
+    s = sorted(xs)
+    m = len(s) // 2
+    return round(s[m] if len(s) % 2 else (s[m - 1] + s[m]) / 2, 2)
+
+
 def _cell_stats(pnls: list[float]) -> dict[str, Any]:
     n = len(pnls)
     wins = [p for p in pnls if p > 0]
@@ -55,6 +63,7 @@ def _cell_stats(pnls: list[float]) -> dict[str, Any]:
         "count":         n,
         "win_rate":      round(len(wins) / n, 3) if n else None,
         "avg_pnl":       round(sum(pnls) / n, 2) if n else None,
+        "median_pnl":    _median(pnls),   # outlier-robust companion to avg_pnl
         "profit_factor": _profit_factor(pnls) if n else None,
         "sharpe":        _sharpe(pnls),
     }
@@ -110,6 +119,31 @@ def _load_decision_chains(db_path: str, lookback_days: int) -> list[dict]:
             {"conviction": float(r[0] or 0), "strategy": r[1] or "", "pnl": float(r[2]), "started_at": r[3]}
             for r in rows
         ]
+    except Exception:
+        return []
+
+
+def _load_conviction_outcomes(db_path: str, lookback_days: int) -> list[dict]:
+    """Conviction→outcome from positions/_REAL_CLOSE — the AUTHORITATIVE conviction signal.
+    decision_chains.conviction is sparse/near-constant (most rows ~51.7), which made the quintile
+    analysis blind to the documented inversion (high conviction → worse outcomes).
+    positions.conviction_at_entry is stamped on every real close (n≈110), so quintiles built from it
+    actually measure whether the scorer predicts. Falls back silently to [] on any error."""
+    from agora.ops.edge_dashboard import _REAL_CLOSE
+    cutoff = (date.today() - timedelta(days=lookback_days)).isoformat()
+    try:
+        with sqlite3.connect(db_path) as conn:
+            rows = conn.execute(
+                f"""SELECT COALESCE(conviction_at_entry, 0) AS conviction, realized_pnl
+                   FROM positions
+                   WHERE realized_pnl IS NOT NULL
+                     AND COALESCE(conviction_at_entry, 0) > 0
+                     AND close_date >= ?
+                     AND {_REAL_CLOSE}
+                   ORDER BY conviction_at_entry""",
+                (cutoff,),
+            ).fetchall()
+        return [{"conviction": float(r[0]), "pnl": float(r[1])} for r in rows]
     except Exception:
         return []
 
@@ -243,6 +277,84 @@ def _propose_weights(
     return proposed, notes
 
 
+def _diagnostics(
+    quintile_stats: dict[str, Any],
+    regime_stats: dict[str, Any],
+    cell_stats: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Concrete, data-driven findings + recommended actions. The operator applies them (this module
+    NEVER auto-applies). Each finding is structured so the engine/UI can surface it mechanically."""
+    out: list[dict[str, Any]] = []
+
+    # 1. Is conviction predictive? Use OUTLIER-ROBUST metrics (win_rate + median_pnl), NOT mean
+    #    avg_pnl. Lesson 2026-06-27: a mean-based check called conviction "healthy" because 4 lucky
+    #    bear_put_spread winners (+$3,334) landed in the top quintile; on win_rate/median the top
+    #    quintile is NOT better. Mean P&L is dominated by a handful of outliers at this sample size.
+    qs = list(quintile_stats.values())
+    if len(qs) >= 2:
+        top, bot = qs[-1], qs[0]
+        twr, bwr = top.get("win_rate"), bot.get("win_rate")
+        tmed, bmed = top.get("median_pnl"), bot.get("median_pnl")
+        tavg, bavg = top.get("avg_pnl"), bot.get("avg_pnl")
+        tpf = top.get("profit_factor")
+        if None not in (twr, bwr, tmed, bmed):
+            # ACTIONABLE only if the top-conviction bucket is itself PROFITABLE (median>0 or PF>1)
+            # AND ordered above the bottom on robust metrics. A top quintile that still LOSES
+            # (median<0, win<break-even) is not an exploitable edge — it's noise, even if it nudges
+            # the bottom. Mean P&L is ignored for the verdict (outlier-dominated at this n).
+            # MEDIAN only — PF and mean are both inflated by a few big winners at this sample size
+            # (the 4 bear_put_spread outliers gave a misleading PF=1.35 while median stayed negative).
+            top_profitable = tmed is not None and tmed > 0
+            beats_bottom   = (twr > bwr) and (tmed > bmed)
+            actionable = top_profitable and beats_bottom
+            outlier_flag = (tavg is not None and bavg is not None and tavg > bavg
+                            and not actionable)   # positive mean while not actionable = outliers
+            out.append({
+                "kind": "conviction_predictiveness",
+                "severity": "ok" if actionable else "critical",
+                "top_quintile": {"win_rate": twr, "median_pnl": tmed, "avg_pnl": tavg, "profit_factor": tpf},
+                "bottom_quintile": {"win_rate": bwr, "median_pnl": bmed, "avg_pnl": bavg},
+                "outlier_driven_mean": outlier_flag,
+                "finding": (
+                    f"Conviction ACTIONABLE: top quintile profitable (win={twr}, median={tmed}, "
+                    f"PF={tpf}) and beats bottom (win={bwr}, median={bmed})."
+                    if actionable else
+                    f"CONVICTION NOT ACTIONABLE: top quintile still LOSES (win={twr}, median={tmed}, "
+                    f"PF={tpf}); it is not an exploitable edge"
+                    + (" — any positive mean is OUTLIER-DRIVEN (a few big winners)." if outlier_flag
+                       else ".")
+                ),
+                "recommendation": (
+                    "Conviction may inform sizing/selection." if actionable else
+                    "Do NOT hand-tune conviction component weights on noise, and do not let conviction "
+                    "boost selection/sizing. Target the robust, large-sample leaks (regime/pillar) below."
+                ),
+            })
+
+    # 2. Regime-level structural leaks (enough data + persistently losing).
+    for regime, st in regime_stats.items():
+        n, pf, wr = st.get("count", 0), st.get("profit_factor"), st.get("win_rate")
+        if n >= 20 and pf is not None and pf < 0.6:
+            out.append({
+                "kind": "regime_leak", "severity": "warn", "regime": regime,
+                "count": n, "profit_factor": pf, "win_rate": wr,
+                "finding": f"REGIME LEAK [{regime}]: PF={pf} win={wr} over n={n} — structurally unprofitable.",
+                "recommendation": "Reduce exposure/size in this regime or tighten entry selection.",
+            })
+
+    # 3. Worst pillar:regime cells (where to look next).
+    bad = [(k, v) for k, v in cell_stats.items()
+           if (v.get("count") or 0) >= 8 and (v.get("avg_pnl") or 0) < -50]
+    for k, v in sorted(bad, key=lambda kv: kv[1].get("avg_pnl") or 0)[:3]:
+        out.append({
+            "kind": "cell_leak", "severity": "warn", "cell": k,
+            "count": v["count"], "avg_pnl": v["avg_pnl"], "win_rate": v["win_rate"],
+            "finding": f"CELL LEAK [{k}]: avg_pnl={v['avg_pnl']} win={v['win_rate']} n={v['count']}.",
+            "recommendation": "Review strategy selection / direction inference for this pillar+regime.",
+        })
+    return out
+
+
 def calibrate(db_path: str, output_path: str, lookback_days: int = LOOKBACK_DAYS) -> dict:
     """
     Run the full calibration analysis and write proposed_weights.json.
@@ -251,14 +363,19 @@ def calibrate(db_path: str, output_path: str, lookback_days: int = LOOKBACK_DAYS
     """
     trades = _load_trades(db_path, lookback_days)
     chains = _load_decision_chains(db_path, lookback_days)
+    conv_outcomes = _load_conviction_outcomes(db_path, lookback_days)
 
     pillar_stats  = _per_pillar_analysis(trades)
     regime_stats  = _per_regime_analysis(trades)
     cell_stats    = _per_pillar_regime_analysis(trades)
-    quintile_stats = _conviction_quintile_analysis(chains)
+    # Quintiles from the AUTHORITATIVE positions-based conviction signal when richer than the sparse
+    # decision_chains (the chains are near-constant ~51.7 and blind to the inversion).
+    quintile_source = conv_outcomes if len(conv_outcomes) >= len(chains) else chains
+    quintile_stats = _conviction_quintile_analysis(quintile_source)
 
     total_trades = len(trades)
     proposed_weights, notes = _propose_weights(regime_stats, pillar_stats, total_trades)
+    diagnostics = _diagnostics(quintile_stats, regime_stats, cell_stats)
 
     output = {
         "generated_at":           date.today().isoformat(),
@@ -267,6 +384,8 @@ def calibrate(db_path: str, output_path: str, lookback_days: int = LOOKBACK_DAYS
         "analysis_to":            date.today().isoformat(),
         "total_closed_trades":    total_trades,
         "total_decision_chains":  len(chains),
+        "conviction_signal_n":    len(conv_outcomes),
+        "quintile_source":        "positions" if quintile_source is conv_outcomes else "decision_chains",
         "min_trades_for_proposal": MIN_TRADES_FOR_PROPOSAL,
         "per_pillar":             pillar_stats,
         "per_regime":             regime_stats,
@@ -275,6 +394,7 @@ def calibrate(db_path: str, output_path: str, lookback_days: int = LOOKBACK_DAYS
         "current_weights":        _CURRENT_WEIGHTS,
         "proposed_weights":       proposed_weights,
         "proposal_notes":         notes,
+        "diagnostics":            diagnostics,
         "action_required": (
             "HUMAN REVIEW REQUIRED. If proposals are accepted, hand-edit "
             "agora/agents/disagreement_resolver.py _WEIGHTS_BY_REGIME. "
