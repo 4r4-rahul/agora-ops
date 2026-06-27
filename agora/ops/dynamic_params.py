@@ -5,19 +5,25 @@ Computes session-level parameters that scale with the current market environment
 No LLM calls. Pure deterministic logic from market state + recent trade history.
 
 Called once at session startup and refreshed every 2 hours (or on regime change).
-All agents and the rules engine consume DynamicParams instead of hardcoded config values.
 
-Parameters adapted:
-  short_delta_target      IVR-based: high IV → go further OTM (0.15), low IV → closer (0.25)
-  profit_target_pct       regime-based: trending → take profit early, slow → let theta run
-  max_open_positions      correlation/regime: risk_off → 2, dispersed → 5
-  daily_loss_limit_pct    win-rate adaptive: tighten after 3 consecutive losses
-  target_dte_adjustment   vol term structure: inverted → shorten DTE, normal → extend
-  sector_spike_cap_pct    VIX-based: VIX<18 → 6%, VIX>25 → 12%
-  kelly_fraction          fractional Kelly after 30+ closed trades (else None)
-  min_conviction_score    opportunity density: earnings season → 55, dry month → 65
-  ivr_bypass_threshold    VIX-scaled: VIX>25 means you need higher IVR to justify bypass
-  stop_loss_multiplier    GEX regime: negative GEX markets move fast → wider stops
+PROVENANCE (HARDEN-2, 2026-06-27 — proof-checked which fields are ACTUALLY consumed; the old
+docstring claimed "all agents consume DynamicParams", which was FALSE and hid disabled de-risking):
+
+  LIVE — read from the DynamicParams object and drive behavior:
+    short_delta_target     rules_engine.py:129   strike selection (IVR-based: high IV → further OTM)
+    stop_loss_multiplier   rules_engine.py:130   stop width (GEX: negative → wider)
+    dte_adjustment         rules_engine.py:131   expiry (inverted term structure → shorten)
+    ivr_bypass_threshold   session.py:2884       vol-premium bypass gate (VIX-scaled)
+    sector_spike_cap_pct   session.py:2916       sector-spike filter (VIX-based)
+
+  INERT — computed here but consumed NOWHERE (do NOT present these as active controls):
+    profit_target_pct, profit_target_pct_short_dte, max_open_positions, daily_loss_limit_pct,
+    weekly_loss_limit_pct, min_conviction_score, kelly_fraction
+  This INERT set is the adaptive DE-RISKING (risk_off → 2 positions, tighten loss limit after a
+  losing streak, adaptive conviction floor, Kelly sizing). It is NOT wired — the live gates/breaker
+  read the STATIC settings.* equivalents instead. Consistent with free-paper mode (caps lifted), but
+  the adaptive de-risking an operator might expect is NOT in effect. Before relying on it: wire these
+  into the gates/breaker, or delete them. test_dynamic_params_provenance.py enforces this list.
 """
 
 from __future__ import annotations
@@ -29,6 +35,18 @@ from datetime import UTC, datetime
 
 logger = logging.getLogger(__name__)
 
+# HARDEN-2 provenance — kept honest by test_dynamic_params_provenance.py. If you wire an INERT field
+# into a real consumer (or break a LIVE one), the test fails until you move it here AND fix the
+# docstring. This is the guard against silently re-introducing "phantom safety control" deception.
+LIVE_FIELDS = frozenset({
+    "short_delta_target", "stop_loss_multiplier", "dte_adjustment",
+    "ivr_bypass_threshold", "sector_spike_cap_pct",
+})
+INERT_FIELDS = frozenset({
+    "profit_target_pct", "profit_target_pct_short_dte", "max_open_positions",
+    "daily_loss_limit_pct", "weekly_loss_limit_pct", "min_conviction_score", "kelly_fraction",
+})
+
 
 @dataclass
 class DynamicParams:
@@ -37,23 +55,23 @@ class DynamicParams:
     # ── Strike selection ───────────────────────────────────────────
     short_delta_target: float = 0.20      # 0.15 (high IV) → 0.25 (low IV)
 
-    # ── Profit targets ─────────────────────────────────────────────
-    profit_target_pct: float = 0.50       # 0.35 (fast trend) → 0.65 (slow theta)
-    profit_target_pct_short_dte: float = 0.75
+    # ── Profit targets ──────────────────────────── INERT (computed, NOT consumed — HARDEN-2)
+    profit_target_pct: float = 0.50       # INERT: live exits read settings/decision, not this
+    profit_target_pct_short_dte: float = 0.75   # INERT
 
-    # ── Position limits ────────────────────────────────────────────
-    max_open_positions: int = 4           # 2 (risk_off) → 5 (dispersed/normal)
+    # ── Position limits ───────────────────────────  INERT (NOT consumed — HARDEN-2)
+    max_open_positions: int = 4           # INERT: "risk_off → 2" de-risking is NOT wired (static cap used)
 
-    # ── Loss limits ────────────────────────────────────────────────
-    daily_loss_limit_pct: float = 0.02    # tightens to 0.015 after 3 consecutive losses
-    weekly_loss_limit_pct: float = 0.06
+    # ── Loss limits ───────────────────────────────  INERT (NOT consumed — HARDEN-2)
+    daily_loss_limit_pct: float = 0.02    # INERT: loss-limit tightening NOT wired (static settings used)
+    weekly_loss_limit_pct: float = 0.06   # INERT
 
     # ── Stop loss ──────────────────────────────────────────────────
-    stop_loss_multiplier: float = 2.0     # 1.5 (mean-reverting) → 2.5 (trending/GEX neg)
+    stop_loss_multiplier: float = 2.0     # LIVE (rules_engine): 1.5 mean-revert → 2.5 trending/GEX-neg
 
     # ── Conviction gates ───────────────────────────────────────────
-    min_conviction_score: float = 60.0    # 55 (earnings season) → 65 (dry period)
-    ivr_bypass_threshold: float = 60.0    # 55 (VIX<15) → 70 (VIX>25)
+    min_conviction_score: float = 60.0    # INERT (HARDEN-2): live floor is static settings.min_conviction_score
+    ivr_bypass_threshold: float = 60.0    # LIVE (session): 55 (VIX<15) → 70 (VIX>25)
 
     # ── DTE ────────────────────────────────────────────────────────
     dte_adjustment: int = 0               # -7 (inverted term structure) → +7 (normal steep)
