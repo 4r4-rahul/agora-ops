@@ -1155,6 +1155,9 @@ tr.pos-detail-row td { padding: 0; background: var(--bg1); }
       <div class="info-row"><span class="info-label">Market Status</span><span class="info-value" id="i-mkt">—</span></div>
       <div style="margin-top:14px;font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Health Checks</div>
       <div id="health-list"></div>
+      <div style="margin-top:14px;font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Proof Gates — sell nothing until green</div>
+      <div id="proof-gates-overall" style="font-size:11px;margin-bottom:6px">—</div>
+      <div id="proof-gates-list"></div>
     </div>
   </div>
 
@@ -1420,6 +1423,35 @@ async function fetchHealth() {
     ).join('');
 
   } catch (err) { console.warn('health poll failed', err); }
+}
+
+// ── Fetch: proof gates (the mechanical "sell nothing until green" scorecard) ──
+async function fetchProofGates() {
+  try {
+    const r = await fetch('/agora/proof-gates');
+    const d = await r.json();
+    const colorOf = s => s === 'green' ? 'var(--green)'
+                        : (s === 'amber' ? 'var(--amber,#d9a400)' : 'var(--red)');
+    const ov = document.getElementById('proof-gates-overall');
+    if (ov) ov.innerHTML =
+      `Overall: <b style="color:${colorOf(d.overall)}">${(d.overall || '—').toUpperCase()}</b>`
+      + ` &middot; sellable: <b style="color:${d.sellable ? 'var(--green)' : 'var(--red)'}">`
+      + `${d.sellable ? 'YES' : 'NO'}</b>`;
+    const list = document.getElementById('proof-gates-list');
+    if (list) list.innerHTML = (d.gates || []).map(g => {
+      const cur = g.current || {};
+      let metric = '';
+      if (g.pillar === 'EDGE') metric = `exp ${cur.expectancy} &middot; n ${cur.n_closed}`;
+      else if (g.pillar === 'HONESTY') metric = `${cur.consecutive_clean_days || 0}/90 clean days`;
+      else if (g.pillar === 'DISASTER') metric = `${cur.incident_free_days || 0}/90 incident-free`;
+      else if (g.pillar === 'AGENTIC') metric = (cur.arm_comparison || {}).status || '—';
+      return `<div class="info-row">
+        <span class="info-label">${g.pillar}</span>
+        <span style="color:${colorOf(g.status)}">${(g.status || '—').toUpperCase()}
+          <span style="color:var(--text2);font-size:10px">&middot; ${metric}</span></span>
+      </div>`;
+    }).join('');
+  } catch (err) { console.warn('proof-gates poll failed', err); }
 }
 
 // ── Fetch: orders (pending + fills + rejects + IBKR live) ────────────────────
@@ -3400,7 +3432,7 @@ async function fetchToday() {
   );
 
   await Promise.all([
-    fetchHealth(), fetchOrders(), fetchPositions(), fetchAttribution(), fetchSignals(),
+    fetchHealth(), fetchProofGates(), fetchOrders(), fetchPositions(), fetchAttribution(), fetchSignals(),
     fetchMarket(), fetchReadiness(), fetchCsuite(), fetchToday(), fetchLong(), fetchExits(), fetchCosts(), fetchFactCheck(),
     fetchPerformance(), fetchExpectancy(), fetchLifecycle(), fetchModels(), fetchRecs(), fetchShadow(), fetchTickerEngine(), fetchEntryFunnel(),
   ]);
@@ -3408,6 +3440,7 @@ async function fetchToday() {
   // TWS live data — fetch once on load then every 30s (makes a real IBKR connection)
   fetchTwsLive();
 
+  setInterval(fetchProofGates,  60_000);  // proof-gate scorecard (sell nothing until green)
   setInterval(fetchExpectancy,  60_000);  // North-Star meter
   setInterval(fetchLifecycle,   60_000);  // M8 lifecycle film
   setInterval(fetchModels,      60_000);  // ML model fleet
