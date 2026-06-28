@@ -1030,6 +1030,17 @@ def _engine_lease_status(session) -> dict:
         return {"status": "unknown", "error": str(exc)}
 
 
+@router.get("/edge-readout")
+async def get_edge_readout() -> JSONResponse:
+    """Per-cell expectancy (config_version × regime × strategy × size-band) to calibrate toward a proven
+    edge. Watch expectancy rise across config-versions as clean post-fix data accrues. Read-only."""
+    try:
+        from agora.ops.edge_readout import edge_readout
+        return JSONResponse(edge_readout(str(get_session()._settings.db_path)))
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 @router.get("/proof-gates")
 async def get_proof_gates() -> JSONResponse:
     """The mechanical scorecard of the four provable pillars (EDGE / HONESTY / DISASTER / AGENTIC).

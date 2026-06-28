@@ -26,12 +26,19 @@ def _edge_gate(db_path: str) -> dict[str, Any]:
     n = int(rs.get("n_closed") or 0)
     exp = rs.get("expectancy")
     e0_met = n >= 150 and exp is not None and exp > 0
+    # Per-config-version trend so we can SEE whether the recalibration is lifting expectancy forward.
+    try:
+        from agora.ops.edge_readout import by_config_version
+        cv_trend = by_config_version(db_path)
+    except Exception:
+        cv_trend = []
     return {
         "pillar": "EDGE",
         "milestone": "E0: expectancy>0 over >=150 real closes → E1: Sharpe>1, 250+ trades, beta-adjusted, >=2 regimes",
         "status": GREEN if e0_met else RED,
         "current": {"n_closed": n, "expectancy": exp, "win_rate": rs.get("win_rate"),
-                    "profit_factor": rs.get("profit_factor"), "net_realized": rs.get("net_realized")},
+                    "profit_factor": rs.get("profit_factor"), "net_realized": rs.get("net_realized"),
+                    "by_config_version": cv_trend},
         "target": {"n_closed>=": 150, "expectancy>": 0},
         "needs": None if e0_met else "positive forward expectancy on clean post-fix data; grow sample to 150+",
     }
