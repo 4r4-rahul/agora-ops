@@ -1158,6 +1158,8 @@ tr.pos-detail-row td { padding: 0; background: var(--bg1); }
       <div style="margin-top:14px;font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Proof Gates — sell nothing until green</div>
       <div id="proof-gates-overall" style="font-size:11px;margin-bottom:6px">—</div>
       <div id="proof-gates-list"></div>
+      <div style="margin-top:14px;font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Edge by config-version — watch expectancy rise post-fix</div>
+      <div id="edge-cv-list"></div>
     </div>
   </div>
 
@@ -1452,6 +1454,26 @@ async function fetchProofGates() {
       </div>`;
     }).join('');
   } catch (err) { console.warn('proof-gates poll failed', err); }
+}
+
+// ── Fetch: edge readout (expectancy per config-version — is the recalibration working?) ──
+async function fetchEdgeReadout() {
+  try {
+    const r = await fetch('/agora/edge-readout');
+    const d = await r.json();
+    const list = document.getElementById('edge-cv-list');
+    if (!list) return;
+    const rows = d.by_config_version || [];
+    if (!rows.length) { list.innerHTML = '<div style="font-size:10px;color:var(--text2)">no real closes yet</div>'; return; }
+    list.innerHTML = rows.map(c => {
+      const exp = c.expectancy;
+      const col = exp == null ? 'var(--text2)' : (exp > 0 ? 'var(--green)' : 'var(--red)');
+      return `<div class="info-row">
+        <span class="info-label">config v${c.config_version} <span style="color:var(--text2);font-size:10px">(n ${c.n})</span></span>
+        <span style="color:${col}">exp ${exp} <span style="color:var(--text2);font-size:10px">&middot; med ${c.median_pnl}</span></span>
+      </div>`;
+    }).join('');
+  } catch (err) { console.warn('edge-readout poll failed', err); }
 }
 
 // ── Fetch: orders (pending + fills + rejects + IBKR live) ────────────────────
@@ -3432,7 +3454,7 @@ async function fetchToday() {
   );
 
   await Promise.all([
-    fetchHealth(), fetchProofGates(), fetchOrders(), fetchPositions(), fetchAttribution(), fetchSignals(),
+    fetchHealth(), fetchProofGates(), fetchEdgeReadout(), fetchOrders(), fetchPositions(), fetchAttribution(), fetchSignals(),
     fetchMarket(), fetchReadiness(), fetchCsuite(), fetchToday(), fetchLong(), fetchExits(), fetchCosts(), fetchFactCheck(),
     fetchPerformance(), fetchExpectancy(), fetchLifecycle(), fetchModels(), fetchRecs(), fetchShadow(), fetchTickerEngine(), fetchEntryFunnel(),
   ]);
@@ -3441,6 +3463,7 @@ async function fetchToday() {
   fetchTwsLive();
 
   setInterval(fetchProofGates,  60_000);  // proof-gate scorecard (sell nothing until green)
+  setInterval(fetchEdgeReadout, 60_000);  // edge expectancy by config-version
   setInterval(fetchExpectancy,  60_000);  // North-Star meter
   setInterval(fetchLifecycle,   60_000);  // M8 lifecycle film
   setInterval(fetchModels,      60_000);  // ML model fleet
