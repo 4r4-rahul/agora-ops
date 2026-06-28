@@ -1030,6 +1030,18 @@ def _engine_lease_status(session) -> dict:
         return {"status": "unknown", "error": str(exc)}
 
 
+@router.get("/proof-gates")
+async def get_proof_gates() -> JSONResponse:
+    """The mechanical scorecard of the four provable pillars (EDGE / HONESTY / DISASTER / AGENTIC).
+    Founder's rule: nothing is sellable until a gate is green AND stays green. Honest by design —
+    today the EDGE gate is RED. Read-only."""
+    try:
+        from agora.ops.proof_gates import proof_gates
+        return JSONResponse(proof_gates(str(get_session()._settings.db_path)))
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 @router.get("/health")
 async def get_health() -> JSONResponse:
     """
