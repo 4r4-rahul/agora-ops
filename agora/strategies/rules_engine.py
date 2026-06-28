@@ -999,7 +999,17 @@ class StrategyRulesEngine:
             mult = float(getattr(settings, "paper_contract_multiplier", 1.0) or 1.0)
             sized_f = base_f * max(0.0, size_multiplier) * max(0.0, vol_size_factor) * mult
             floor = int(getattr(settings, "paper_min_contracts", 1) or 1)
-            return max(floor, min(int(round(sized_f)), settings.max_contracts_per_trade))
+            sized_p = max(floor, min(int(round(sized_f)), settings.max_contracts_per_trade))
+            # PAPER per-trade risk backstop (2026-06-27): the live max_risk_per_trade_dollars clamp
+            # was DEAD in paper (live-branch only), leaving sizing uncapped — the proven-catastrophic
+            # $800+ zone (n=37, −$6,176). Apply a paper ceiling (default $800) so a single trade can't
+            # exceed it; a structure too wide to fit even `floor` contracts under the cap is trimmed
+            # toward it (never below 1 if floor allows). risk_cap (per-ticker) overrides when present.
+            paper_cap = risk_cap if risk_cap is not None else getattr(
+                settings, "paper_max_risk_per_trade_dollars", 0.0)
+            if paper_cap and paper_cap > 0:
+                sized_p = min(sized_p, int(paper_cap / max_loss_per_contract))
+            return max(0, sized_p)
         # LIVE — integer base, conviction × adaptive vol factor, then the #4 hard per-trade risk ceiling.
         # Positions >=$400 risk had -$134 EV; the max(1,...) floor let a single wide contract blow the
         # budget, so trim to the (per-ticker-resolved) cap — a single contract over it returns 0 → skip.

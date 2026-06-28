@@ -569,12 +569,29 @@ class AgoraSettings(BaseSettings):
                     "paper_contract_multiplier (which PRESERVES the adaptive ordering), not a flat floor.",
     )
     paper_contract_multiplier: float = Field(
-        default=3.0, ge=1.0, le=10.0,
+        default=1.5, ge=1.0, le=10.0,
         description="PAPER-ONLY: scales the float risk-parity base UP so multi-contract management "
-                    "(partial closes, scaling out, surveillance) is exercised at realistic size while "
-                    "KEEPING the adaptive ordering (volatile→fewer, calm→more). RECALIBRATED 2026-06-26 "
-                    "1.0→3.0 (median name → ~2-3 contracts; calm scales up; volatile stays ~1). "
-                    "Daily-loss breaker still applies. Tune via .env.",
+                    "(partial closes, scaling out, surveillance) is exercised while KEEPING the adaptive "
+                    "ordering (volatile→fewer, calm→more). RECALIBRATED 2026-06-27 3.0→1.5: the 3.0 "
+                    "inflator (set 06-26) was the MECHANICAL CAUSE of the $800+ risk zone — proof-checked "
+                    "size→outcome curve shows $800+ is robustly catastrophic (n=37, 18% win, −$6,176) and "
+                    "the profitable zone is $200-600. corr(size,conviction)=0.10 (size is NOT conviction-"
+                    "driven), and within fixed strategy×regime cells the large half loses more — i.e. "
+                    "bigger size is CAUSALLY worse. 1.5 shifts the size distribution down into the "
+                    "profitable zone while PRESERVING the variance we need to keep calibrating the curve "
+                    "(still >1 so multi-contract management is exercised). Tune via .env. See also the "
+                    "paper risk backstop (paper_max_risk_per_trade_dollars).",
+    )
+    paper_max_risk_per_trade_dollars: float = Field(
+        default=800.0,
+        description="PAPER backstop on per-trade $risk (the live max_risk_per_trade_dollars clamp was "
+                    "DEAD in paper — only the LIVE branch of _size_contracts applied it, so free-paper "
+                    "sizing was uncapped). Set to 800 to structurally CLOSE the proven-catastrophic "
+                    "$800+ zone (n=37, −$6,176, robust to outlier trimming) while PRESERVING the $200-800 "
+                    "range for continued learning — deliberately NOT $400 (that would discard the "
+                    "profitable $400-600 band, n=12 excl-outliers, 66% win, +$678). With the 1.5 "
+                    "multiplier most sizes land well below this; the cap only catches tail outliers. "
+                    "0 = disabled. Re-evaluate the value as more per-(size×regime×strategy) data accrues.",
     )
     adaptive_entry_sizing_enabled: bool = Field(
         default=True,
