@@ -15,7 +15,6 @@ Gates (the selling points; each sellable ONLY when green and STAYS green):
 """
 from __future__ import annotations
 
-import sqlite3
 from typing import Any
 
 GREEN, AMBER, RED = "green", "amber", "red"
@@ -86,23 +85,21 @@ def _disaster_gate(db_path: str) -> dict[str, Any]:
 
 
 def _agentic_gate(db_path: str) -> dict[str, Any]:
-    # The real gate is a shadow A/B (agentic vs deterministic rules-only baseline). Not built yet.
-    # prediction_ledger gives only a proxy (are the agents' scored predictions even calibrated?).
-    scored: int | None
-    try:
-        with sqlite3.connect(db_path) as c:
-            row = c.execute(
-                "SELECT COUNT(*) FROM prediction_ledger WHERE scored=1 AND actual IS NOT NULL").fetchone()
-            scored = int(row[0]) if row else 0
-    except Exception:
-        scored = None
+    from agora.ops.agentic_ab import agentic_value
+    av = agentic_value(db_path)
+    ab = av.get("arm_comparison", {})
+    # GREEN only when the forward A/B is READY and agentic beats the rules-only baseline. Until the
+    # rules-only execution arm has run enough closes, the harness reports insufficient_data → RED.
+    status = GREEN if (ab.get("status") == "ready" and ab.get("agentic_beats_baseline")) else RED
     return {
         "pillar": "AGENTIC",
-        "milestone": "agentic layer beats a deterministic rules-only baseline (shadow A/B), statistically significant",
-        "status": RED,
-        "current": {"ab_harness": "not built", "scored_predictions_available": scored},
-        "target": {"agentic_minus_baseline_expectancy>": 0, "statistically_significant": True},
-        "needs": "a shadow rules-only baseline run in parallel + per-decision attribution to A/B the LLM layer",
+        "milestone": "agentic layer beats a deterministic rules-only baseline (forward A/B), meaningful margin",
+        "status": status,
+        "current": av,
+        "target": {"arm_comparison.status": "ready", "agentic_beats_baseline": True},
+        "needs": None if status == GREEN else (
+            "run the rules-only execution arm (stamp positions.decision_arm) to N closes; "
+            "signal_predictiveness shows whether the LLM outputs carry signal in the meantime"),
     }
 
 
