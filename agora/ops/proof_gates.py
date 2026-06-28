@@ -40,17 +40,26 @@ def _edge_gate(db_path: str) -> dict[str, Any]:
 
 def _honesty_gate(db_path: str) -> dict[str, Any]:
     from agora.ops.book_manager import reconciliation_health
+    from agora.ops.recon_history import consecutive_clean_days
     rh = reconciliation_health(db_path)
     ok_now = rh.get("status") == "ok"
-    # The instrument (drift==0 reconciliation) is LIVE; the MILESTONE needs a consecutive-day history we
-    # do not yet persist → AMBER even when currently ok (we can't yet PROVE 90 consecutive clean days).
+    streak = consecutive_clean_days(db_path)   # proven consecutive clean days (recorded daily)
+    target_days = 90
+    if streak >= target_days:
+        status = GREEN
+    elif ok_now:
+        status = AMBER   # clean now, but the 90-day streak isn't proven yet
+    else:
+        status = RED
     return {
         "pillar": "HONESTY",
         "milestone": "90 consecutive days reconciliation drift == $0.00 (DB=broker=UI), independently re-derivable",
-        "status": AMBER if ok_now else RED,
-        "current": {"reconciliation_status_now": rh.get("status"), "checks": rh.get("checks")},
-        "target": {"consecutive_zero_drift_days>=": 90},
-        "needs": "persist a daily drift-history table + count consecutive zero-drift days (instrument is already live)",
+        "status": status,
+        "current": {"reconciliation_status_now": rh.get("status"),
+                    "consecutive_clean_days": streak, "checks": rh.get("checks")},
+        "target": {"consecutive_clean_days>=": target_days},
+        "needs": None if status == GREEN else (
+            f"accrue clean days: {streak}/{target_days} (instrument live; recorded daily by snapshot_daily)"),
     }
 
 

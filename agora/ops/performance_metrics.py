@@ -213,6 +213,13 @@ def snapshot_daily(db_path: str) -> dict[str, Any]:
             rebuild_daily_pnl(db_path)
         except Exception:
             pass   # snapshot must still run even if the rebuild hiccups
+        # HONESTY proof-gate: record today's reconciliation status so we can prove the 90-consecutive-
+        # clean-days milestone (idempotent per day; best-effort).
+        try:
+            from agora.ops.recon_history import record_recon_snapshot
+            record_recon_snapshot(db_path)
+        except Exception:
+            pass
         full = compute_metrics(db_path)
         o = full.get("overall", {})
         recon = reconcile_books(db_path)
