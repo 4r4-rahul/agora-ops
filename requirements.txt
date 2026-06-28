@@ -53,8 +53,6 @@ fastmcp>=3.3.1
 mcp>=1.27.1
 tavily-python>=0.7.0
 # Agentic enhancements
-matplotlib>=3.10
-mplfinance>=0.12
 chromadb>=1.5
 sentence-transformers>=5.0
 langfuse>=4.6
