@@ -220,6 +220,12 @@ def snapshot_daily(db_path: str) -> dict[str, Any]:
             record_recon_snapshot(db_path)
         except Exception:
             pass
+        # DISASTER proof-gate: establish/keep the incident-free watch baseline.
+        try:
+            from agora.ops.incident_log import ensure_watching
+            ensure_watching(db_path)
+        except Exception:
+            pass
         full = compute_metrics(db_path)
         o = full.get("overall", {})
         recon = reconcile_books(db_path)

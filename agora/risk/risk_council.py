@@ -275,6 +275,15 @@ class RiskCouncil:
         """, (reason, datetime.now(tz=UTC).isoformat(), tripped_by))
         self._db.commit()
         logger.critical("KILL SWITCH TRIPPED: %s (by=%s)", reason, tripped_by)
+        # DISASTER proof-gate: record AUTOMATIC protective trips (over-fill auto-halt, daily-loss
+        # breaker, per-position 2x) as safety incidents — they reset the incident-free streak. Manual
+        # trips are operator actions, not engine incidents. Fail-open: never let logging block the trip.
+        if tripped_by == "auto":
+            try:
+                from agora.ops.incident_log import record_incident
+                record_incident(str(self._settings.db_path), "kill_switch_auto", reason)
+            except Exception:
+                pass
 
     def reset_kill_switch(self, reset_by: str = "operator") -> None:
         self._db.execute("""
