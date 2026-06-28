@@ -29,6 +29,7 @@ _TRACKED: tuple[str, ...] = (
     "credit_spread_short_delta",
     "long_options_min_conviction",
     "neutral_regime_require_trend_confirm",
+    "vol_premium_neutral_iron_condor",  # 2026-06-27: neutral VOL_PREMIUM → iron_condor (not bull_put)
     "long_options_ivr_cap",
     "long_options_rsi_overbought",
     "long_options_rsi_oversold",
@@ -37,6 +38,8 @@ _TRACKED: tuple[str, ...] = (
     # sizing
     "high_conviction_size_boost_enabled",
     "max_risk_per_trade_dollars",
+    "paper_max_risk_per_trade_dollars",  # 2026-06-27: paper per-trade risk backstop ($800)
+    "paper_contract_multiplier",         # 2026-06-27: 3.0→1.5 (the size-distribution driver in paper)
     "risk_per_trade_dollars",
     "max_contracts_per_trade",
     "max_position_size_pct",

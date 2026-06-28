@@ -66,3 +66,22 @@ def test_current_version_returns_latest():
 def test_error_safe_on_bad_path():
     assert record_config_version("/nonexistent/dir/x.db", _settings()) == 0
     assert current_config_version("/nonexistent/dir/x.db") == 0
+
+
+# DATA-STRATEGY guard (2026-06-27): the 06-27 recalibration knobs MUST be fingerprinted, else post-fix
+# trades carry the same config_version as pre-fix and we can never measure whether the fix lifted
+# expectancy. These lock that the forward-calibration backbone stays intact.
+def test_recalibration_2026_06_27_knobs_are_tracked():
+    for knob in ("vol_premium_neutral_iron_condor", "paper_max_risk_per_trade_dollars",
+                 "paper_contract_multiplier"):
+        assert knob in _TRACKED, f"{knob} must be fingerprinted for forward calibration"
+
+
+def test_each_06_27_knob_bumps_version():
+    for knob, before, after in [("vol_premium_neutral_iron_condor", False, True),
+                                ("paper_max_risk_per_trade_dollars", 0, 800),
+                                ("paper_contract_multiplier", 3.0, 1.5)]:
+        db = _db()
+        record_config_version(db, _settings(**{knob: before}))
+        v2 = record_config_version(db, _settings(**{knob: after}))
+        assert v2 == 2, f"changing {knob} must register a new config_version"
