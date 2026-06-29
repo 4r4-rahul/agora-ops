@@ -321,7 +321,8 @@ def heal(db_path: str, position_mgr: Any, host: str = "127.0.0.1", port: int = 7
          client_id: int = 73, adopt_orphans: bool = True, close_ghosts: bool = True,
          ghost_min_age_min: float = 3.0,
          overfill_flatten_enabled: bool = True, overfill_min_excess: int = 25,
-         overfill_max_flatten: int = 5000, underfill_min_age_min: float = 20.0) -> dict:
+         overfill_max_flatten: int = 5000, underfill_min_age_min: float = 20.0,
+         orphan_inflight_guard: bool = True) -> dict:
     """Make the DB a faithful mirror of the broker (TWS↔DB 100% accuracy):
 
       • GHOST   (DB position open, none of its legs at the broker) → mark closed in DB.
@@ -451,9 +452,38 @@ def heal(db_path: str, position_mgr: Any, host: str = "127.0.0.1", port: int = 7
         # the very runaway we're unwinding.
         if adopt_orphans and rep.orphans:
             try:
+                # RACE GUARD (2026-06-29): during leg-by-leg spread entry the long leg fills SECONDS
+                # before the short, and the spread's DB row is written only AFTER both legs fill. In that
+                # window the lone long leg looks like an orphan; adopting it double-books the contract
+                # (the spread row lands moments later → db_qty=2 vs broker=1, e.g. JPM 340C / NVDA 205C).
+                # The in-flight signal is NOT a DB position (none exists yet) — it's a STILL-WORKING AGORA
+                # ENTRY ORDER on that ticker (the short leg). Defer adoption for such tickers (entry orders
+                # are on OTHER clientIds, so reqAllOpenOrders — all clients — is required, not openTrades).
+                inflight_tickers: set[str] = set()
+                if orphan_inflight_guard:
+                    try:
+                        for t in (ib.reqAllOpenOrders() or []):
+                            ref = str(getattr(t.order, "orderRef", "") or "")
+                            st = str(getattr(t.orderStatus, "status", "") or "")
+                            if ref.startswith("AGORA-") and st in (
+                                    "PendingSubmit", "PreSubmitted", "Submitted", "ApiPending"):
+                                inflight_tickers.add(getattr(t.contract, "symbol", ""))
+                    except Exception as _oe:
+                        logger.debug("orphan-adopt in-flight check skipped: %s", _oe)
+                # Belt: re-read db_legs NOW — a spread row may have landed since the snapshot diff above.
+                fresh_db = db_legs(db_path)
                 groups: dict[tuple[str, str], list[dict]] = {}
                 for o in rep.orphans:
-                    if (o["symbol"], o["right"], float(o["strike"]), o["expiry"]) in overfill_keys:
+                    key = (o["symbol"], o["right"], float(o["strike"]), o["expiry"])
+                    if key in overfill_keys:
+                        continue
+                    if fresh_db.get(key, 0) != 0:
+                        logger.info("Orphan adopt SKIP %s — book now covers it (race resolved)", key)
+                        continue
+                    if o["symbol"] in inflight_tickers:
+                        out["orphan_adopt_deferred"] = out.get("orphan_adopt_deferred", 0) + 1
+                        logger.info("Orphan adopt DEFER %s — AGORA entry order still working on %s "
+                                    "(spread mid-completion) — avoids double-book", key, o["symbol"])
                         continue
                     groups.setdefault((o["symbol"], o["expiry"]), []).append(o)
                 for (sym, expiry), legs in groups.items():

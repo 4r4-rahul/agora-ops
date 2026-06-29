@@ -570,6 +570,18 @@ class AgoraSettings(BaseSettings):
                     "old — past any paper fill latency — so a still-settling fill is never corrected "
                     "mid-flight. The 2026-06-26 TSLA 2-vs-1 gap self-resolved in <1 cycle.",
     )
+    reconcile_orphan_inflight_guard: bool = Field(
+        default=True,
+        description="RECONCILER RACE GUARD (2026-06-29): do NOT adopt an orphan broker leg while an "
+                    "AGORA entry order is still WORKING on that ticker. During leg-by-leg spread entry "
+                    "the long leg fills seconds before the short, and the spread's DB row is written only "
+                    "after BOTH fill — so the lone long leg briefly looks like an orphan. Adopting it "
+                    "double-booked the contract (JPM 340C / NVDA 205C: db_qty=2 vs broker=1). The heal "
+                    "now defers adoption for any ticker with a working AGORA order (the in-flight short "
+                    "leg) + re-reads db_legs to catch a spread row that landed since the snapshot. Purely "
+                    "subtractive (can only DEFER an adoption, never flatten); genuine untracked orphans "
+                    "still adopt on a later cycle. Set False to restore unconditional adoption.",
+    )
     paper_min_contracts: int = Field(
         default=1, ge=1, le=20,
         description="PAPER-ONLY minimum contracts per trade. RECALIBRATED 2026-06-26 from 3→1: a floor of "

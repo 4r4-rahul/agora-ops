@@ -4711,7 +4711,9 @@ class AgoraSession:
                                 overfill_max_flatten=getattr(
                                     self._settings, "reconcile_overfill_max_flatten", 5000),
                                 underfill_min_age_min=getattr(
-                                    self._settings, "reconcile_underfill_min_age_min", 20.0))
+                                    self._settings, "reconcile_underfill_min_age_min", 20.0),
+                                orphan_inflight_guard=getattr(
+                                    self._settings, "reconcile_orphan_inflight_guard", True))
                 finally:
                     try:
                         _loop.close()

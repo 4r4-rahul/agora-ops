@@ -601,3 +601,117 @@ class TestReconcileContractsPrimitive:
         db.commit()
         stub = types.SimpleNamespace(_db=db)
         assert PositionManager.reconcile_contracts(stub, "p1", 3, "x") is False  # never increase
+
+
+# ── ORPHAN-ADOPTION IN-FLIGHT RACE GUARD (2026-06-29) ────────────────────────────
+# During leg-by-leg spread entry the long leg fills SECONDS before the short, and the spread's DB row
+# is written only AFTER both fill. In that window the lone long leg looks like an orphan; adopting it
+# double-booked the contract (JPM 340C / NVDA 205C: db_qty=2 vs broker=1). heal() now defers adoption
+# for any ticker that still has a WORKING AGORA entry order (the in-flight short leg).
+class _IBWithOrders:
+    """Stable broker snapshot + a reqAllOpenOrders() feed (entry orders live on other clientIds)."""
+    def __init__(self, broker_positions, open_orders):
+        self._pos, self._orders = broker_positions, open_orders
+    def connect(self, *a, **k): pass
+    def reqPositions(self): pass
+    def sleep(self, _s): pass
+    def positions(self): return self._pos
+    def reqAllOpenOrders(self): return self._orders
+    def disconnect(self): pass
+
+
+def _working_order(symbol, status="Submitted", ref="AGORA-1119-L1"):
+    return types.SimpleNamespace(
+        order=types.SimpleNamespace(orderRef=ref),
+        orderStatus=types.SimpleNamespace(status=status),
+        contract=types.SimpleNamespace(symbol=symbol),
+    )
+
+
+def _adopt_mgr():
+    adopted = []
+    mgr = types.SimpleNamespace(
+        get_open_positions=lambda: [],
+        add_position=lambda pos: adopted.append(pos),
+        _settings=types.SimpleNamespace(max_contracts_per_trade=10),
+    )
+    return mgr, adopted
+
+
+class TestOrphanInflightRaceGuard:
+    def _broker_long_leg(self):
+        # only the long leg of a JPM bull_call_spread has filled at the broker so far
+        return [_FakeBrokerPos("JPM", "C", 340.0, "20260724", 1)]
+
+    def test_inflight_spread_long_leg_not_adopted(self, monkeypatch):
+        """The race: long leg filled, short leg STILL WORKING, spread row not written yet → defer."""
+        from agora.ops import position_reconciler as pr
+        ib = _IBWithOrders(self._broker_long_leg(), [_working_order("JPM")])
+        monkeypatch.setattr("ib_insync.IB", lambda: ib)
+        mgr, adopted = _adopt_mgr()
+        out = pr.heal(_db([]), mgr, overfill_flatten_enabled=False)
+        assert out["orphans_adopted"] == 0
+        assert out.get("orphan_adopt_deferred") == 1
+        assert adopted == [], "must NOT double-book a leg whose spread is mid-completion"
+
+    def test_genuine_orphan_adopted_when_no_working_order(self, monkeypatch):
+        """No working AGORA order → a real untracked broker leg must still be adopted."""
+        from agora.ops import position_reconciler as pr
+        ib = _IBWithOrders(self._broker_long_leg(), [])
+        monkeypatch.setattr("ib_insync.IB", lambda: ib)
+        mgr, adopted = _adopt_mgr()
+        out = pr.heal(_db([]), mgr, overfill_flatten_enabled=False)
+        assert out["orphans_adopted"] == 1
+        assert len(adopted) == 1
+
+    def test_guard_is_ticker_scoped_not_global(self, monkeypatch):
+        """A working order on NVDA must not block adopting a genuine JPM orphan."""
+        from agora.ops import position_reconciler as pr
+        ib = _IBWithOrders(self._broker_long_leg(), [_working_order("NVDA")])
+        monkeypatch.setattr("ib_insync.IB", lambda: ib)
+        mgr, adopted = _adopt_mgr()
+        out = pr.heal(_db([]), mgr, overfill_flatten_enabled=False)
+        assert out["orphans_adopted"] == 1
+
+    def test_filled_order_does_not_defer(self, monkeypatch):
+        """Only WORKING states defer; a Filled order is not in-flight."""
+        from agora.ops import position_reconciler as pr
+        ib = _IBWithOrders(self._broker_long_leg(), [_working_order("JPM", status="Filled")])
+        monkeypatch.setattr("ib_insync.IB", lambda: ib)
+        mgr, adopted = _adopt_mgr()
+        out = pr.heal(_db([]), mgr, overfill_flatten_enabled=False)
+        assert out["orphans_adopted"] == 1
+
+    def test_non_agora_order_does_not_defer(self, monkeypatch):
+        """A manual/non-AGORA working order is not our in-flight spread → adopt normally."""
+        from agora.ops import position_reconciler as pr
+        ib = _IBWithOrders(self._broker_long_leg(), [_working_order("JPM", ref="MANUAL-7")])
+        monkeypatch.setattr("ib_insync.IB", lambda: ib)
+        mgr, adopted = _adopt_mgr()
+        out = pr.heal(_db([]), mgr, overfill_flatten_enabled=False)
+        assert out["orphans_adopted"] == 1
+
+    def test_guard_disabled_adopts_unconditionally(self, monkeypatch):
+        """orphan_inflight_guard=False restores the old unconditional adoption."""
+        from agora.ops import position_reconciler as pr
+        ib = _IBWithOrders(self._broker_long_leg(), [_working_order("JPM")])
+        monkeypatch.setattr("ib_insync.IB", lambda: ib)
+        mgr, adopted = _adopt_mgr()
+        out = pr.heal(_db([]), mgr, overfill_flatten_enabled=False, orphan_inflight_guard=False)
+        assert out["orphans_adopted"] == 1
+
+    def test_reread_drops_orphan_when_book_now_covers_it(self, monkeypatch):
+        """Belt: a spread row that lands BETWEEN the snapshot diff and the adopt is caught by the
+        fresh db_legs re-read (orphan in the snapshot, covered on re-read → skipped, not adopted)."""
+        from agora.ops import position_reconciler as pr
+        ib = _IBWithOrders(self._broker_long_leg(), [])
+        monkeypatch.setattr("ib_insync.IB", lambda: ib)
+        mgr, adopted = _adopt_mgr()
+        calls = {"n": 0}
+        def fake_db_legs(_p):
+            calls["n"] += 1
+            return {} if calls["n"] == 1 else {("JPM", "C", 340.0, "20260724"): 1}
+        monkeypatch.setattr(pr, "db_legs", fake_db_legs)
+        out = pr.heal(_db([]), mgr, overfill_flatten_enabled=False)
+        assert out["orphans_adopted"] == 0
+        assert adopted == []
