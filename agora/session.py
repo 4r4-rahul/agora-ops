@@ -110,6 +110,17 @@ logger = logging.getLogger(__name__)
 
 ET = ZoneInfo("America/New_York")
 
+# Order states that are still working at the broker (not yet filled/cancelled).
+_WORKING_ORDER_STATES = frozenset({"PendingSubmit", "PreSubmitted", "Submitted", "ApiPending"})
+
+
+def _is_stale_entry_order(order_ref: str, status: str) -> bool:
+    """A working AGORA ENTRY order (orderRef 'AGORA-{session}-L{n}') is stale at startup — a restart
+    leaves the prior session's resting entry orders at the broker (duplicate/competing orders +
+    naked-leg aborts), and the new session hasn't placed anything yet, so any working AGORA-* entry
+    order must be from a dead session. CLOSE_* orders are exits — left alone for the lifecycle manager."""
+    return str(order_ref).startswith("AGORA-") and str(status) in _WORKING_ORDER_STATES
+
 
 class AgoraSession:
     """
@@ -4809,6 +4820,23 @@ class AgoraSession:
                         logger.warning("Startup TWS sync: all clientIds in use, skipping")
                         return []
                     fills = await ib.reqExecutionsAsync()
+                    # STALE-ORDER CLEANUP (2026-06-29): cancel the prior session's still-working ENTRY
+                    # orders. A restart otherwise leaves them resting at the broker → duplicate/competing
+                    # orders + naked-leg aborts (observed: SPY/JPM/SMCI). Runs before this session places
+                    # anything; best-effort, never blocks startup. Close orders are left for lifecycle mgmt.
+                    try:
+                        open_trades = await ib.reqAllOpenOrdersAsync()
+                        _stale = 0
+                        for _t in (open_trades or []):
+                            if _is_stale_entry_order(getattr(_t.order, "orderRef", ""),
+                                                     getattr(_t.orderStatus, "status", "")):
+                                ib.cancelOrder(_t.order)
+                                _stale += 1
+                        if _stale:
+                            logger.warning("Startup: cancelled %d stale working entry order(s) from a "
+                                           "prior session", _stale)
+                    except Exception as _oe:
+                        logger.debug("Startup stale-order cleanup skipped: %s", _oe)
                     return [
                         {
                             "symbol":   f.contract.symbol,
