@@ -116,3 +116,50 @@ def test_adopt_writes_per_share_entry_so_pnl_is_bounded():
     worst = realized_pnl(pos.entry_price, 0.0, pos.contracts)
     assert pnl_within_bounds(worst, pos.max_loss_dollars, pos.max_gain_dollars)
     assert abs(worst) < 12_000                                 # ≈ −$11.5k, NOT −$808k
+
+
+# ── INTEGRITY GUARD: no REAL trade silently DROPPED (the 2026-06-29 CBOE +$660 'time_stop' bug) ──────
+def _book_with_sources(rows):
+    """rows: (status, close_source, regime, realized_pnl). Minimal schema for canonical_book."""
+    import tempfile as _tf
+    db = _tf.NamedTemporaryFile(suffix=".db", delete=False).name
+    c = sqlite3.connect(db)
+    c.execute("""CREATE TABLE positions (position_id TEXT DEFAULT 'p', ticker TEXT DEFAULT 'TST',
+        status TEXT, close_source TEXT, close_date TEXT, regime_at_entry TEXT,
+        realized_pnl REAL NOT NULL DEFAULT 0, unrealized_pnl REAL NOT NULL DEFAULT 0)""")
+    c.executemany("INSERT INTO positions (status, close_source, close_date, regime_at_entry, realized_pnl) "
+                  "VALUES (?,?,'2026-06-29',?,?)", rows)
+    c.commit(); c.close()
+    return db
+
+
+def test_integrity_ok_when_every_source_classified():
+    from agora.ops.book_manager import canonical_book
+    db = _book_with_sources([
+        ("closed", "time_stop",     "risk_off", 660.0),   # real (the bug source — must classify)
+        ("closed", "profit_target", "risk_off", 326.0),   # real
+        ("closed", "lifecycle",     "neutral",  100.0),   # real
+        ("closed", "reconcile_ghost","neutral",   0.0),   # known fiction
+        ("closed", "fabricated_unfilled","neutral",0.0),  # known fiction
+        ("closed", "lifecycle",     "adopted",  999.0),   # adopted (known)
+    ])
+    b = canonical_book(db)
+    assert b["integrity"]["ok"] is True
+    assert b["integrity"]["unclassified_sources"] == []
+    os.unlink(db)
+
+
+def test_integrity_flags_unclassified_source_loudly():
+    """A close_source that is neither real nor known-fiction must flip integrity.ok=False and be named —
+    so a future 'time_stop'-style omission can NEVER hide a real trade in 'other_excluded' again."""
+    from agora.ops.book_manager import canonical_book
+    db = _book_with_sources([
+        ("closed", "lifecycle",   "neutral", 100.0),   # real
+        ("closed", "mystery_stop","risk_off", 540.0),  # UNCLASSIFIED — likely a real trade being dropped
+    ])
+    b = canonical_book(db)
+    assert b["integrity"]["ok"] is False
+    srcs = {u["close_source"] for u in b["integrity"]["unclassified_sources"]}
+    assert "mystery_stop" in srcs
+    assert "mystery_stop" in b["integrity"]["message"]
+    os.unlink(db)

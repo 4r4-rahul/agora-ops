@@ -149,6 +149,25 @@ def excluded_attribution(conn: sqlite3.Connection) -> dict[str, Any]:
     return out
 
 
+def unclassified_close_sources(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """INTEGRITY GUARD against the 2026-06-29 CBOE bug class. A closed row that is neither REAL
+    (_REAL_CLOSE) nor a KNOWN fiction cause (adopted / reconcile-artifact / fabricated) falls through to
+    'other_excluded' — i.e. its close_source is UNCLASSIFIED. That is almost always a REAL trade being
+    silently dropped from the book (CBOE +$660 via 'time_stop' was exactly this), or — rarely — a new
+    fiction type needing a rule. Either way it must be LOUD, never quietly bucketed. Returns the
+    offending close_sources; an empty list means every closed dollar is explicitly classified.
+
+    The fix when this fires: add the source to REAL_CLOSE_SOURCES (if a real engine exit) or to a
+    fiction pattern (agora/ops/close_sources.py) — never leave a close_source unclassified."""
+    known = " OR ".join(f"({v})" for v in _EXCLUDED_BUCKETS.values())
+    rows = conn.execute(
+        "SELECT COALESCE(close_source,'(null)') cs, COUNT(*) n, ROUND(SUM(realized_pnl),2) pnl "
+        f"FROM positions WHERE status='closed' AND NOT ({_REAL_CLOSE}) AND NOT ({known}) "
+        "GROUP BY cs ORDER BY ABS(COALESCE(SUM(realized_pnl),0)) DESC"
+    ).fetchall()
+    return [{"close_source": cs, "n": int(n), "pnl": float(pnl or 0.0)} for cs, n, pnl in rows]
+
+
 # ── Execution-bug episode registry ──────────────────────────────────────────────────────────────
 # Dated incidents where an EXECUTION bug (not a strategy decision) created PHANTOM book entries —
 # over-fills, mis-reconstructed cost basis. Each is quarantined from real strategy P&L (it lands in
@@ -230,6 +249,7 @@ def canonical_book(db_path: str) -> dict[str, Any]:
             open_n = int(_scalar(conn, "SELECT COUNT(*) FROM positions WHERE status IN ('open','tested','rolled')"))
             open_unreal = _scalar(conn, "SELECT COALESCE(SUM(unrealized_pnl),0) FROM positions WHERE status IN ('open','tested','rolled')")
             excluded = excluded_attribution(conn)
+            unclassified = unclassified_close_sources(conn)
         win_rate = round(wins / real_n, 4) if real_n else 0.0
         expectancy = round(real_net / real_n, 2) if real_n else 0.0
         profit_factor = round(gross_win / abs(gross_loss), 2) if gross_loss else None
@@ -247,6 +267,20 @@ def canonical_book(db_path: str) -> dict[str, Any]:
             "naive_all_closed": round(naive_all, 2),   # what a fiction-blind query would show
             "partition_ok": abs(partition_residual) < 0.01,
             "partition_residual": partition_residual,   # must be 0.00 — every closed dollar attributed
+            # INTEGRITY GUARD: partition_ok proves no dollar is LOST; this proves no real trade is
+            # silently DROPPED (the CBOE +$660 'time_stop' bug). ok=False names the unclassified sources.
+            "integrity": {
+                "ok": not unclassified,
+                "unclassified_sources": unclassified,
+                "message": (
+                    "every closed dollar is classified as real or known-fiction"
+                    if not unclassified else
+                    f"⚠ {sum(u['n'] for u in unclassified)} closed position(s) "
+                    f"(${round(sum(u['pnl'] for u in unclassified), 2)}) have an UNCLASSIFIED "
+                    "close_source — likely REAL trades being dropped from the book. Classify in "
+                    "agora/ops/close_sources.py: " + ", ".join(u["close_source"] for u in unclassified)
+                ),
+            },
             "reconciliation": reconcile(db_path),
             "computed_at_utc": datetime.now(tz=UTC).isoformat(),
         }
