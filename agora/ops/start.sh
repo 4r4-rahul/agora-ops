@@ -14,6 +14,14 @@ PID_FILE="$LOG_DIR/agora.pid"
 mkdir -p "$LOG_DIR"
 mkdir -p "$REPO/.agora"
 
+# ── Log retention (2026-06-29): dated logs had NO retention and grew to 4.3 GB (one day = 2.1 GB).
+# Self-clean on every start so it never recurs: gzip any past-day .log (≈10× smaller, audit trail
+# preserved), then delete gzipped logs older than 14 days. Today's live file is left untouched.
+# nice'd + best-effort (|| true) so log hygiene can never block the engine from starting.
+find "$LOG_DIR" -name 'agora-*.log' -type f -mtime +0 -print0 2>/dev/null \
+  | xargs -0 -I{} nice -n 19 gzip -f {} 2>/dev/null || true
+find "$LOG_DIR" -name 'agora-*.log.gz' -type f -mtime +14 -delete 2>/dev/null || true
+
 # ── Single-instance guard (deploy-race fix) ──────────────────────────────────
 # A manual deploy and the launchd watchdog can invoke start.sh concurrently; both
 # `pkill -f "uvicorn agora.api.app"` then start, and interleaved pkills can leave
