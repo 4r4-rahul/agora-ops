@@ -1508,6 +1508,8 @@ async def get_tws_live() -> JSONResponse:
             "ibkr_portfolio":        portfolio_items,
             "ibkr_unrealized_pnl_by_symbol": pnl_by_symbol,
             "ibkr_total_unrealized_pnl": round(sum(pnl_by_symbol.values()), 2),
+            # IBKR account-level P&L (the DAILY number TWS shows) — UI mirrors it for DB↔TWS sync at a glance
+            "ibkr_account_pnl":      live.get("ibkr_account_pnl"),
             # Show BAG-level fills (spread-level); OPT legs are redundant for UI
             "tws_fills":             [f for f in live.get("tws_fills", []) if f.get("secType") == "BAG"],
             "tws_fills_all":         live.get("tws_fills", []),

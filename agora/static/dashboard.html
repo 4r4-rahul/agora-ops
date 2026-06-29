@@ -762,6 +762,9 @@ tr.pos-detail-row td { padding: 0; background: var(--bg1); }
         <!-- Reconciliation warnings (TWS vs shadow book) -->
         <div id="recon-warnings" style="display:none;padding:4px 8px;margin:4px 0;border-left:2px solid var(--yellow);background:rgba(210,153,34,.07)"></div>
 
+        <!-- TWS account P&L (live from IBKR — mirrors TWS's own DAILY for DB↔TWS sync reassurance) -->
+        <div id="tws-account-pnl" style="font-size:11px;padding:4px 8px;margin:4px 0;border-left:2px solid var(--blue);background:rgba(80,140,255,.06)">TWS Daily — refreshing…</div>
+
         <!-- TWS Fills — executions confirmed by broker today -->
         <div class="orders-section-header" style="margin-top:2px">
           TWS Fills (Executions)
@@ -2698,6 +2701,23 @@ async function fetchTwsLive() {
       reconEl.innerHTML = reconWarnings.map(w =>
         `<div style="color:var(--yellow);font-size:10px;padding:2px 0">${w}</div>`
       ).join('');
+    }
+
+    // ── TWS account P&L (sourced from IBKR — mirrors TWS's own DAILY number for DB↔TWS sync) ──
+    const apnl = d.ibkr_account_pnl;
+    const apEl = document.getElementById('tws-account-pnl');
+    if (apEl) {
+      if (apnl && apnl.daily != null) {
+        const col = v => v == null ? 'var(--text2)' : (v >= 0 ? 'var(--green)' : 'var(--red)');
+        const fmt = v => v == null ? '—' : (v >= 0 ? '+' : '') + v.toLocaleString();
+        apEl.innerHTML =
+          `TWS Daily <b style="color:${col(apnl.daily)}">${fmt(apnl.daily)}</b>`
+          + ` &middot; Unreal <b style="color:${col(apnl.unrealized)}">${fmt(apnl.unrealized)}</b>`
+          + ` &middot; Real <b style="color:${col(apnl.realized)}">${fmt(apnl.realized)}</b>`
+          + ` <span style="color:var(--text2)">(live from IBKR — matches TWS)</span>`;
+      } else {
+        apEl.innerHTML = `<span style="color:var(--text2)">TWS Daily — (no IBKR P&L feed)</span>`;
+      }
     }
 
     // ── IBKR Portfolio positions ──

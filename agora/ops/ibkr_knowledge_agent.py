@@ -41,6 +41,20 @@ logger = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
 
 _SCAN_INTERVAL_SEC = 1800  # 30 min
+
+
+def _clean_ibkr_pnl(v: Any) -> float | None:
+    """IBKR sends a huge sentinel (~1.8e308) or NaN for an account-PnL field until it populates.
+    Coerce those to None ('—' in the UI) so we NEVER display a fake number; round real values."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if f != f or abs(f) > 1e12:   # NaN or sentinel
+        return None
+    return round(f, 2)
+
+
 _IBKR_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ibkr-ka")
 # Separate single-thread pool for the live P&L poller so a slow/stuck 30-min scan can never queue
 # behind it (they share no thread). Distinct clientId too — fully decoupled.
@@ -1191,6 +1205,30 @@ class IBKRKnowledgeAgent:
                 except Exception as exc:
                     result["ibkr_portfolio_items"] = []
                     result["ibkr_portfolio_error"] = str(exc)
+
+            # Account-level P&L straight from IBKR — the authoritative DAILY number TWS shows in its P&L
+            # header (daily = mark-to-market since prior close). Surfaced so the UI can mirror TWS for
+            # at-a-glance DB↔TWS sync reassurance. reqPnL is a subscription that populates async; poll
+            # briefly, then cancel. Sentinel/NaN values are coerced to None (never a fake number).
+            if accounts:
+                try:
+                    pnl = ib.reqPnL(accounts[0])
+                    for _ in range(15):
+                        if _clean_ibkr_pnl(getattr(pnl, "dailyPnL", None)) is not None:
+                            break
+                        await asyncio.sleep(0.2)
+                    result["ibkr_account_pnl"] = {
+                        "daily":      _clean_ibkr_pnl(getattr(pnl, "dailyPnL", None)),
+                        "unrealized": _clean_ibkr_pnl(getattr(pnl, "unrealizedPnL", None)),
+                        "realized":   _clean_ibkr_pnl(getattr(pnl, "realizedPnL", None)),
+                    }
+                    try:
+                        ib.cancelPnL(accounts[0])
+                    except Exception:
+                        pass
+                except Exception as exc:
+                    result["ibkr_account_pnl"] = None
+                    result["ibkr_account_pnl_error"] = str(exc)
 
             # Today's executions (fills) from TWS — reqExecutionsAsync fetches all fills
             # for the current session day, regardless of which clientId placed the order.
