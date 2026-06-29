@@ -1471,13 +1471,15 @@ async function fetchSync() {
     const ageStr = age == null ? '' : (age < 90 ? `${age}s` : `${Math.round(age / 60)}m`) + ' ago';
     const map = {
       in_sync:   ['✅ DB=TWS',                'var(--green)',          'rgba(60,200,120,.12)'],
-      corrected: ['⚠ DB=TWS (auto-corrected)', 'var(--yellow,#d9a400)', 'rgba(210,160,40,.12)'],
+      corrected: ['✅ DB=TWS (auto-healed)',   'var(--green)',          'rgba(60,200,120,.12)'],
+      diverged:  ['⚠ DB≠TWS qty-mismatch',    'var(--yellow,#d9a400)', 'rgba(210,160,40,.14)'],
       alert:     ['🚨 DB↔TWS over-fill',       'var(--red)',            'rgba(220,60,60,.14)'],
       error:     ['❌ DB↔TWS verify failed',   'var(--red)',            'rgba(220,60,60,.14)'],
       unknown:   ['DB↔TWS verifying…',         'var(--text2)',          'rgba(80,140,255,.10)'],
     };
     const [label, col, bg] = map[d.status] || map.unknown;
-    const matched = (d.matched != null) ? ` · ${d.matched} legs` : '';
+    const qm = (d.qty_mismatch) ? ` (${d.qty_mismatch})` : '';
+    const matched = (d.matched != null) ? ` · ${d.matched} legs${qm}` : '';
     el.innerHTML = `<b style="color:${col}">${label}</b>${matched}${ageStr ? ` · ${ageStr}` : ''}`;
     el.style.background = bg;
   } catch (err) { console.warn('sync poll failed', err); }

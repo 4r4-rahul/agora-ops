@@ -1042,16 +1042,23 @@ async def get_edge_readout() -> JSONResponse:
 
 
 def _classify_sync(last: dict | None) -> str:
-    """DB↔TWS sync status from the latest position-heal: in_sync / corrected / alert / error / unknown.
-    'corrected' = a divergence was found AND healed this cycle (mirror restored — in sync now, activity
-    flagged). 'alert' = an over-fill the heal couldn't fully resolve. 'error' = the heal couldn't run."""
+    """DB↔TWS sync status from the latest position-heal:
+      in_sync   — book mirrors the broker, no divergence.
+      corrected — a ghost/orphan was found AND healed this cycle (mirror restored → in sync now).
+      diverged  — a qty-mismatch is STILL present (heal detected but did NOT resolve it this cycle, e.g.
+                  a partial spread fill double-booked). HONEST: this is a real current DB≠TWS gap.
+      alert     — an over-fill the heal couldn't fully resolve.
+      error     — the heal couldn't run.
+    Order matters: errors/over-fill/unresolved-mismatch outrank a same-cycle correction."""
     if not last:
         return "unknown"
     if last.get("errors"):
         return "error"
     if last.get("overfill"):
         return "alert"
-    if last.get("orphans_found") or last.get("ghosts_found") or last.get("qty_mismatch"):
+    if last.get("qty_mismatch"):
+        return "diverged"
+    if last.get("ghosts_closed") or last.get("orphans_adopted"):
         return "corrected"
     return "in_sync"
 

@@ -20,10 +20,17 @@ class TestClassifySync:
     def test_overfill_is_alert(self):
         assert _classify_sync({"overfill": 2, "errors": []}) == "alert"
 
-    def test_divergence_found_and_healed_is_corrected(self):
-        assert _classify_sync({"orphans_found": 1, "errors": []}) == "corrected"
-        assert _classify_sync({"ghosts_found": 1, "errors": []}) == "corrected"
-        assert _classify_sync({"qty_mismatch": 1, "errors": []}) == "corrected"
+    def test_ghost_or_orphan_healed_is_corrected(self):
+        # heal actually FIXED these this cycle → in sync now
+        assert _classify_sync({"orphans_adopted": 1, "errors": []}) == "corrected"
+        assert _classify_sync({"ghosts_closed": 1, "errors": []}) == "corrected"
 
-    def test_error_takes_priority_over_overfill(self):
-        assert _classify_sync({"errors": ["x"], "overfill": 1}) == "error"
+    def test_unresolved_qty_mismatch_is_diverged_not_corrected(self):
+        # HONESTY: a qty-mismatch the heal did NOT resolve (e.g. partial spread fill double-booked)
+        # must read as a real divergence, never "corrected".
+        assert _classify_sync({"qty_mismatch": 2, "errors": []}) == "diverged"
+        assert _classify_sync({"qty_mismatch": 1, "orphans_adopted": 1, "errors": []}) == "diverged"
+
+    def test_error_and_overfill_priority(self):
+        assert _classify_sync({"errors": ["x"], "overfill": 1, "qty_mismatch": 1}) == "error"
+        assert _classify_sync({"overfill": 1, "qty_mismatch": 1}) == "alert"
