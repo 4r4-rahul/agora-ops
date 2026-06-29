@@ -43,6 +43,7 @@ from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from ..ops.close_sources import is_real_close_row
 from ..ops.decision_chains import recent_chains as _recent_chains
 from ..ops.llm_cost_log import daily_cost_summary as _llm_daily_cost
 from ..ops.outcome_attributor import (
@@ -543,22 +544,12 @@ async def get_performance() -> JSONResponse:
     # Column indices
     STRAT, STATUS, QTY, ENTRY_PX, ENTRY_D, CLOSE_D, RPNL, CLOSE_SRC, REGIME = range(9)
 
-    _REAL_SRC = {"lifecycle", "thesis_exit", "trailing_stop", "stop_loss", "pre_earnings"}
-
     def _is_real_close(r) -> bool:
-        """Real broker fill only. MUST mirror book_manager._REAL_CLOSE (the single source of truth):
-        excludes fabricated / tws_startup_sync / reconcile / duplicate / reset AND adopted-legacy
-        positions. The missing `adopted` exclusion here was the bug that made the dashboard headline
-        read −$22,494 (fiction-contaminated) vs the real −$5,358 — adopted DIA legs carry a real
-        close_source ('lifecycle') but reconstructed/fictional cost basis."""
-        if (r[STATUS] or "") != "closed" or r[RPNL] is None:
-            return False
-        if (r[REGIME] or "") == "adopted":   # legacy adopted fiction — NEVER real strategy P&L
-            return False
-        src = (r[CLOSE_SRC] or "")
-        if any(k in src for k in ("fabricated", "sync", "reconcile", "duplicate")):
-            return False
-        return src in _REAL_SRC or src.startswith("session:")
+        """Real broker fill only — delegates to the SINGLE source of truth (close_sources.py) so this
+        headline can never drift from canonical_book again. The hand-spelled copy this replaced was
+        missing time_stop/profit_target/stale_model_stop and under-stated the panel by +$711 (incl the
+        CBOE +$660), and earlier lacked the adopted exclusion (the −$22,494 fiction-contaminated read)."""
+        return is_real_close_row(r[CLOSE_SRC], r[REGIME], status=r[STATUS], realized_pnl=r[RPNL])
 
     def _cost(r) -> float:
         return float(r[ENTRY_PX] or 0) * 100 * int(r[QTY] or 1)
@@ -1583,15 +1574,10 @@ async def get_today_summary() -> JSONResponse:
     fiction_pnl_today = 0.0      # adopted/reconcile — shown separately, never in the headline
 
     def _row_is_real(close_source: str, regime: str) -> bool:
-        """Mirror book_manager._REAL_CLOSE so the closed-today total is honest (excludes the adopted
-        fiction that made the owner see −$11,159 / −$14,964 for what was really a +$2,171 day)."""
-        if (regime or "") == "adopted":
-            return False
-        src = close_source or ""
-        if any(k in src for k in ("fabricated", "sync", "reconcile", "duplicate")):
-            return False
-        return src in {"lifecycle", "thesis_exit", "trailing_stop", "stop_loss", "pre_earnings"} \
-            or src.startswith("session:")
+        """Closed-today headline honesty — delegates to the SINGLE source of truth (close_sources.py).
+        The hand-spelled copy this replaced dropped the CBOE +$660 time_stop win from the dashboard
+        top-bar TODAY; centralizing it keeps the most-watched number aligned with canonical_book."""
+        return is_real_close_row(close_source, regime)
 
     try:
         conn = _sql.connect(str(db_path), check_same_thread=False)

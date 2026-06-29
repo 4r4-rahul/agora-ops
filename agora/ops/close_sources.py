@@ -60,3 +60,25 @@ def real_close_predicate(prefix: str = "", require_pnl: bool = False) -> str:
     if require_pnl:
         parts.append(f"{q}realized_pnl IS NOT NULL")
     return " AND ".join(parts)
+
+
+def is_real_close_row(
+    close_source: str | None,
+    regime_at_entry: str | None = "",
+    *,
+    status: str | None = "closed",
+    realized_pnl: float | None = 0.0,
+) -> bool:
+    """Row-level twin of real_close_predicate() — the SAME allowlist + fiction + adopted logic, for
+    Python-side filtering of already-fetched rows (API/display paths that hold the row in hand). SQL and
+    Python now share ONE definition, so a hand-spelled copy can never drift again — which is exactly how
+    the routes.py headlines came to miss time_stop/profit_target/stale_model_stop (dropping the CBOE
+    +$660 from the dashboard) while canonical_book had them."""
+    if (status or "") != "closed" or realized_pnl is None:
+        return False
+    if (regime_at_entry or "") == "adopted":
+        return False
+    src = close_source or ""
+    if any(pat in src for pat in FICTION_PATTERNS):
+        return False
+    return src in REAL_CLOSE_SOURCES or src.startswith("session:")

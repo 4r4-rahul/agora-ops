@@ -234,6 +234,67 @@ def execution_bug_ledger(db_path: str) -> dict[str, Any]:
     }
 
 
+def _integrity(conn: sqlite3.Connection, db_path: str, unclassified: list[dict[str, Any]],
+               partition_residual: float) -> dict[str, Any]:
+    """Consolidated book-of-record self-check. `ok` flips False ONLY on CORRUPTION-class signals — where
+    real money is actually wrong — never on benign, known, quarantined artifacts (those are surfaced for
+    visibility so the owner SEES them, but a known −$373 startup-sync close must not cry wolf forever).
+
+    ok-flipping (real money wrong):
+      • unclassified close_source   — a real trade may be silently DROPPED (the CBOE +$660 class)
+      • partition_residual != 0     — a closed dollar is unaccounted (lost from the partition)
+      • impossible_pnl              — |realized| outside the position's own [-max_loss,+max_gain] (the
+                                       −$808k contracts² / bad-fill class — phantom money under any label)
+      • realized_pnl_on_nonclosed   — realized P&L on a rolled/tested row leaks out of the whole partition
+    visibility-only (known/quarantined, does NOT flip ok):
+      • nonzero_fiction             — fiction-labeled row carrying real $ but WITHIN bounds (sync closes)
+      • adopted_open_unrealized     — adopted opens (excluded from real_strategy, reported separately)
+    """
+    # Reuse the canonical, TESTED impossible-P&L definition (pnl_within_bounds, tol=1.2 for slippage) —
+    # don't invent a tighter threshold that false-flags normal fill noise (MARA +$64 vs an estimated $59
+    # max-gain is fine; the −$808k contracts² class is 50×+ over and is what this must catch).
+    from agora.ops.book_integrity import scan_impossible_pnl
+    impossible = [r for r in scan_impossible_pnl(db_path) if "error" not in r]
+    nc_sum, nc_n = conn.execute(
+        "SELECT COALESCE(SUM(realized_pnl),0), COUNT(*) FROM positions "
+        "WHERE status<>'closed' AND realized_pnl<>0"
+    ).fetchone()
+    nzf_sum, nzf_n = conn.execute(
+        f"SELECT COALESCE(SUM(realized_pnl),0), COUNT(*) FROM positions "
+        f"WHERE status='closed' AND NOT ({_REAL_CLOSE}) AND realized_pnl<>0"
+    ).fetchone()
+    ao_sum, ao_n = conn.execute(
+        "SELECT COALESCE(SUM(unrealized_pnl),0), COUNT(*) FROM positions "
+        "WHERE status IN ('open','tested','rolled') AND COALESCE(regime_at_entry,'')='adopted'"
+    ).fetchone()
+
+    failed: list[str] = []
+    if unclassified:
+        names = ", ".join(u["close_source"] for u in unclassified)
+        failed.append(f"{len(unclassified)} unclassified close_source(s) — real trades may be dropped: {names}")
+    if abs(partition_residual) >= 0.01:
+        failed.append(f"partition_residual ${partition_residual} — a closed dollar is unaccounted")
+    if impossible:
+        failed.append(f"{len(impossible)} impossible-P&L row(s) — |realized| outside [-max_loss,+max_gain]")
+    if abs(float(nc_sum or 0)) >= 0.01:
+        failed.append(f"${round(float(nc_sum or 0),2)} realized on {int(nc_n)} non-closed row(s) — leaks the partition")
+    return {
+        "ok": not failed,
+        "failed": failed,
+        "unclassified_sources": unclassified,
+        "impossible_pnl": impossible,
+        "realized_pnl_on_nonclosed": {"sum": round(float(nc_sum or 0), 2), "n": int(nc_n)},
+        "partition_residual": partition_residual,
+        # visibility (does not flip ok):
+        "nonzero_fiction": {"sum": round(float(nzf_sum or 0), 2), "n": int(nzf_n)},
+        "adopted_open_unrealized": {"sum": round(float(ao_sum or 0), 2), "n": int(ao_n)},
+        "message": (
+            "book integrity OK — every closed dollar classified, no corruption signals"
+            if not failed else "⚠ INTEGRITY: " + "; ".join(failed)
+        ),
+    }
+
+
 def canonical_book(db_path: str) -> dict[str, Any]:
     """THE authoritative money snapshot every surface must read. Real strategy P&L is the headline;
     excluded/fiction is shown separately and attributed; reconciliation status is always included."""
@@ -246,16 +307,22 @@ def canonical_book(db_path: str) -> dict[str, Any]:
             gross_win = _scalar(conn, f"SELECT COALESCE(SUM(realized_pnl),0) FROM positions WHERE {_REAL_CLOSE} AND realized_pnl>0")
             gross_loss = _scalar(conn, f"SELECT COALESCE(SUM(realized_pnl),0) FROM positions WHERE {_REAL_CLOSE} AND realized_pnl<0")
             naive_all = _scalar(conn, "SELECT COALESCE(SUM(realized_pnl),0) FROM positions WHERE status='closed'")
-            open_n = int(_scalar(conn, "SELECT COUNT(*) FROM positions WHERE status IN ('open','tested','rolled')"))
-            open_unreal = _scalar(conn, "SELECT COALESCE(SUM(unrealized_pnl),0) FROM positions WHERE status IN ('open','tested','rolled')")
+            # OPEN side gets the SAME adopted-exclusion as the closed side — an adopted open carries a
+            # reconstructed cost basis (the −$1.18M contracts² class), so its unrealized is fiction and
+            # MUST NOT inflate real_strategy.open_unrealized (the breaker reads this). Adopted opens are
+            # surfaced separately in integrity.adopted_open_unrealized.
+            real_open = "status IN ('open','tested','rolled') AND COALESCE(regime_at_entry,'') <> 'adopted'"
+            open_n = int(_scalar(conn, f"SELECT COUNT(*) FROM positions WHERE {real_open}"))
+            open_unreal = _scalar(conn, f"SELECT COALESCE(SUM(unrealized_pnl),0) FROM positions WHERE {real_open}")
             excluded = excluded_attribution(conn)
             unclassified = unclassified_close_sources(conn)
-        win_rate = round(wins / real_n, 4) if real_n else 0.0
-        expectancy = round(real_net / real_n, 2) if real_n else 0.0
-        profit_factor = round(gross_win / abs(gross_loss), 2) if gross_loss else None
-        excluded_total = round(sum(b["pnl"] for b in excluded.values()), 2)
-        # INVARIANT (every-penny-accounted): real + Σexcluded must equal the naïve all-closed sum.
-        partition_residual = round(naive_all - (real_net + excluded_total), 2)
+            win_rate = round(wins / real_n, 4) if real_n else 0.0
+            expectancy = round(real_net / real_n, 2) if real_n else 0.0
+            profit_factor = round(gross_win / abs(gross_loss), 2) if gross_loss else None
+            excluded_total = round(sum(b["pnl"] for b in excluded.values()), 2)
+            # INVARIANT (every-penny-accounted): real + Σexcluded must equal the naïve all-closed sum.
+            partition_residual = round(naive_all - (real_net + excluded_total), 2)
+            integrity = _integrity(conn, db_path, unclassified, partition_residual)
         return {
             "real_strategy": {
                 "net_realized": round(real_net, 2),
@@ -267,20 +334,9 @@ def canonical_book(db_path: str) -> dict[str, Any]:
             "naive_all_closed": round(naive_all, 2),   # what a fiction-blind query would show
             "partition_ok": abs(partition_residual) < 0.01,
             "partition_residual": partition_residual,   # must be 0.00 — every closed dollar attributed
-            # INTEGRITY GUARD: partition_ok proves no dollar is LOST; this proves no real trade is
-            # silently DROPPED (the CBOE +$660 'time_stop' bug). ok=False names the unclassified sources.
-            "integrity": {
-                "ok": not unclassified,
-                "unclassified_sources": unclassified,
-                "message": (
-                    "every closed dollar is classified as real or known-fiction"
-                    if not unclassified else
-                    f"⚠ {sum(u['n'] for u in unclassified)} closed position(s) "
-                    f"(${round(sum(u['pnl'] for u in unclassified), 2)}) have an UNCLASSIFIED "
-                    "close_source — likely REAL trades being dropped from the book. Classify in "
-                    "agora/ops/close_sources.py: " + ", ".join(u["close_source"] for u in unclassified)
-                ),
-            },
+            # INTEGRITY GUARD: partition_ok proves no dollar is LOST; integrity proves no real trade is
+            # silently DROPPED and no fiction carries impossible money — both directions, self-reporting.
+            "integrity": integrity,
             "reconciliation": reconcile(db_path),
             "computed_at_utc": datetime.now(tz=UTC).isoformat(),
         }
@@ -302,10 +358,15 @@ def _latest_broker_recon(db_path: str) -> dict[str, Any]:
             return {"ok": True, "detail": "no snapshot yet", "stale": True}
         ok, drift, day = bool(row[0]), float(row[1] or 0.0), row[2]
         return {"ok": ok, "drift": round(drift, 2), "as_of": day, "stale": False}
-    except Exception:
-        # No perf_snapshots yet (fresh DB / pre-first-snapshot) is "no data", NOT a divergence — the
-        # real-time guards are the ledger + partition checks. Treat as ok-but-stale, don't false-warn.
-        return {"ok": True, "detail": "no snapshot data", "stale": True}
+    except sqlite3.OperationalError as exc:
+        # ONLY a missing perf_snapshots table on a fresh DB (pre-first-snapshot) is benign no-data.
+        if "no such table" in str(exc):
+            return {"ok": True, "detail": "no snapshot table yet", "stale": True}
+        # Any other query failure is a REAL problem — FAIL CLOSED. A swallowed exception must never read
+        # as "reconciled" (the original −$425-for-2-days failure mode where a real divergence sat unseen).
+        return {"ok": False, "stale": True, "error": str(exc), "detail": "recon status query failed"}
+    except Exception as exc:
+        return {"ok": False, "stale": True, "error": str(exc), "detail": "recon status unavailable"}
 
 
 def reconciliation_health(db_path: str) -> dict[str, Any]:

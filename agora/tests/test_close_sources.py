@@ -91,3 +91,46 @@ class TestRealCloseSemantics:
         ).fetchone()
         assert n == 0 and total == 0
         c.close()
+
+
+# ── DRIFT GUARD: the allowlist may exist in EXACTLY ONE place ────────────────────────────────────
+import pathlib  # noqa: E402
+import re  # noqa: E402
+
+
+def test_no_close_source_allowlist_literal_outside_close_sources_py():
+    """The CBOE +$711 drop, and its live recurrence in routes.py, both happened because the close-source
+    allowlist was copy-pasted and drifted. After centralization, NO module outside close_sources.py may
+    hand-spell it. This FAILS the moment a quoted allowlist literal reappears anywhere else — making the
+    centralization self-enforcing rather than a hope."""
+    agora_root = pathlib.Path(__file__).resolve().parents[1]
+    # a real allowlist co-locates these two QUOTED on one line; prose ('a/b/c', comments) won't match
+    pat = re.compile(r"""['"]thesis_exit['"]""")
+    pat2 = re.compile(r"""['"]trailing_stop['"]""")
+    offenders = []
+    for py in agora_root.rglob("*.py"):
+        if py.name == "close_sources.py" or "/tests/" in str(py).replace("\\", "/"):
+            continue
+        for i, line in enumerate(py.read_text().splitlines(), 1):
+            if pat.search(line) and pat2.search(line):
+                offenders.append(f"{py.relative_to(agora_root)}:{i}")
+    assert offenders == [], (
+        "close-source allowlist literal found OUTSIDE close_sources.py — it must be the single source "
+        f"of truth (import REAL_CLOSE_SOURCES / real_close_predicate / is_real_close_row): {offenders}"
+    )
+
+
+def test_is_real_close_row_matches_the_allowlist_exactly():
+    from agora.ops.close_sources import REAL_CLOSE_SOURCES, is_real_close_row
+    for s in REAL_CLOSE_SOURCES:
+        assert is_real_close_row(s, "neutral") is True, f"{s} must be real"
+    assert is_real_close_row("session:ceo_plan", "risk_on") is True
+    # the exact three that were dropped
+    for s in ("time_stop", "profit_target", "stale_model_stop"):
+        assert is_real_close_row(s, "risk_off") is True
+    # fiction / adopted / non-closed / null-pnl all excluded
+    assert is_real_close_row("reconcile_ghost", "neutral") is False
+    assert is_real_close_row("tws_startup_sync", "") is False
+    assert is_real_close_row("lifecycle", "adopted") is False           # adopted wins
+    assert is_real_close_row("lifecycle", "neutral", status="open") is False
+    assert is_real_close_row("lifecycle", "neutral", realized_pnl=None) is False

@@ -15,14 +15,13 @@ from agora.api import routes
 
 def test_performance_endpoint_excludes_adopted_and_fetches_regime():
     src = inspect.getsource(routes.get_performance)
-    # must SELECT the column it needs to exclude on
+    # must SELECT the column the real-close filter needs
     assert "regime_at_entry" in src, "performance must SELECT regime_at_entry to exclude adopted"
-    # must actually exclude adopted (the bug that showed −$22,494 fiction)
-    assert '"adopted"' in src or "'adopted'" in src, \
-        "performance _is_real_close must exclude adopted-legacy positions"
-    # must still exclude the other fiction sources
-    for token in ("fabricated", "sync", "reconcile", "duplicate"):
-        assert token in src, f"performance must still exclude {token} closes"
+    # must delegate to the SINGLE source of truth (close_sources.is_real_close_row), which excludes
+    # adopted + fabricated/sync/reconcile/duplicate (locked in test_close_sources). The hand-spelled
+    # inline copy that drifted — and dropped the CBOE +$660 / showed −$22,494 fiction — is GONE.
+    assert "is_real_close_row" in src, \
+        "performance must use the centralized is_real_close_row, not a hand-spelled allowlist"
 
 
 def test_performance_real_close_mirrors_book_manager_intent():

@@ -163,3 +163,81 @@ def test_integrity_flags_unclassified_source_loudly():
     assert "mystery_stop" in srcs
     assert "mystery_stop" in b["integrity"]["message"]
     os.unlink(db)
+
+
+# ── EXPANDED INTEGRITY GUARD (SME review 2026-06-29): both directions + corruption signals ───────────
+def _full_book(rows):
+    """rows: dicts with keys status, close_source, regime, realized_pnl, unrealized_pnl,
+    max_loss_dollars, max_gain_dollars. Full schema for canonical_book()._integrity."""
+    import tempfile as _tf
+    db = _tf.NamedTemporaryFile(suffix=".db", delete=False).name
+    c = sqlite3.connect(db)
+    c.execute("""CREATE TABLE positions (position_id TEXT DEFAULT 'p', ticker TEXT DEFAULT 'TST',
+        status TEXT, close_source TEXT, close_date TEXT, regime_at_entry TEXT, contracts INTEGER DEFAULT 1,
+        realized_pnl REAL NOT NULL DEFAULT 0, unrealized_pnl REAL NOT NULL DEFAULT 0,
+        max_loss_dollars REAL, max_gain_dollars REAL)""")
+    for i, r in enumerate(rows):
+        c.execute("INSERT INTO positions (position_id,status,close_source,close_date,regime_at_entry,"
+                  "realized_pnl,unrealized_pnl,max_loss_dollars,max_gain_dollars) VALUES (?,?,?,?,?,?,?,?,?)",
+                  (f"p{i}", r["status"], r.get("close_source"),
+                   "2026-06-29" if r["status"] == "closed" else None, r.get("regime"),
+                   r.get("realized_pnl", 0.0), r.get("unrealized_pnl", 0.0),
+                   r.get("max_loss_dollars", 500.0), r.get("max_gain_dollars", 500.0)))
+    c.commit(); c.close()
+    return db
+
+
+def test_integrity_flags_impossible_pnl_as_corruption():
+    """A closed row whose realized P&L is outside [-max_loss,+max_gain]*1.2 is the −$808k contracts²
+    signature — must flip integrity.ok False even under a KNOWN (real) close_source."""
+    from agora.ops.book_manager import canonical_book
+    db = _full_book([
+        {"status": "closed", "close_source": "lifecycle", "regime": "neutral",
+         "realized_pnl": -8000.0, "max_loss_dollars": 500.0, "max_gain_dollars": 500.0},  # impossible loss
+    ])
+    b = canonical_book(db)
+    assert b["integrity"]["ok"] is False
+    assert b["integrity"]["impossible_pnl"], "the −8000 vs 500 max-loss row must be flagged"
+    os.unlink(db)
+
+
+def test_integrity_nonzero_fiction_is_visibility_not_failure():
+    """A within-bounds fiction-labeled close (tws_startup_sync −$50) is surfaced for visibility but must
+    NOT flip ok — known/quarantined artifacts can't cry wolf forever (the −$373 live case)."""
+    from agora.ops.book_manager import canonical_book
+    db = _full_book([
+        {"status": "closed", "close_source": "lifecycle", "regime": "neutral", "realized_pnl": 100.0},
+        {"status": "closed", "close_source": "tws_startup_sync", "regime": "", "realized_pnl": -50.0},
+    ])
+    b = canonical_book(db)
+    assert b["integrity"]["ok"] is True
+    assert b["integrity"]["nonzero_fiction"]["n"] == 1 and b["integrity"]["nonzero_fiction"]["sum"] == -50.0
+    os.unlink(db)
+
+
+def test_adopted_open_excluded_from_real_open_unrealized():
+    """P0-2: an adopted OPEN must NOT inflate real_strategy.open_unrealized (reconstructed basis)."""
+    from agora.ops.book_manager import canonical_book
+    db = _full_book([
+        {"status": "open", "regime": "neutral", "unrealized_pnl": -300.0},
+        {"status": "open", "regime": "adopted", "unrealized_pnl": 216.16},   # must be excluded
+    ])
+    b = canonical_book(db)
+    assert b["real_strategy"]["open_unrealized"] == -300.0       # NOT -83.84
+    assert b["real_strategy"]["open_positions"] == 1            # adopted not counted
+    assert b["integrity"]["adopted_open_unrealized"]["sum"] == 216.16   # surfaced separately
+    os.unlink(db)
+
+
+def test_adopted_with_real_source_buckets_as_adopted_not_real():
+    """P1-3: a row that is adopted AND carries a real close_source must land in adopted_legacy, never
+    in real strategy P&L (the load-bearing CASE order / _REAL_CLOSE adopted-exclusion)."""
+    from agora.ops.book_manager import canonical_book
+    db = _full_book([
+        {"status": "closed", "close_source": "lifecycle", "regime": "adopted", "realized_pnl": 999.0},
+    ])
+    b = canonical_book(db)
+    assert b["real_strategy"]["net_realized"] == 0.0           # the +999 is NOT real
+    assert b["excluded"]["adopted_legacy"]["pnl"] == 999.0     # it is adopted_legacy
+    assert b["partition_ok"] is True
+    os.unlink(db)
