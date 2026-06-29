@@ -832,6 +832,7 @@ async def place_legs_individually(
     use_adaptive_algo: bool = False,
     adaptive_algo_priority: str = "Normal",
     adaptive_single_leg: bool = False,
+    adaptive_spread_legs: bool = False,
     market_data_type: int = 3,
     max_combo_spread_pct: float = 0.50,
     pricing_sanity_max_ratio: float = 2.0,
@@ -1013,9 +1014,14 @@ async def place_legs_individually(
             # Single-leg orders (long_call/long_put) are NATIVE option orders, where the Adaptive
             # algo IS valid (it is silently ignored on BAG combos). It fills server-side within the
             # limit even without a client market-data sub — lifting fill rate above the walk-LMT
-            # alone. Scoped to single legs: a multi-leg credit spread keeps the proven walk only,
-            # so leg-in timing/atomicity is unchanged.
-            if adaptive_single_leg and len(qualified) == 1:
+            # alone. RECALIBRATION 2026-06-29: extend to the legged-in SPREAD legs too — each is a
+            # native (repriceable, Adaptive-valid) order, and the walk-only spread legs filled terribly
+            # (bull_call_spread 6%, 85/91 timeouts). Adaptive on the long/protective leg also reduces
+            # the "protective leg unfilled → abort naked short" rejects. Leg-in timing/atomicity is
+            # unchanged (Adaptive only changes how each leg fills within its limit, not the ordering).
+            _adaptive_this_leg = (adaptive_single_leg and len(qualified) == 1) or \
+                                 (adaptive_spread_legs and len(qualified) > 1)
+            if _adaptive_this_leg:
                 _apply_adaptive_algo(o, adaptive_algo_priority)
             trades[i] = ib.placeOrder(contract, o)
             _bump_orderid_hw(trades[i].order.orderId)

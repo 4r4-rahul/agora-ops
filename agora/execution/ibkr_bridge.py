@@ -205,8 +205,10 @@ async def submit_trade(rec: Any, settings: Any, session_id: str) -> dict:
         # simulated/acceptable in paper. LIVE keeps the atomic BAG below (no naked-leg gap on real $).
         fn = place_legs_individually
         kwargs["entry_marketable_start"] = _marketable
-        logger.info("PAPER %s spread %s → leg-by-leg marketable-start=%s",
-                    "credit" if is_credit else "debit", rec.ticker, _marketable)
+        kwargs["adaptive_spread_legs"] = getattr(settings, "use_adaptive_spread_legs", True)
+        logger.info("PAPER %s spread %s → leg-by-leg marketable-start=%s adaptive_legs=%s",
+                    "credit" if is_credit else "debit", rec.ticker, _marketable,
+                    kwargs["adaptive_spread_legs"])
     else:
         fn = place_bracket_order
         kwargs["max_slippage_pct_of_width"] = getattr(settings, "max_slippage_pct_of_width", 0.10)

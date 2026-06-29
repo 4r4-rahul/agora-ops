@@ -380,6 +380,17 @@ class AgoraSettings(BaseSettings):
                     "fills server-side within the limit. Scoped to single legs ONLY — the combo "
                     "repricing walk is untouched. Safe to leave ON; set OFF to revert to walk-only.",
     )
+    use_adaptive_spread_legs: bool = Field(
+        default=True,
+        description="RECALIBRATION 2026-06-29: extend the proven single-leg Adaptive to the LEGGED-IN "
+                    "spread legs too. Diagnosis: single-leg Adaptive fills 70% but the walk-only spread "
+                    "legs fill terribly (bull_call_spread 6% — 85/91 timeouts; + 48 protective-leg "
+                    "aborts). Each legged-in order is a NATIVE option order (repriceable, Adaptive-valid "
+                    "— Adaptive only fails on BAG combos), so applying Adaptive should lift spread fills "
+                    "AND fill the long/protective leg so fewer spreads abort to avoid a naked short. "
+                    "Server-side fill stays within the limit (no worse prices; measured slippage ~−0.2 "
+                    "ticks). PAPER leg-by-leg path only; live BAG path untouched. OFF reverts to walk-only.",
+    )
     entry_marketable_start: bool = Field(
         default=True,
         description="Start leg-by-leg entry limits AT the marketable cross (natural ± a small "
