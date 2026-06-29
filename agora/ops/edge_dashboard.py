@@ -20,25 +20,16 @@ import math
 import sqlite3
 from typing import Any
 
+from agora.ops.close_sources import real_close_predicate
+
 MIN_SAMPLE = 20          # below this a cut is UNVALIDATED, never treated as edge
 
-# Provenance we trust as a real, agent-driven fill. Mirrors outcome_attributor._REAL_CLOSE_SOURCES
-# plus the session: planned-close family; explicitly EXCLUDES fabricated/sync/reset artifacts AND
-# ADOPTED positions. Adopted positions (position_id 'adopt-%' / regime_at_entry='adopted') are legacy
-# broker positions the reconciler ingested with a RECONSTRUCTED cost basis the engine never priced — so
-# their realized P&L is unreliable (the 2026-06-25 corruption: −$808k booked on a $16k-max-loss DIA
-# spread). They are NOT engine decisions and MUST NOT contaminate P&L books, ML training, or attribution.
-_REAL_CLOSE = (
-    "status='closed' AND close_date IS NOT NULL AND close_date<>'' "
-    "AND (close_source IN ('lifecycle','thesis_exit','trailing_stop','stop_loss','pre_earnings') "
-    "     OR close_source LIKE 'session:%') "
-    "AND close_source NOT LIKE '%fabricated%' "
-    "AND close_source NOT LIKE '%tws_startup_sync%' "
-    "AND close_source NOT LIKE '%reconcile%' "
-    "AND close_source NOT LIKE '%duplicate%' "
-    "AND COALESCE(regime_at_entry,'') <> 'adopted' "   # JOIN-safe adopted marker (positions-only col)
-    "AND status<>'reset'"
-)
+# Provenance we trust as a real, agent-driven fill — the SINGLE source of truth lives in
+# agora/ops/close_sources.py (allowlist of engine close-sources + session: family; EXCLUDES
+# fabricated/sync/reconcile/duplicate artifacts AND ADOPTED positions, whose reconstructed cost basis
+# made the 2026-06-25 −$808k corruption). Built here from that one definition so the predicate can
+# never drift across modules again (the drift that silently dropped the CBOE +$660 time_stop win).
+_REAL_CLOSE = real_close_predicate()
 
 
 def _wilson_lower(wins: int, n: int, z: float = 1.96) -> float | None:

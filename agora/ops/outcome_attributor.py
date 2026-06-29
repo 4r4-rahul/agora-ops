@@ -53,6 +53,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from agora.ops.close_sources import real_close_predicate
+
 logger = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
 
@@ -70,19 +72,12 @@ CALIBRATION_INTERVAL_SEC = 3600 * 24 * 7   # run ConvictionCalibrator weekly
 #   • status='reset'                — a reset, never a fill (pnl=0)
 #   • close_source='tws_startup_sync' / orphan reconcile — broker-sync artifacts the agents
 #     did not decide; their P&L must not feed agent learning.
-_REAL_CLOSE_SOURCES = ("lifecycle", "thesis_exit", "trailing_stop", "stop_loss")
-# A genuine agent-driven close that carries REAL fill-based P&L (post the close-booking fix): the
-# profit engine (lifecycle), LLM (thesis_exit), trailing_stop, stop_loss, and CTO/CEO direct closes
-# (close_source LIKE 'session:%'). EXCLUDES broker-sync artifacts (tws_startup_sync, reconcile_ghost)
-# whose realized_pnl is not a real decision outcome.
-_REAL_CLOSE = (
-    "p.status='closed' AND p.close_date IS NOT NULL AND p.close_date<>'' "
-    "AND (p.close_source IN ('lifecycle','thesis_exit','trailing_stop','stop_loss') "
-    "     OR p.close_source LIKE 'session:%') "
-    # EXCLUDE adopted positions — reconstructed cost basis = unreliable P&L, never an engine decision
-    # (see edge_dashboard._REAL_CLOSE; the 2026-06-25 −$1.17M corruption was all adopted closes).
-    "AND COALESCE(p.regime_at_entry,'') <> 'adopted'"
-)
+# Genuine agent-driven closes carrying REAL fill-based P&L — the single source of truth lives in
+# agora/ops/close_sources.py (allowlist + session: family; EXCLUDES sync/reconcile/fabricated artifacts
+# and adopted positions). Built with the JOIN prefix 'p' so it composes with decision_chains here.
+# Previously this copy had DRIFTED (no fiction filters, missing time_stop/profit_target) — centralized
+# 2026-06-29 so attribution and the P&L book can never disagree on what "real" means.
+_REAL_CLOSE = real_close_predicate(prefix="p")
 # Sub-select of chain_ids whose position genuinely closed — used both to gate attribution
 # writes and to detect (and purge) attribution written against anything else.
 _REAL_CLOSED_CHAINS = (
@@ -1070,10 +1065,7 @@ class ScheduledAttributor:
                             if _bf.get("backfilled"):
                                 logger.info("prediction-ledger backfill: %s", _bf)
                             _pc = _sq.connect(self._db_path, timeout=8)
-                            _real = ("status='closed' AND close_date IS NOT NULL AND close_date<>'' "
-                                     "AND (close_source IN ('lifecycle','thesis_exit','trailing_stop',"
-                                     "'stop_loss') OR close_source LIKE 'session:%') "
-                                     "AND realized_pnl IS NOT NULL")
+                            _real = real_close_predicate(require_pnl=True)  # single source of truth
 
                             def _win(pid: str, _pc=_pc, _real=_real) -> float | None:
                                 r = _pc.execute(f"SELECT realized_pnl FROM positions WHERE position_id=? "

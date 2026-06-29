@@ -20,6 +20,8 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
+from agora.ops.close_sources import real_close_predicate
+
 _DDL = """
 CREATE TABLE IF NOT EXISTS prediction_ledger (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -175,9 +177,10 @@ def backfill_conviction(db_path: Any) -> dict:
     prediction (the conviction WAS predicted at entry; the win IS the realized actual — honest, not
     look-ahead). Makes the calibration loop meaningful immediately instead of waiting weeks for new
     trades. Idempotent — skips position_ids already in the ledger. Never raises."""
-    _real = ("status='closed' AND close_date IS NOT NULL AND close_date<>'' "
-             "AND (close_source IN ('lifecycle','thesis_exit','trailing_stop','stop_loss') "
-             "OR close_source LIKE 'session:%') AND realized_pnl IS NOT NULL")
+    # single source of truth (agora/ops/close_sources.py) — previously this copy lacked BOTH the
+    # adopted-exclusion and the fiction filters, so conviction calibration could train on adopted $0
+    # rows and reconcile artifacts. Centralized 2026-06-29.
+    _real = real_close_predicate(require_pnl=True)
     try:
         conn = sqlite3.connect(str(db_path), timeout=10)
         conn.executescript(_DDL)
