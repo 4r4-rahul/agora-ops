@@ -1428,8 +1428,22 @@ async def ibkr_diagnose(body: _IBKRDiagnoseBody) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+def _symbols_closed_today(db_path: str) -> set[str]:
+    """Tickers the engine CLOSED today (any close). The book KNOWS these, so a buy-to-close BOT leg
+    must not be mistaken for a missing entry. Never raises."""
+    try:
+        import sqlite3
+        with sqlite3.connect(db_path, timeout=5) as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT ticker FROM positions WHERE status='closed' AND close_date=date('now')"
+            ).fetchall()
+        return {r[0] for r in rows}
+    except Exception:
+        return set()
+
+
 def _tws_recon_warning(live: dict, session: Any) -> list[str]:
-    """Compare TWS BAG fills vs shadow book to surface missing entries."""
+    """Compare TWS BAG fills vs shadow book to surface GENUINELY missing entries (not closed round-trips)."""
     warnings: list[str] = []
     try:
         bag_fills = [f for f in live.get("tws_fills", []) if f.get("secType") == "BAG"]
@@ -1440,15 +1454,19 @@ def _tws_recon_warning(live: dict, session: Any) -> list[str]:
         # Still open in TWS (entry filled, no close yet)
         tws_open   = tws_bought - tws_sold
 
-        shadow_symbols = {p.ticker for p in session._position_mgr.get_open_positions()}
+        shadow_open = {p.ticker for p in session._position_mgr.get_open_positions()}
+        # FIX 2026-06-29: a symbol the engine CLOSED TODAY is KNOWN to the book — its buy-to-close BOT
+        # leg (seen without the matching SLD in this snapshot) must NOT false-flag it as "missing".
+        # The old check looked only at OPEN positions, so a closed bear_put_spread (e.g. AMZN) cried
+        # wolf. Only warn when a TWS-open symbol is neither open NOR closed-today in our book.
+        known = shadow_open | _symbols_closed_today(str(session._settings.db_path))
 
-        # TWS says open position exists but not in shadow book
-        missing_in_shadow = tws_open - shadow_symbols
+        missing_in_shadow = tws_open - known
         for sym in missing_in_shadow:
             warnings.append(f"⚠ {sym}: filled in TWS but missing from shadow book — run reconcile")
 
         # Shadow book shows open but TWS says closed (both BOT+SLD seen)
-        closed_but_in_shadow = closed & shadow_symbols
+        closed_but_in_shadow = closed & shadow_open
         for sym in closed_but_in_shadow:
             warnings.append(f"⚠ {sym}: closed in TWS but still open in shadow book — stale position")
     except Exception:
