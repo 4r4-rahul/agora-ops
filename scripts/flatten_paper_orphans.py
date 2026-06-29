@@ -101,7 +101,8 @@ async def main() -> int:
         print(f"  ERROR: cannot reach TWS on 7497 ({exc}). Run during market hours with TWS up.")
         return 1
     try:
-        ib.reqPositions(); await asyncio.sleep(2.0)
+        await ib.reqPositionsAsync()   # async — sync ib.reqPositions() crashes inside asyncio.run
+        await asyncio.sleep(1.0)        # let the position cache settle
         broker = ibkr_legs(ib)
         plan = flatten_plan(broker, keep)
         junk_qty = sum(p["qty"] for p in plan)
@@ -110,12 +111,12 @@ async def main() -> int:
             print(f"    {p['action']} {p['qty']}x {p['symbol']} {p['strike']}{p['right']} {p['expiry']} "
                   f"(broker {p['broker_qty']:+d} → keep {p['keep_qty']:+d})")
         if not plan:
-            print("  nothing to flatten — broker already equals the real book ✓")
-            return 0
+            print("  nothing to flatten at broker — broker already equals the real book ✓")
         if not EXECUTE:
             print("\n  DRY-RUN only. Re-run with --execute to flatten + close adopted in the DB.")
             return 0
-
+        # EXECUTE: flatten any broker junk (loop is a no-op when plan is empty), then ALWAYS reconcile
+        # the DB below — a clean slate must close stale adopted DB rows even if the broker is already clean.
         trades = []
         for p in plan:
             opt = Option(p["symbol"], p["expiry"], float(p["strike"]), p["right"],
