@@ -4721,6 +4721,20 @@ class AgoraSession:
 
             loop = asyncio.get_event_loop()
             res = await loop.run_in_executor(self._heal_executor, _heal_in_thread)
+            # Live DB↔TWS sync status for the UI badge: the heal IS the verification (it mirrors the
+            # book to the broker every cycle), so capture its outcome + timestamp for /agora/sync.
+            self._last_sync = {
+                "matched":         int(res.get("matched", 0)),
+                "orphans_found":   int(res.get("orphans_found", 0)),
+                "ghosts_found":    int(res.get("ghosts_found", 0)),
+                "qty_mismatch":    int(res.get("qty_mismatch", 0)),
+                "ghosts_closed":   int(res.get("ghosts_closed", 0)),
+                "orphans_adopted": int(res.get("orphans_adopted", 0)),
+                "overfill":        len(res.get("overfill_plan") or []),
+                "errors":          list(res.get("errors") or []),
+                "reason":          reason,
+                "verified_at":     datetime.now(tz=ET).isoformat(),
+            }
             if res.get("ghosts_closed") or res.get("orphans_adopted") or res.get("qty_mismatch"):
                 logger.warning("PositionHeal[%s]: closed %d ghost(s), adopted %d orphan(s), "
                                "%d qty-mismatch", reason, res["ghosts_closed"],
@@ -4754,6 +4768,9 @@ class AgoraSession:
                     logger.error("Over-fill auto-halt trip failed: %s", trip_exc)
         except Exception as exc:
             logger.warning("PositionHeal[%s] failed: %s", reason, exc)
+            # Record the verification failure so the sync badge shows "couldn't verify", never a stale green.
+            self._last_sync = {"errors": [str(exc)], "reason": reason,
+                               "verified_at": datetime.now(tz=ET).isoformat()}
 
     async def _position_healer_loop(self) -> None:
         """Periodic DB↔broker mirror every 5 min, so a mid-session gap never persists."""

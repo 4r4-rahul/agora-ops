@@ -1041,6 +1041,34 @@ async def get_edge_readout() -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+def _classify_sync(last: dict | None) -> str:
+    """DB↔TWS sync status from the latest position-heal: in_sync / corrected / alert / error / unknown.
+    'corrected' = a divergence was found AND healed this cycle (mirror restored — in sync now, activity
+    flagged). 'alert' = an over-fill the heal couldn't fully resolve. 'error' = the heal couldn't run."""
+    if not last:
+        return "unknown"
+    if last.get("errors"):
+        return "error"
+    if last.get("overfill"):
+        return "alert"
+    if last.get("orphans_found") or last.get("ghosts_found") or last.get("qty_mismatch"):
+        return "corrected"
+    return "in_sync"
+
+
+@router.get("/sync")
+async def get_sync_status() -> JSONResponse:
+    """Live DB↔TWS sync status — the outcome of the engine's continuous position-heal (every 5 min),
+    which mirrors the shadow book to the broker leg-by-leg. Read-only; reflects the latest verification
+    so the UI can show a live 'in sync, verified Xs ago' badge."""
+    try:
+        session = get_session()
+        last = getattr(session, "_last_sync", None)
+        return JSONResponse({"status": _classify_sync(last), **(last or {})})
+    except Exception as exc:
+        return JSONResponse({"status": "unknown", "error": str(exc)}, status_code=200)
+
+
 @router.get("/proof-gates")
 async def get_proof_gates() -> JSONResponse:
     """The mechanical scorecard of the four provable pillars (EDGE / HONESTY / DISASTER / AGENTIC).

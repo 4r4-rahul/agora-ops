@@ -494,6 +494,8 @@ tr.pos-detail-row td { padding: 0; background: var(--bg1); }
   <span class="badge badge-paper" id="mode-badge">PAPER</span>
   <span class="badge badge-green" id="mkt-status-badge">● MARKET OPEN</span>
   <button id="kill-btn" onclick="onKillClick()">🛑 KILL SWITCH</button>
+  <span id="sync-badge" title="DB↔TWS leg-level reconciliation — continuous position-heal every 5 min"
+        style="margin-left:8px;font-size:11px;padding:3px 8px;border-radius:4px;background:rgba(80,140,255,.10);color:var(--text2)">DB↔TWS verifying…</span>
   <div id="market-bar">
     <div class="mkt-item"><span class="mkt-sym">SPY</span><span class="mkt-price" id="m-SPY">—</span><span id="m-SPY-chg" class="nt">—</span></div>
     <div class="mkt-item"><span class="mkt-sym">QQQ</span><span class="mkt-price" id="m-QQQ">—</span><span id="m-QQQ-chg" class="nt">—</span></div>
@@ -1457,6 +1459,28 @@ async function fetchProofGates() {
       </div>`;
     }).join('');
   } catch (err) { console.warn('proof-gates poll failed', err); }
+}
+
+// ── Fetch: live DB↔TWS sync badge (result of the engine's continuous position-heal) ──
+async function fetchSync() {
+  try {
+    const d = await (await fetch('/agora/sync')).json();
+    const el = document.getElementById('sync-badge');
+    if (!el) return;
+    const age = d.verified_at ? Math.max(0, Math.round((Date.now() - new Date(d.verified_at).getTime()) / 1000)) : null;
+    const ageStr = age == null ? '' : (age < 90 ? `${age}s` : `${Math.round(age / 60)}m`) + ' ago';
+    const map = {
+      in_sync:   ['✅ DB=TWS',                'var(--green)',          'rgba(60,200,120,.12)'],
+      corrected: ['⚠ DB=TWS (auto-corrected)', 'var(--yellow,#d9a400)', 'rgba(210,160,40,.12)'],
+      alert:     ['🚨 DB↔TWS over-fill',       'var(--red)',            'rgba(220,60,60,.14)'],
+      error:     ['❌ DB↔TWS verify failed',   'var(--red)',            'rgba(220,60,60,.14)'],
+      unknown:   ['DB↔TWS verifying…',         'var(--text2)',          'rgba(80,140,255,.10)'],
+    };
+    const [label, col, bg] = map[d.status] || map.unknown;
+    const matched = (d.matched != null) ? ` · ${d.matched} legs` : '';
+    el.innerHTML = `<b style="color:${col}">${label}</b>${matched}${ageStr ? ` · ${ageStr}` : ''}`;
+    el.style.background = bg;
+  } catch (err) { console.warn('sync poll failed', err); }
 }
 
 // ── Fetch: edge readout (expectancy per config-version — is the recalibration working?) ──
@@ -3474,7 +3498,7 @@ async function fetchToday() {
   );
 
   await Promise.all([
-    fetchHealth(), fetchProofGates(), fetchEdgeReadout(), fetchOrders(), fetchPositions(), fetchAttribution(), fetchSignals(),
+    fetchHealth(), fetchProofGates(), fetchEdgeReadout(), fetchSync(), fetchOrders(), fetchPositions(), fetchAttribution(), fetchSignals(),
     fetchMarket(), fetchReadiness(), fetchCsuite(), fetchToday(), fetchLong(), fetchExits(), fetchCosts(), fetchFactCheck(),
     fetchPerformance(), fetchExpectancy(), fetchLifecycle(), fetchModels(), fetchRecs(), fetchShadow(), fetchTickerEngine(), fetchEntryFunnel(),
   ]);
@@ -3482,6 +3506,7 @@ async function fetchToday() {
   // TWS live data — fetch once on load then every 30s (makes a real IBKR connection)
   fetchTwsLive();
 
+  setInterval(fetchSync,        30_000);  // live DB↔TWS sync badge (continuous heal result)
   setInterval(fetchProofGates,  60_000);  // proof-gate scorecard (sell nothing until green)
   setInterval(fetchEdgeReadout, 60_000);  // edge expectancy by config-version
   setInterval(fetchExpectancy,  60_000);  // North-Star meter

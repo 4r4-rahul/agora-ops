@@ -466,6 +466,11 @@ def heal(db_path: str, position_mgr: Any, host: str = "127.0.0.1", port: int = 7
                 out["errors"].append(f"orphan-adopt: {exc}")
 
         out["qty_mismatch"] = len(rep.qty_mismatch)
+        # Pre-heal diff snapshot for the live DB↔TWS sync badge: legs that matched the broker, and the
+        # divergences found this cycle (heal corrects ghosts/orphans, so post-heal the book mirrors TWS).
+        out["matched"] = len(rep.matched)
+        out["orphans_found"] = len(rep.orphans)
+        out["ghosts_found"] = len(rep.ghosts)
 
         if out["ghosts_closed"] or out["orphans_adopted"] or out["qty_mismatch"]:
             logger.warning(
