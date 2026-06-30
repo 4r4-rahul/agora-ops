@@ -66,6 +66,7 @@ from agora.discovery.universe_discovery import UniverseDiscoveryAgent
 from agora.execution.ibkr_bridge import close_trade, enrich_chain, reprice_legs, submit_trade
 from agora.lifecycle.position_manager import PositionManager
 from agora.ops.agent_performance import AgentPerformanceMonitor
+from agora.ops.agentic_ab import assign_arm
 from agora.ops.attribution import PnlAttributor, PsiMonitor
 from agora.ops.data_integrity import DataIntegrityAgent
 from agora.ops.decision_chains import (
@@ -4657,6 +4658,9 @@ class AgoraSession:
             ibkr_order_ids=[ibkr_order_id] if ibkr_order_id != -1 else [],
             conviction_at_entry=getattr(rec, "conviction_score", 0.0),
             regime_at_entry=regime,
+            decision_arm=assign_arm(
+                rec.ticker, date.today().isoformat(),
+                ab_enabled=getattr(self._settings, "conviction_ab_enabled", False)),
             earnings_date=earnings_date,
             is_pre_earnings=is_pre_earnings,
             entry_ts_utc=entry_ts_utc or "",

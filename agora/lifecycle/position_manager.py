@@ -269,6 +269,11 @@ class PositionManager:
         # segment outcomes by the settings that produced them (R1/R2/R3, #4 risk cap, per-ticker…).
         if "config_version_at_entry" not in existing_cols:
             conn.execute("ALTER TABLE positions ADD COLUMN config_version_at_entry INTEGER")
+        # Conviction A/B rail: which decision arm opened this trade. DEFAULT 'agentic' so all existing
+        # rows are truthfully labeled (they ran the LLM/conviction path) and never pollute a future
+        # 'rules_only' arm. Stamped at entry; read by agentic_ab.arm_comparison + the AGENTIC proof-gate.
+        if "decision_arm" not in existing_cols:
+            conn.execute("ALTER TABLE positions ADD COLUMN decision_arm TEXT NOT NULL DEFAULT 'agentic'")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS trade_records (
                 trade_id TEXT PRIMARY KEY,
@@ -1417,8 +1422,8 @@ class PositionManager:
                 max_gain_dollars, unrealized_pnl, realized_pnl, rolled_count, last_reviewed,
                 ibkr_order_ids, notes, direction, conviction_at_entry, regime_at_entry,
                 earnings_date, is_pre_earnings, close_date, close_price, close_source,
-                entry_ts_utc, exit_ts_utc, config_version_at_entry
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                entry_ts_utc, exit_ts_utc, config_version_at_entry, decision_arm
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             position.position_id,
             position.ticker,
@@ -1451,6 +1456,7 @@ class PositionManager:
             # moment (full UTC, seconds) so entry_ts_utc is NEVER null going forward. exit NULL on open.
             getattr(position, "entry_ts_utc", "") or datetime.now(tz=UTC).isoformat(), None,
             getattr(self, "_config_version", 0),   # settings regime this trade was opened under
+            getattr(position, "decision_arm", "agentic"),   # conviction A/B arm (shadow: all 'agentic')
         ))
         self._db.commit()
         # Register with profit engine so entry-time Greeks are captured

@@ -119,7 +119,12 @@ def _conviction(pillar: StrategyPillar, *, gate: str = "standard", score: float 
 
 @pytest.fixture
 def engine() -> StrategyRulesEngine:
-    return StrategyRulesEngine()
+    # Hermetic from the deployment .env (which sets ROUTE_BULLISH_DEBIT=skip): these tests exercise the
+    # DEFAULT structure-selection behavior. The bullish-debit veto is tested explicitly in
+    # TestBullishDebitVeto by overriding route_bullish_debit='skip' on the instance.
+    eng = StrategyRulesEngine()
+    eng._settings = eng._settings.model_copy(update={"route_bullish_debit": "off"})
+    return eng
 
 
 # ── 1. Top-level gates ────────────────────────────────────────────────────────

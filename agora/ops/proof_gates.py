@@ -105,8 +105,10 @@ def _agentic_gate(db_path: str) -> dict[str, Any]:
         "current": av,
         "target": {"arm_comparison.status": "ready", "agentic_beats_baseline": True},
         "needs": None if status == GREEN else (
-            "run the rules-only execution arm (stamp positions.decision_arm) to N closes; "
-            "signal_predictiveness shows whether the LLM outputs carry signal in the meantime"),
+            "decision_arm rail is now wired + stamped (shadow: all 'agentic'); the rules-only EXECUTION "
+            "arm is deliberately NOT enabled yet — the conviction signal is regime-confounded (Simpson's "
+            "paradox) + underpowered, so a behavioral split is power-gated. signal_predictiveness is the "
+            "live evidence rail meanwhile (currently 'not_predictive')"),
     }
 
 

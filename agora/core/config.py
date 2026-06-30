@@ -582,6 +582,19 @@ class AgoraSettings(BaseSettings):
                     "subtractive (can only DEFER an adoption, never flatten); genuine untracked orphans "
                     "still adopt on a later cycle. Set False to restore unconditional adoption.",
     )
+    conviction_ab_enabled: bool = Field(
+        default=False,
+        description="CONVICTION A/B RAIL (2026-06-30, SME-validated). When False (default), every entry is "
+                    "stamped decision_arm='agentic' — the current LLM/conviction-driven path — with ZERO "
+                    "behavior change (shadow). When True, candidates are deterministically split "
+                    "agentic/rules_only by ticker+date hash so the forward A/B (agentic_ab.arm_comparison) "
+                    "can measure whether the agentic layer beats a rules-only baseline. NOTE: the BEHAVIORAL "
+                    "rules-only execution arm is intentionally NOT wired yet — a conviction flip is NOT "
+                    "warranted: the anti-predictive effect is a within-'neutral' regime artifact (Simpson's "
+                    "paradox — aggregate conv>=60 is mildly POSITIVE), and the signal is underpowered "
+                    "(Cohen d~0.05; signal_predictiveness='not_predictive'). This rail + the regime-stratified "
+                    "readout are the safe first step; enabling the split is a later, power-gated decision.",
+    )
     route_bullish_debit: str = Field(
         default="off",
         description="STRUCTURE-SELECTION FIX (2026-06-30, SME-validated). bull_call_spread fills only ~11% "

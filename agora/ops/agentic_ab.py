@@ -25,6 +25,20 @@ _MIN_SCORED = 20   # below this, predictiveness is not credible
 _MIN_ARM_N = 40    # per-arm minimum before the A/B verdict is trustworthy
 
 
+def assign_arm(ticker: str, entry_date: str, *, ab_enabled: bool) -> str:
+    """Deterministic A/B arm for an entry candidate. Shadow default (ab_enabled=False) → 'agentic' for
+    ALL candidates (zero behavior change — the current LLM/conviction path). When enabled, split
+    agentic/rules_only by a STABLE ticker+date hash so the same candidate always lands in the same arm
+    (reproducible, testable, no intraday drift). NOTE: enabling only LABELS arms until the rules_only
+    EXECUTION path is wired — which is intentionally deferred (the conviction signal is regime-confounded
+    + underpowered, so a behavioral split is not yet warranted)."""
+    if not ab_enabled:
+        return "agentic"
+    import hashlib
+    h = hashlib.sha256(f"{ticker}|{entry_date}".encode()).hexdigest()
+    return "rules_only" if int(h[:8], 16) % 2 == 0 else "agentic"
+
+
 def _median(xs: list[float]) -> float | None:
     if not xs:
         return None
@@ -69,9 +83,37 @@ def signal_predictiveness(db_path: str) -> dict[str, Any]:
     return out
 
 
+def _wilson(wins: int, n: int, z: float = 1.96) -> tuple[float, float] | None:
+    """Wilson 95% CI on a win-rate — honest uncertainty that down-weights small n."""
+    if n <= 0:
+        return None
+    p = wins / n
+    d = 1 + z * z / n
+    c = p + z * z / (2 * n)
+    m = z * ((p * (1 - p) / n + z * z / (4 * n * n)) ** 0.5)
+    return (round((c - m) / d, 3), round((c + m) / d, 3))
+
+
+def _arm_stat(xs: list[float]) -> dict[str, Any]:
+    n = len(xs)
+    wins = sum(1 for p in xs if p > 0)
+    return {
+        "n": n,
+        "expectancy": round(sum(xs) / n, 2) if n else None,
+        "median": _median(xs),
+        "win_rate": round(wins / n, 3) if n else None,
+        "wilson95": _wilson(wins, n),   # honest CI — overlapping CIs ⇒ no real difference
+    }
+
+
 def arm_comparison(db_path: str) -> dict[str, Any]:
     """Forward A/B: per-arm expectancy on real closes, where positions.decision_arm ∈ {agentic,
-    rules_only}. Returns insufficient_data until both arms have >= _MIN_ARM_N closes."""
+    rules_only}. Returns insufficient_data until both arms have >= _MIN_ARM_N closes.
+
+    STRATIFIED BY REGIME (2026-06-30): the aggregate is a Simpson's-paradox trap — conviction correlates
+    with regime, and one regime (risk_off) is the only profitable one, so an unstratified arm comparison
+    can flip sign vs the within-regime truth. `by_regime` carries the honest per-regime split + Wilson CIs
+    so a 'winner' can never be declared on a confound."""
     from agora.ops.edge_dashboard import _REAL_CLOSE
     try:
         with sqlite3.connect(db_path, timeout=10) as conn:
@@ -79,23 +121,25 @@ def arm_comparison(db_path: str) -> dict[str, Any]:
             if "decision_arm" not in cols:
                 return {"status": "insufficient_data", "reason": "decision_arm not stamped yet"}
             rows = conn.execute(
-                f"SELECT decision_arm, realized_pnl FROM positions "
+                f"SELECT decision_arm, COALESCE(regime_at_entry,''), realized_pnl FROM positions "
                 f"WHERE {_REAL_CLOSE} AND decision_arm IN ('agentic','rules_only')").fetchall()
     except Exception as exc:
         return {"status": "error", "error": str(exc)}
     arms: dict[str, list[float]] = {"agentic": [], "rules_only": []}
-    for arm, pnl in rows:
+    by_reg: dict[str, dict[str, list[float]]] = {}
+    for arm, regime, pnl in rows:
         arms[arm].append(float(pnl))
-    def stat(xs: list[float]) -> dict[str, Any]:
-        n = len(xs)
-        return {"n": n, "expectancy": round(sum(xs) / n, 2) if n else None,
-                "win_rate": round(sum(1 for p in xs if p > 0) / n, 3) if n else None}
-    a, b = stat(arms["agentic"]), stat(arms["rules_only"])
+        by_reg.setdefault(regime or "(none)", {"agentic": [], "rules_only": []})[arm].append(float(pnl))
+    a, b = _arm_stat(arms["agentic"]), _arm_stat(arms["rules_only"])
+    by_regime = {
+        reg: {"agentic": _arm_stat(d["agentic"]), "rules_only": _arm_stat(d["rules_only"])}
+        for reg, d in sorted(by_reg.items())
+    }
     if a["n"] < _MIN_ARM_N or b["n"] < _MIN_ARM_N:
-        return {"status": "insufficient_data", "agentic": a, "rules_only": b,
+        return {"status": "insufficient_data", "agentic": a, "rules_only": b, "by_regime": by_regime,
                 "reason": f"need >= {_MIN_ARM_N} closes per arm"}
     beats = (a["expectancy"] or 0) > (b["expectancy"] or 0)
-    return {"status": "ready", "agentic": a, "rules_only": b,
+    return {"status": "ready", "agentic": a, "rules_only": b, "by_regime": by_regime,
             "agentic_beats_baseline": beats,
             "expectancy_delta": round((a["expectancy"] or 0) - (b["expectancy"] or 0), 2)}
 

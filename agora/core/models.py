@@ -238,6 +238,7 @@ class OpenPosition(BaseModel):
     # Decision context — stored at entry, read back at close for attribution
     conviction_at_entry: float = 0.0
     regime_at_entry: str = ""          # macro_stance at time of entry
+    decision_arm: str = "agentic"      # conviction A/B arm: 'agentic' (default) | 'rules_only'
 
     # Precise broker (TWS) fill timestamps — exact execution time, to the second (NOT just a date).
     entry_ts_utc: str = ""             # f.execution.time of the entry fill; exit set on close.
