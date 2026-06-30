@@ -416,3 +416,40 @@ class TestCreditWidthGate:
         # Direct credit verticals gate; ICs do not. This documents the exemption boundary.
         rec = engine.build_recommendation(conv, 100.0, _chain(33), direction_override="bullish")
         assert rec is None   # the vertical path IS gated (proves the gate is scoped + active)
+
+
+# ── BULLISH-DEBIT VETO (2026-06-30, SME-validated structure-selection fix) ────────────────────────
+class TestBullishDebitVeto:
+    """bull_call_spread fills ~11% in paper + is edge-flat, with no buildable positive-edge bullish
+    replacement → SKIP. Gated by route_bullish_debit, fully reversible. Veto sits AFTER override
+    resolution so it catches native AND selector-forced bull_call."""
+
+    def test_off_default_builds_bull_call_unchanged(self, engine):
+        # reversibility lock: default 'off' reproduces today's behavior
+        assert engine._settings.route_bullish_debit == "off"
+        conv = _conviction(StrategyPillar.CATALYST)
+        rec = engine.build_recommendation(conv, 100.0, _chain(23), direction_override="bullish")
+        assert rec is not None and rec.strategy == StrategyType.BULL_CALL_SPREAD
+
+    def test_skip_vetoes_native_bull_call(self, engine):
+        conv = _conviction(StrategyPillar.CATALYST)
+        engine._settings = engine._settings.model_copy(update={"route_bullish_debit": "skip"})
+        rec = engine.build_recommendation(conv, 100.0, _chain(23), direction_override="bullish")
+        assert rec is None, "bullish-directional bull_call must be vetoed (skipped) under 'skip'"
+
+    def test_skip_vetoes_selector_forced_bull_call(self, engine):
+        # POST_EARNINGS bullish is natively bull_put_spread; a selector override INTO bull_call must
+        # still be vetoed (→ None → caller falls back to the native non-bull_call structure).
+        conv = _conviction(StrategyPillar.POST_EARNINGS)
+        engine._settings = engine._settings.model_copy(update={"route_bullish_debit": "skip"})
+        rec = engine.build_recommendation(
+            conv, 100.0, _chain(23), direction_override="bullish",
+            force_strategy_type=StrategyType.BULL_CALL_SPREAD)
+        assert rec is None
+
+    def test_skip_does_not_touch_bearish_or_credit(self, engine):
+        # the veto is bull_call-ONLY: a bearish setup (bear_put) and a credit structure must still build
+        engine._settings = engine._settings.model_copy(update={"route_bullish_debit": "skip"})
+        bear = engine.build_recommendation(
+            _conviction(StrategyPillar.CATALYST), 100.0, _chain(23), direction_override="bearish")
+        assert bear is not None and bear.strategy == StrategyType.BEAR_PUT_SPREAD

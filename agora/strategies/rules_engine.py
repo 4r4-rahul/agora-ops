@@ -145,6 +145,19 @@ class StrategyRulesEngine:
             logger.info("Applying strategy override for %s: %s → %s (subject to leg/gate validation)",
                         conviction.ticker, strategy_type.value, force_strategy_type.value)
             strategy_type = force_strategy_type
+
+        # BULLISH-DEBIT VETO (2026-06-30, SME-validated). Placed AFTER override resolution so it catches
+        # bull_call_spread from BOTH the native _select_strategy branches AND a selector override into it
+        # (which then returns None → _apply_selector_override falls back to the engine's non-bull_call
+        # structure, never silently losing the trade). bull_call_spread fills ~11% in paper (80% of all
+        # timeouts) and is edge-flat; with no buildable positive-edge bullish replacement, SKIP is the
+        # honest move. Gated + reversible: route_bullish_debit='off' is a no-op.
+        if (strategy_type == StrategyType.BULL_CALL_SPREAD
+                and getattr(self._settings, "route_bullish_debit", "off") == "skip"):
+            self._record_gate(conviction.ticker,
+                              "skipped: bullish-debit veto (bull_call_spread ~11% fill / flat edge)")
+            return None
+
         target_dte = max(7, base_dte + eff_dte_adj)
 
         # Find the right expiry

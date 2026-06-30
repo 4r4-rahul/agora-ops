@@ -582,6 +582,18 @@ class AgoraSettings(BaseSettings):
                     "subtractive (can only DEFER an adoption, never flatten); genuine untracked orphans "
                     "still adopt on a later cycle. Set False to restore unconditional adoption.",
     )
+    route_bullish_debit: str = Field(
+        default="off",
+        description="STRUCTURE-SELECTION FIX (2026-06-30, SME-validated). bull_call_spread fills only ~11% "
+                    "in IBKR paper (80% of ALL execution timeouts) and is edge-FLAT (-$10 over n=8) — and "
+                    "there is NO buildable positive-edge bullish replacement: long_call/long_put aren't "
+                    "vertical-constructible, and bull_put_spread is the 2nd-WORST cell (-$2,741, 10% win). "
+                    "So the honest action is SKIP, not swap. 'skip' = veto every bull_call_spread selection "
+                    "(native AND a selector override into it falls back to the engine's non-bull_call "
+                    "structure) and record a 'bullish-debit veto' gate. 'off' = unchanged (reversibility "
+                    "lock). NOTE: 'skip' drops the bullish-DIRECTIONAL sleeve until single-leg long buildability "
+                    "is added; bearish/neutral/post-earnings are untouched.",
+    )
     paper_min_contracts: int = Field(
         default=1, ge=1, le=20,
         description="PAPER-ONLY minimum contracts per trade. RECALIBRATED 2026-06-26 from 3→1: a floor of "
