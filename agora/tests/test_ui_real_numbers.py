@@ -40,3 +40,7 @@ def test_today_endpoint_separates_real_from_fiction():
     assert "fiction_pnl_today" in src and "realized_pnl_today" in src
     assert '"adopted"' in src or "'adopted'" in src   # excludes adopted from the real total
     assert '"is_real"' in src and '"provenance"' in src   # each row flagged for the UI
+    # the query MUST filter status='closed' — else a reset/rolled row carrying a close_date + a real
+    # close_source would be summed into the headline (the SQL real_close_predicate guards status<>'reset';
+    # the row-filter here defaults status='closed', so the query must enforce it — predicate parity).
+    assert "status = 'closed'" in src or "status='closed'" in src

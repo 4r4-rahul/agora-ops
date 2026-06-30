@@ -1588,7 +1588,7 @@ async def get_today_summary() -> JSONResponse:
                       pillar, max_gain_dollars, max_loss_dollars,
                       conviction_at_entry, regime_at_entry, legs_json, expiry_date
                FROM positions
-               WHERE close_date = ?
+               WHERE close_date = ? AND status = 'closed'
                ORDER BY exit_ts_utc DESC, rowid DESC""",
             (today,),
         ).fetchall()

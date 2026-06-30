@@ -604,8 +604,11 @@ class AgoraSettings(BaseSettings):
                     "So the honest action is SKIP, not swap. 'skip' = veto every bull_call_spread selection "
                     "(native AND a selector override into it falls back to the engine's non-bull_call "
                     "structure) and record a 'bullish-debit veto' gate. 'off' = unchanged (reversibility "
-                    "lock). NOTE: 'skip' drops the bullish-DIRECTIONAL sleeve until single-leg long buildability "
-                    "is added; bearish/neutral/post-earnings are untouched.",
+                    "lock). NOTE: the veto fires AFTER selection, so it vetoes bull_call_spread from EVERY "
+                    "branch that picks it — directional-bullish, catalyst/smart-money-bullish AND EVENT_FOMC "
+                    "— i.e. the whole bull_call sleeve, until single-leg long buildability is added. "
+                    "bearish/neutral/credit/post-earnings and the SEPARATE long-options path (long_call/"
+                    "long_put, which fills fine) are untouched.",
     )
     paper_min_contracts: int = Field(
         default=1, ge=1, le=20,
