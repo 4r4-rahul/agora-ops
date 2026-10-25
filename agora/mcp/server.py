@@ -36,7 +36,7 @@ _DB_PATH     = os.environ.get("AGORA_DB_PATH", ".agora/agora.db")
 _TAVILY_KEY  = os.environ.get("TAVILY_API_KEY")
 _EDGAR_AGENT = os.environ.get(
     "EDGAR_USER_AGENT",
-    "AGORA Trading System rahulvari2021@gmail.com",
+    "AGORA Trading System contact@example.com",
 )
 
 # ── Build handler maps ────────────────────────────────────────────────────────

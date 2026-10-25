@@ -91,3 +91,7 @@ scalp_backtest_SPY_*.json
 Thumbs.db
 .agora/agora.db.bak-restate-*
 .coverage
+
+# never commit env backups
+.env.*
+!.env.example

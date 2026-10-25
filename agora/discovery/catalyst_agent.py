@@ -98,7 +98,7 @@ class CatalystDiscoveryAgent:
         self._db = self._init_seen_db()
         # MCP enrichment tools — insider trades + news verification
         _edgar_agent = getattr(settings or get_settings(), "edgar_user_agent",
-                               "AGORA Trading System rahulvari2021@gmail.com")
+                               "AGORA Trading System contact@example.com")
         _tavily_key  = getattr(settings or get_settings(), "tavily_api_key", None)
         self._edgar  = edgar_tool_handlers(_edgar_agent)
         self._search = search_tool_handlers(_tavily_key)

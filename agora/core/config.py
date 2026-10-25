@@ -916,7 +916,7 @@ class AgoraSettings(BaseSettings):
                     "Right-click channel in Discord (Developer Mode on) → Copy Channel ID.",
     )
     edgar_user_agent: str = Field(
-        default="AGORA Trading System rahulvari2021@gmail.com",
+        default="AGORA Trading System contact@example.com",
         description="User-Agent header required by SEC EDGAR API (SEC policy). "
                     "Format: 'AppName/version Contact@email'. Do not leave generic.",
     )
